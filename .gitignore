@@ -1,0 +1,22 @@
+# Build output
+bin/
+obj/
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+*.user
+*.suo
+
+# Test results
+[Tt]est[Rr]esults/
+*.trx
+coverage*.json
+coverage*.xml
+
+# Playwright driver/browsers (restored on build)
+.playwright/
+
+# Local secrets (copied from the old app; never commit)
+.env
+.env.local

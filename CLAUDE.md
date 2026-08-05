@@ -1,0 +1,175 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+A .NET 10 WinForms system-tray app (`net10.0-windows`, `WinExe`) that automates daily
+work-log entries to two destinations from a single tray icon:
+
+- **TSC**: a shared Excel workbook on SharePoint, written via the Microsoft Graph
+  Excel API (`GraphTscClient`).
+- **HRM**: `api-hrm.nois.vn` via its MCP server over Streamable HTTP (`HrmMcpClient`).
+
+This started as a C# port of a TypeScript web app at `C:\Project\log-system`, so many
+source files and tests still carry `// port of lib/*.ts` comments from that origin.
+**That web app is being retired; this .NET app is now the source of truth.** Do not
+treat parity with the old app as a constraint - change behavior on its own merits, and
+feel free to drop the stale "port of ..." comments as you touch files.
+
+## Build / run / test
+
+`NoisLogTray.slnx` (the SDK's current XML solution format) ties the four projects
+together: the main app, the test project, and the two smoke exes. All target
+`net10.0` (`-windows` for the app and tests). Run from the repo root.
+
+```sh
+# Build everything (resolves NoisLogTray.slnx)
+dotnet build
+
+# ...or just the tray app
+dotnet build NoisLogTray.csproj
+
+# Run the tray app (starts the NotifyIcon; there is no console UI)
+dotnet run --project NoisLogTray.csproj
+
+# All unit tests (xUnit)
+dotnet test tests/NoisLogTray.Tests
+
+# A single test class / test
+dotnet test tests/NoisLogTray.Tests --filter "FullyQualifiedName~TimeSlotsTests"
+dotnet test tests/NoisLogTray.Tests --filter "DisplayName~SplitsTwoTicketsEvenly"
+```
+
+The main `.csproj` excludes `tests/**` and `smoke/**` from compilation, and exposes
+internals to `NoisLogTray.Tests` via `InternalsVisibleTo`. Almost everything is
+`internal`; tests reach internals directly rather than through a public surface.
+
+### Smoke projects (manual, not part of the build)
+
+`smoke/SniffSmoke` and `smoke/HrmSmoke` are standalone `net10.0` console exes that
+verify the two risky integrations against **real credentials** (read from the
+project `.env`). Run them by hand when touching Playwright or MCP:
+
+```sh
+dotnet run --project smoke/SniffSmoke   # Playwright can launch Chrome + sniff a Graph token
+dotnet run --project smoke/HrmSmoke     # C# MCP client connects and sees log_timesheet
+```
+
+Playwright needs a browser installed once. `channel=chrome` uses the system Chrome:
+`pwsh bin/Debug/net10.0-windows/playwright.ps1 install chromium`.
+
+## Architecture
+
+Layered, with the UI at the top and two integration clients at the bottom. Pure
+logic is isolated into small, unit-tested modules.
+
+Folders follow the backend's WindowsApps convention (`Backend-DotNet/src/WindowsApps`)
+and all share the flat `NoisLogTray` namespace (folder does not equal namespace):
+- `Services/` - service + external-client classes: `LoggingService`, `SixPmScheduler`,
+  `StartupService`, `GraphTscClient`, `HrmMcpClient`, `JiraClient`, `TscTokenSniffer`,
+  `TicketQueue`.
+- `Helpers/` - utilities: `TicketParser`, `TimeSlots`, `TscCells`, `Timesheet`, `Hcm`,
+  `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppIcon`.
+- `Models/` - record types only: `QueueEntry`, `JiraSuggestion`/`JiraVerifyResult`,
+  `DrainResult`/`EntryLogResult`, `GraphTscOptions`, `TimeSlot`, `ToolEnvelope`.
+- `Interface/` - abstractions (`IJiraClient`, implemented by `JiraClient`).
+- `UI/` - WinForms. `Theme` is a central light/dark palette; controls read it at paint
+  time and subscribe to `Theme.Changed` to repaint (the header's Dark/Light button calls
+  `Theme.Toggle`; `MainForm.ApplyTheme` re-colors native controls). It defaults to dark
+  and persists the choice to `settings.json` (`Theme.Load` runs in `Program.Main`;
+  `Theme.Toggle` saves). Also `TrayApp`,
+  `MainForm`, and owner-drawn controls: `MacButton`
+  (rounded button), `Card` (rounded card surface), `RoundedHost` (rounded border
+  around native controls like the list/textbox), `RoundedDatePicker` (rounded date
+  field with a custom `ModernCalendar` popup in a rounded `CalendarPopupForm`, replacing
+  the native `DateTimePicker`/`MonthCalendar`), and `MiniProgress` (thin rounded bar).
+- `Program.cs` stays at the repo root.
+
+- **`Program.cs`** - entry point. Single-instance `Global\` mutex, global exception
+  handlers routed to `AppLogger`, then `Application.Run(new TrayApp())`.
+- **`TrayApp` (ApplicationContext)** - owns the process lifetime, the `NotifyIcon`
+  + context menu, and the scheduler. Background work (sniff, MCP, drain) runs off
+  the UI thread and is marshaled back through a hidden `Control` (`RunOnUi`) for
+  tooltip/balloon/log updates. `_draining` is an `Interlocked` guard so only one
+  drain runs at a time.
+- **`MainForm`** - the capture window: a standard-chrome window structured like the
+  old web app - a header (title + date), then stacked `Card`s: "Log entries" (a
+  "My tickets" list from `LoggingService.GetMyTicketsAsync`, click a row to add it,
+  + date/ticket), "Will log" (a live preview of the date + one `WillLogRow` per
+  ticket - a status dot, the colored ticket key, and its time slots; the dot reflects
+  Jira verification, green valid / red not found / amber error, via `VerifyTicketsAsync`
+  debounced on typing and on blur, suggestions pre-marked valid. The card grows to fit
+  all rows via `FitWillLogToContent` - no inner scroll), and "Actions" (Queue / Log now / Log TSC /
+  Log HRM / Check TSC / Re-auth). A read-only "Queued for 6 PM" card shows the persisted
+  queue (from `queue.json`) with a Clear button - refreshed on queue/clear, on window
+  activate, and after a drain (`RefreshQueuedView`, also called by `TrayApp`). A large
+  top status bar (hidden until used) shows
+  every activity line live (`AppendLog` -> log file + status) and the green/red result
+  of each action (`ShowStatus`), auto-cleared. Just below it, a log run shows TSC/HRM
+  progress bars - `LoggingService` forwards `onProgress(done,total)` callbacks to
+  `GraphTscClient` / `HrmMcpClient`. Ticket-dependent buttons are gated on valid input
+  via `UpdateActionState`.
+  `MacButton`, `Card`, and `RoundedHost` are owner-drawn
+  (no third-party UI library). Closing (X) **hides to tray**; `TrayApp` owns exit.
+  Icons come from the embedded `app.ico` via `AppIcon.Load(size)`.
+- **`LoggingService`** - orchestrator over both destinations plus Jira. `DrainQueueAsync`
+  is the core: sniff one Graph token, log every queued entry to both destinations
+  (`LogEntryAsync` runs TSC + HRM in parallel), and remove only entries that fully
+  succeeded. All methods take an `Action<string>? onLog` callback so the UI streams
+  progress.
+
+Bottom-layer clients:
+
+- **`GraphTscClient`** - writes the ticket to the Excel workbook via Graph. Target
+  `row = 2 + dayOfYear`, columns `M` (primary) and `J` (mirror), one worksheet per
+  year. Uses a persistent workbook session (`persistChanges:true`). **Fail-closed
+  date safety**: reads column B for the row and aborts if it does not match the
+  expected `M/D/YYYY`, to avoid ever logging the wrong day.
+- **`HrmMcpClient`** - calls the `log_timesheet` MCP tool (Bearer = `HRM_API_KEY`).
+  A time slot straddling lunch becomes two calls (first creates the task, second
+  appends).
+- **`TscTokenSniffer`** - Playwright-driven token source for Graph. Runs **headless**
+  to sniff a `Files.ReadWrite.All` Bearer off `office.com`/SharePoint from the saved
+  session, and to check the session; **only re-auth opens a visible browser**. Uses a
+  single on-disk Chrome profile at `~/.tsc-daily-log-browser`.
+- **`JiraClient`** - Jira Cloud REST (basic auth): verify a ticket, list "my tickets".
+
+Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timezone),
+`BrowserLock`, `AppLogger`, `StartupService` (Run-key logon registration),
+`SixPmScheduler`. Pure/tested helpers: `TscCells`, `TimeSlots`, `Timesheet`,
+`TicketParser`, `TicketQueue`.
+
+## Cross-cutting rules to preserve
+
+- **Idempotent re-runs.** Re-logging is safe: TSC skips a cell already equal to the
+  ticket; HRM treats `LOGTIME_OVERLAP` as an already-done skip. `DrainQueueAsync`
+  therefore only removes fully-succeeded entries and keeps the rest for retry. Do
+  not change drain to remove partially-failed entries.
+- **All time is Asia/Ho_Chi_Minh** and must go through `Hcm` (no DST; UTC+7 fallback
+  if the tz lookup fails). Worksheet year, day-of-year row, and HRM `workDate` all
+  derive from it. Consequence: HRM rejects future stop times, so **today's** queue
+  only succeeds from 18:00 on; past dates work anytime. `SixPmScheduler` fires the
+  auto-drain at 18:00 HCM in-process (replacing the old external Task Scheduler job).
+- **One browser at a time.** `LaunchPersistentContextAsync` locks the profile on
+  disk, so every Playwright entry point goes through `BrowserLock.TryAcquire()` /
+  `Release()` (reject-fast, not queued). HRM logging is browser-free and can run in
+  parallel with a TSC sniff.
+- **UI-thread marshaling.** Never touch WinForms controls from a background task
+  directly - use `TrayApp.RunOnUi` or the `InvokeRequired`/`BeginInvoke` guards in
+  `MainForm`. WinForms `async void` event handlers are the intended style here.
+- **Config load never crashes startup.** `AppConfig.TryLoad` returns `null` + a
+  message on a missing required key; the tray surfaces it as a warning balloon and
+  disables logging rather than throwing. Config is read from a `.env` in the
+  application directory - the project's `.env`, copied to the build output via the
+  csproj (`CopyToOutputDirectory`) and gitignored as a secret. Process environment is
+  the last-resort fallback (see `Env`).
+  Required keys: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `HRM_API_KEY`.
+  Optional: `HRM_PROJECT_ID`, `MS_GRAPH_TOKEN` (override that skips the sniff),
+  `TSC_GRAPH_DRIVE_ID` / `_ITEM_ID` / `_SHARE_URL` / `_WORKSHEET`.
+
+## Per-user data
+
+Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
+(the pending log queue), `settings.json`, and `logs/app.log`. A missing or malformed
+`queue.json` yields an empty queue by design so the 18:00 runner never throws.

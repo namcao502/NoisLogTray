@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/smoke/">
+    <Project Path="smoke/HrmSmoke/HrmSmoke.csproj" />
+    <Project Path="smoke/SniffSmoke/SniffSmoke.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/NoisLogTray.Tests/NoisLogTray.Tests.csproj" />
+  </Folder>
+  <Project Path="NoisLogTray.csproj" />
+</Solution>
