@@ -22,13 +22,14 @@ internal static class GraphTscClient
         return "u!" + b64.TrimEnd('=').Replace('/', '_').Replace('+', '-');
     }
 
-    // Decode a JWT's delegated scopes (scp/roles) for diagnostics.
-    internal static string DecodeJwtScopes(string token)
+    // Parse a JWT's payload (middle segment, base64url) into a JsonDocument, or null
+    // if the token is opaque/unparseable. Caller disposes the document.
+    private static JsonDocument? ParseJwtPayload(string token)
     {
         try
         {
             var parts = token.Split('.');
-            if (parts.Length < 2) return "";
+            if (parts.Length < 2) return null;
             var payload = parts[1].Replace('-', '+').Replace('_', '/');
             payload = (payload.Length % 4) switch
             {
@@ -37,18 +38,35 @@ internal static class GraphTscClient
                 _ => payload,
             };
             var json = Encoding.UTF8.GetString(Convert.FromBase64String(payload));
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-            if (root.TryGetProperty("scp", out var scp) && scp.ValueKind == JsonValueKind.String)
-                return scp.GetString() ?? "";
-            if (root.TryGetProperty("roles", out var roles) && roles.ValueKind == JsonValueKind.Array)
-                return string.Join(" ", roles.EnumerateArray().Select(r => r.GetString()));
-            return "";
+            return JsonDocument.Parse(json);
         }
         catch
         {
-            return "";
+            return null;
         }
+    }
+
+    // Decode a JWT's delegated scopes (scp/roles) for diagnostics.
+    internal static string DecodeJwtScopes(string token)
+    {
+        using var doc = ParseJwtPayload(token);
+        if (doc is null) return "";
+        var root = doc.RootElement;
+        if (root.TryGetProperty("scp", out var scp) && scp.ValueKind == JsonValueKind.String)
+            return scp.GetString() ?? "";
+        if (root.TryGetProperty("roles", out var roles) && roles.ValueKind == JsonValueKind.Array)
+            return string.Join(" ", roles.EnumerateArray().Select(r => r.GetString()));
+        return "";
+    }
+
+    // Decode a JWT's expiry (exp, Unix seconds). Null for opaque tokens or if absent.
+    internal static DateTimeOffset? DecodeJwtExpiry(string token)
+    {
+        using var doc = ParseJwtPayload(token);
+        if (doc is null) return null;
+        if (doc.RootElement.TryGetProperty("exp", out var exp) && exp.ValueKind == JsonValueKind.Number)
+            return DateTimeOffset.FromUnixTimeSeconds(exp.GetInt64());
+        return null;
     }
 
     internal static async Task<(bool Success, string Cell, string? Error)> WriteTicketAsync(

@@ -1,16 +1,23 @@
 namespace NoisLogTray;
 
-// Fires a callback at 18:00 Asia/Ho_Chi_Minh each day, then reschedules for the
-// next day. Replaces the external Task Scheduler job + wscript shim: the resident
-// tray process owns the timer. HRM rejects future stop times, so today's queue
-// only succeeds from 18:00 on (past dates work anytime).
+// Fires a callback at 18:00 Asia/Ho_Chi_Minh each day. Replaces the external Task
+// Scheduler job + wscript shim: the resident tray process owns the timer. HRM
+// rejects future stop times, so today's queue only succeeds from 18:00 on (past
+// dates work anytime).
+//
+// Rather than arm one long one-shot timer to the next 18:00 (which a sleep or clock
+// change can silently skip), it polls every minute and fires the first tick at or
+// after the target time. A late wake therefore still fires within ~1 minute.
 internal sealed class SixPmScheduler : IDisposable
 {
     private const int FireHour = 18;
+    private static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(60);
 
     private readonly Func<Task> _onFire;
     private readonly Action<string>? _log;
     private System.Threading.Timer? _timer;
+    private DateTimeOffset _nextFire;
+    private int _firing; // 0 = idle, 1 = a fire is running (re-entrancy guard)
     private bool _disposed;
 
     internal SixPmScheduler(Func<Task> onFire, Action<string>? log = null)
@@ -26,18 +33,19 @@ internal sealed class SixPmScheduler : IDisposable
         return now < todayFire ? todayFire : todayFire.AddDays(1);
     }
 
-    internal void Start() => ScheduleNext();
+    internal void Start()
+    {
+        _nextFire = NextFireTime();
+        _log?.Invoke($"[scheduler] Next auto-log at {_nextFire:yyyy-MM-dd HH:mm} (checking every {CheckInterval.TotalSeconds:0}s).");
+        _timer = new System.Threading.Timer(_ => Tick(), null, TimeSpan.Zero, CheckInterval);
+    }
 
-    private void ScheduleNext()
+    private void Tick()
     {
         if (_disposed) return;
-        var next = NextFireTime();
-        var delay = next - Hcm.Now();
-        if (delay < TimeSpan.Zero) delay = TimeSpan.Zero;
-
-        _log?.Invoke($"[scheduler] Next auto-log at {next:yyyy-MM-dd HH:mm} (in {delay:hh\\:mm}).");
-        _timer?.Dispose();
-        _timer = new System.Threading.Timer(_ => _ = FireAsync(), null, delay, Timeout.InfiniteTimeSpan);
+        if (Hcm.Now() < _nextFire) return;
+        if (Interlocked.CompareExchange(ref _firing, 1, 0) != 0) return; // a fire is already running
+        _ = FireAsync();
     }
 
     private async Task FireAsync()
@@ -54,7 +62,9 @@ internal sealed class SixPmScheduler : IDisposable
         }
         finally
         {
-            ScheduleNext();
+            _nextFire = NextFireTime();
+            _log?.Invoke($"[scheduler] Next auto-log at {_nextFire:yyyy-MM-dd HH:mm}.");
+            Interlocked.Exchange(ref _firing, 0);
         }
     }
 

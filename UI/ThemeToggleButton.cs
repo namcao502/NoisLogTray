@@ -18,6 +18,8 @@ internal sealed class ThemeToggleButton : Control
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
             | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         Cursor = Cursors.Hand;
+        AccessibleName = "Toggle light and dark theme";
+        AccessibleRole = AccessibleRole.PushButton;
         Theme.Changed += OnThemeChanged;
     }
 

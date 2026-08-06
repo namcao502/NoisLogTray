@@ -57,8 +57,31 @@ internal sealed class TrayApp : ApplicationContext
 
         _scheduler = new SixPmScheduler(() => DrainAsync(fromUser: false), Log);
         _scheduler.Start();
+        CatchUpIfDue();
 
         AppLogger.Info("Tray ready.");
+    }
+
+    // If the app was not running at 18:00 (asleep, off, or launched later), a queue
+    // that is already due would otherwise wait until the next 18:00. Drain once on
+    // startup when something is loggable now: a past-dated entry (loggable anytime),
+    // or a today entry once it is 18:00 or later (HRM rejects future stop times).
+    private void CatchUpIfDue()
+    {
+        if (_service == null) return;
+
+        var now = Hcm.Now();
+        var today = DateOnly.FromDateTime(now.DateTime);
+        var due = false;
+        foreach (var entry in TicketQueue.Read())
+        {
+            if (!DateOnly.TryParseExact(entry.Date, "yyyy-MM-dd", out var date)) continue;
+            if (date < today || (date == today && now.Hour >= 18)) { due = true; break; }
+        }
+
+        if (!due) return;
+        Log("[scheduler] Startup catch-up: queue has due entries; draining now.");
+        _ = DrainAsync(fromUser: false);
     }
 
     private void ShowForm()
@@ -135,6 +158,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         Notify("Opening a browser for TSC sign-in...", ToolTipIcon.Info);
         var (ok, error) = await TscTokenSniffer.ReauthenticateAsync(Log);
+        if (ok) _service?.InvalidateGraphToken();
         Notify(ok ? "TSC session saved." : $"Re-auth failed: {error}",
             ok ? ToolTipIcon.Info : ToolTipIcon.Warning);
     }

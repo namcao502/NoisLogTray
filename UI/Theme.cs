@@ -1,5 +1,4 @@
 using System.Drawing;
-using System.Text.Json;
 
 namespace NoisLogTray;
 
@@ -32,42 +31,14 @@ internal static class Theme
     internal static readonly Color AccentHover = Color.FromArgb(20, 132, 255);
 
     // Load the persisted choice (defaults to dark when there is no saved setting).
-    internal static void Load()
-    {
-        try
-        {
-            var path = AppPaths.SettingsPath;
-            if (!File.Exists(path)) return;
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
-            if (doc.RootElement.TryGetProperty("dark", out var d) &&
-                (d.ValueKind == JsonValueKind.True || d.ValueKind == JsonValueKind.False))
-                Dark = d.GetBoolean();
-        }
-        catch
-        {
-            // keep the default on any read/parse failure
-        }
-    }
+    internal static void Load() => Dark = AppSettings.Load().Dark;
 
     internal static void Toggle()
     {
         Dark = !Dark;
-        Save();
+        var settings = AppSettings.Load(); // read-modify-write to keep other keys
+        settings.Dark = Dark;
+        AppSettings.Save(settings);
         Changed?.Invoke();
-    }
-
-    private static void Save()
-    {
-        try
-        {
-            var path = AppPaths.SettingsPath;
-            var dir = Path.GetDirectoryName(path);
-            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-            File.WriteAllText(path, JsonSerializer.Serialize(new { dark = Dark }));
-        }
-        catch
-        {
-            // best effort; the preference just won't persist
-        }
     }
 }

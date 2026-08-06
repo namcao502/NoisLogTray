@@ -70,15 +70,15 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `StartupService`, `GraphTscClient`, `HrmMcpClient`, `JiraClient`, `TscTokenSniffer`,
   `TicketQueue`.
 - `Helpers/` - utilities: `TicketParser`, `TimeSlots`, `TscCells`, `Timesheet`, `Hcm`,
-  `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppIcon`.
+  `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppSettings`, `AppIcon`.
 - `Models/` - record types only: `QueueEntry`, `JiraSuggestion`/`JiraVerifyResult`,
   `DrainResult`/`EntryLogResult`, `GraphTscOptions`, `TimeSlot`, `ToolEnvelope`.
 - `Interface/` - abstractions (`IJiraClient`, implemented by `JiraClient`).
 - `UI/` - WinForms. `Theme` is a central light/dark palette; controls read it at paint
   time and subscribe to `Theme.Changed` to repaint (the header's Dark/Light button calls
   `Theme.Toggle`; `MainForm.ApplyTheme` re-colors native controls). It defaults to dark
-  and persists the choice to `settings.json` (`Theme.Load` runs in `Program.Main`;
-  `Theme.Toggle` saves). Also `TrayApp`,
+  and persists the choice through `AppSettings` (`Theme.Load` runs in `Program.Main`;
+  `Theme.Toggle` does a read-modify-write so it keeps the window position). Also `TrayApp`,
   `MainForm`, and owner-drawn controls: `MacButton`
   (rounded button), `Card` (rounded card surface), `RoundedHost` (rounded border
   around native controls like the list/textbox), `RoundedDatePicker` (rounded date
@@ -112,12 +112,17 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   via `UpdateActionState`.
   `MacButton`, `Card`, and `RoundedHost` are owner-drawn
   (no third-party UI library). Closing (X) **hides to tray**; `TrayApp` owns exit.
-  Icons come from the embedded `app.ico` via `AppIcon.Load(size)`.
+  Icons come from the embedded `app.ico` via `AppIcon.Load(size)`. The window position
+  is persisted via `AppSettings` (saved on move/close, restored on open only if it
+  still lands on a connected monitor, else centered).
 - **`LoggingService`** - orchestrator over both destinations plus Jira. `DrainQueueAsync`
   is the core: sniff one Graph token, log every queued entry to both destinations
   (`LogEntryAsync` runs TSC + HRM in parallel), and remove only entries that fully
   succeeded. All methods take an `Action<string>? onLog` callback so the UI streams
-  progress.
+  progress. `AcquireGraphTokenAsync` **caches** the sniffed token (reused until ~2 min
+  before its JWT `exp`, guarded by a `SemaphoreSlim`) so repeated TSC actions don't each
+  relaunch Chrome; `InvalidateGraphToken` clears it and is called after a successful
+  re-auth.
 
 Bottom-layer clients:
 
@@ -151,6 +156,11 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   derive from it. Consequence: HRM rejects future stop times, so **today's** queue
   only succeeds from 18:00 on; past dates work anytime. `SixPmScheduler` fires the
   auto-drain at 18:00 HCM in-process (replacing the old external Task Scheduler job).
+  It **polls every 60s** rather than arming one long one-shot timer, so a sleep/wake or
+  clock change can't silently skip the fire (a late wake still drains within ~1 min).
+  Complementing it, `TrayApp.CatchUpIfDue` drains once on startup when the queue already
+  has a due entry (a past date, or today once it's 18:00+) - covers the app not running
+  at 18:00.
 - **One browser at a time.** `LaunchPersistentContextAsync` locks the profile on
   disk, so every Playwright entry point goes through `BrowserLock.TryAcquire()` /
   `Release()` (reject-fast, not queued). HRM logging is browser-free and can run in
@@ -171,5 +181,7 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 ## Per-user data
 
 Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
-(the pending log queue), `settings.json`, and `logs/app.log`. A missing or malformed
-`queue.json` yields an empty queue by design so the 18:00 runner never throws.
+(the pending log queue), `settings.json` (theme + window position, via `AppSettings`),
+and `logs/app.log`. A missing or malformed `queue.json` yields an empty queue by design
+so the 18:00 runner never throws; `AppSettings` likewise falls back to defaults on a
+missing/bad `settings.json`.

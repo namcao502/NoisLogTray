@@ -8,6 +8,13 @@ internal sealed class LoggingService
     private readonly AppConfig _config;
     private readonly IJiraClient _jira;
 
+    // Cached sniffed Graph token, reused until shortly before it expires so repeated
+    // TSC operations do not each relaunch headless Chrome. Guarded by _tokenLock.
+    private static readonly TimeSpan TokenSafetyBuffer = TimeSpan.FromMinutes(2);
+    private readonly SemaphoreSlim _tokenLock = new(1, 1);
+    private string? _cachedToken;
+    private DateTimeOffset _cachedTokenExpiry;
+
     internal LoggingService(AppConfig config)
     {
         _config = config;
@@ -20,8 +27,9 @@ internal sealed class LoggingService
     internal Task<IReadOnlyList<JiraSuggestion>> GetMyTicketsAsync(int limit = 5, CancellationToken ct = default)
         => _jira.GetMyTicketsAsync(limit, ct);
 
-    // Prefer MS_GRAPH_TOKEN override; otherwise sniff a delegated token from the
-    // saved TSC session (launches headless Chrome once, guarded by BrowserLock).
+    // Prefer MS_GRAPH_TOKEN override; otherwise return a cached sniffed token while
+    // it is still valid, and only sniff a fresh one (launches headless Chrome once,
+    // guarded by BrowserLock) when there is no usable cached token.
     internal async Task<string?> AcquireGraphTokenAsync(Action<string>? onLog = null)
     {
         if (!string.IsNullOrEmpty(_config.MsGraphToken))
@@ -29,9 +37,46 @@ internal sealed class LoggingService
             onLog?.Invoke("[tsc] Using MS_GRAPH_TOKEN override.");
             return _config.MsGraphToken;
         }
-        onLog?.Invoke("[tsc] Sniffing Graph token from the saved TSC session...");
-        var sniff = await TscTokenSniffer.SniffGraphTokenAsync(onLog);
-        return sniff?.Token;
+
+        await _tokenLock.WaitAsync();
+        try
+        {
+            if (_cachedToken != null && DateTimeOffset.UtcNow < _cachedTokenExpiry - TokenSafetyBuffer)
+            {
+                onLog?.Invoke("[tsc] Reusing cached Graph token.");
+                return _cachedToken;
+            }
+
+            onLog?.Invoke("[tsc] Sniffing Graph token from the saved TSC session...");
+            var sniff = await TscTokenSniffer.SniffGraphTokenAsync(onLog);
+            if (sniff is null) return null;
+
+            _cachedToken = sniff.Value.Token;
+            // Fall back to a short window if the token is opaque (no decodable exp).
+            _cachedTokenExpiry = GraphTscClient.DecodeJwtExpiry(sniff.Value.Token)
+                ?? DateTimeOffset.UtcNow.AddMinutes(30);
+            return _cachedToken;
+        }
+        finally
+        {
+            _tokenLock.Release();
+        }
+    }
+
+    // Drop any cached Graph token so the next log re-sniffs. Call after a re-auth so
+    // a stale token from a previous session is not reused.
+    internal void InvalidateGraphToken()
+    {
+        _tokenLock.Wait();
+        try
+        {
+            _cachedToken = null;
+            _cachedTokenExpiry = default;
+        }
+        finally
+        {
+            _tokenLock.Release();
+        }
     }
 
     internal async Task<(bool Success, string Cell, string? Error)> LogTscAsync(

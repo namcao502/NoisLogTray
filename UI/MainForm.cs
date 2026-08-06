@@ -12,6 +12,7 @@ internal sealed class MainForm : Form
     private static readonly Font KeyFont = new("Segoe UI", 9F, FontStyle.Bold);
     private static readonly Font SummaryFont = new("Segoe UI", 9F);
     private static readonly Font SectionFont = new("Segoe UI", 8.5F, FontStyle.Bold);
+    private static readonly Font WillLogFont = new("Segoe UI", 8.5F, FontStyle.Bold);
 
     // Per-ticket accent colours, tuned per theme so the key text stays readable:
     // bright shades on dark, deeper shades on light. Same index = same hue.
@@ -117,13 +118,46 @@ internal sealed class MainForm : Form
         Icon = AppIcon.Load(32);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
-        StartPosition = FormStartPosition.CenterScreen;
         BackColor = Theme.WindowBg;
         ClientSize = new Size(600, 868);
+        RestoreWindowPosition();
 
         BuildBody();
         BuildProgressPanel();
         BuildStatusBar();
+    }
+
+    // Restore the last window position if it still lands on a connected monitor;
+    // otherwise center (the saved monitor may be gone).
+    private void RestoreWindowPosition()
+    {
+        var settings = AppSettings.Load();
+        if (settings.WindowX is int x && settings.WindowY is int y &&
+            Screen.AllScreens.Any(s => s.WorkingArea.Contains(new Point(x, y))))
+        {
+            StartPosition = FormStartPosition.Manual;
+            Location = new Point(x, y);
+        }
+        else
+        {
+            StartPosition = FormStartPosition.CenterScreen;
+        }
+    }
+
+    // Persist the window position (read-modify-write so the theme key is preserved).
+    private void SaveWindowPosition()
+    {
+        if (WindowState != FormWindowState.Normal) return;
+        var settings = AppSettings.Load();
+        settings.WindowX = Location.X;
+        settings.WindowY = Location.Y;
+        AppSettings.Save(settings);
+    }
+
+    protected override void OnResizeEnd(EventArgs e)
+    {
+        base.OnResizeEnd(e);
+        SaveWindowPosition();
     }
 
     private void BuildBody()
@@ -549,7 +583,7 @@ internal sealed class MainForm : Form
     {
         _lastSuggestions = tickets;
         foreach (var s in tickets) _verify[s.Key] = (VState.Valid, s.Summary);
-        _suggestions.Controls.Clear();
+        ClearRows(_suggestions);
         if (tickets.Count == 0)
         {
             SetSuggestionStatus("No open tickets found.");
@@ -562,6 +596,15 @@ internal sealed class MainForm : Form
 
         foreach (var t in tickets)
             _suggestions.Controls.Add(CreateSuggestionRow(t, rowWidth));
+    }
+
+    // Remove and dispose a container's child rows (Controls.Clear alone would leak
+    // their GDI handles until finalization).
+    private static void ClearRows(Control container)
+    {
+        var stale = container.Controls.Cast<Control>().ToArray();
+        container.Controls.Clear();
+        foreach (var c in stale) c.Dispose();
     }
 
     private static Color TicketColor(string key)
@@ -651,7 +694,7 @@ internal sealed class MainForm : Form
 
     private void SetSuggestionStatus(string message)
     {
-        _suggestions.Controls.Clear();
+        ClearRows(_suggestions);
         _suggestionStatus.Text = message;
     }
 
@@ -662,7 +705,7 @@ internal sealed class MainForm : Form
     {
         if (_willLogList.IsDisposed) return;
         _willLogList.SuspendLayout();
-        _willLogList.Controls.Clear();
+        ClearRows(_willLogList);
 
         var (tickets, _) = TicketParser.Parse(_tickets.Text);
         var rowWidth = Math.Max(140, _willLogList.ClientSize.Width - 8);
@@ -710,7 +753,7 @@ internal sealed class MainForm : Form
         Width = width,
         Height = 20,
         Margin = new Padding(0),
-        Font = new Font("Segoe UI", 8.5F, FontStyle.Bold),
+        Font = WillLogFont,
         ForeColor = Theme.TextSecondary,
         BackColor = Color.Transparent,
         TextAlign = ContentAlignment.MiddleLeft,
@@ -755,16 +798,19 @@ internal sealed class MainForm : Form
         foreach (var k in pending) _verify[k] = (VState.Verifying, null);
         UpdateWillLog();
 
-        foreach (var k in pending)
+        // Fire all lookups at once, then apply each result as it resolves (awaits
+        // resume on the UI thread, so _verify stays single-threaded).
+        var lookups = pending.Select(k => (Key: k, Task: _service.VerifyAsync(k))).ToList();
+        foreach (var (key, task) in lookups)
         {
             try
             {
-                var r = await _service.VerifyAsync(k);
-                _verify[k] = (r.Valid ? VState.Valid : VState.NotFound, r.Summary);
+                var r = await task;
+                _verify[key] = (r.Valid ? VState.Valid : VState.NotFound, r.Summary);
             }
             catch
             {
-                _verify[k] = (VState.Error, null);
+                _verify[key] = (VState.Error, null);
             }
             UpdateWillLog();
         }
@@ -926,6 +972,7 @@ internal sealed class MainForm : Form
         try
         {
             var (ok, error) = await TscTokenSniffer.ReauthenticateAsync(AppendLog);
+            if (ok) _service?.InvalidateGraphToken();
             AppendLog(ok ? "[tsc] Session saved." : $"[tsc] Re-auth failed: {error}");
             ShowStatus(ok ? "TSC session saved." : $"Re-auth failed: {error}", ok);
         }
@@ -981,6 +1028,7 @@ internal sealed class MainForm : Form
         if (e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
+            SaveWindowPosition();
             Hide();
             return;
         }
