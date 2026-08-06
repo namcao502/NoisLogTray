@@ -120,8 +120,10 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   + date/ticket), "Will log" (a live preview of the date + one `WillLogRow` per
   ticket - a status dot, the colored ticket key, and its time slots; the dot reflects
   Jira verification, green valid / red not found / amber error, via `VerifyTicketsAsync`
-  debounced on typing and on blur, suggestions pre-marked valid. The card grows to fit
-  all rows via `FitWillLogToContent` - no inner scroll), and "Actions" (Queue / Log now / Log TSC /
+  debounced on typing and on blur, suggestions pre-marked valid. When the input is
+  empty it falls back to the queued tickets for the selected date (`PreviewTickets`,
+  headed "(queued for 6 PM)") so reopening the window still shows what is scheduled.
+  The card grows to fit all rows via `FitWillLogToContent` - no inner scroll), and "Actions" (Queue / Log now / Log TSC /
   Log HRM / Check TSC / Re-auth). A read-only "Queued for 6 PM" card shows the persisted
   queue (from `queue.json`) with a Clear button - refreshed on queue/clear, on window
   activate, and after a drain (`RefreshQueuedView`, also called by `TrayApp`). A large

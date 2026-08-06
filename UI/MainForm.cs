@@ -100,8 +100,7 @@ internal sealed class MainForm : Form
         _service = service;
         BuildLayout();
         Theme.Changed += ApplyTheme;
-        RefreshQueuedView();
-        UpdateWillLog();
+        RefreshQueuedView(); // also renders the Will log (falls back to the queue)
         if (configError != null) AppendLog($"[config] {configError}");
         LoadMyTicketsAsync();
     }
@@ -257,7 +256,7 @@ internal sealed class MainForm : Form
 
         _date.Location = new Point(16, 300);
         _date.Size = new Size(190, 30);
-        _date.ValueChanged += (_, _) => UpdateWillLog();
+        _date.ValueChanged += (_, _) => { UpdateWillLog(); VerifyTicketsAsync(); };
 
         var ticketHost = new RoundedHost { Location = new Point(214, 300), Size = new Size(262, 30) };
         _tickets.BorderStyle = BorderStyle.None;
@@ -271,8 +270,8 @@ internal sealed class MainForm : Form
         _tickets.SetBounds(10, (ticketHost.Height - ticketH) / 2, ticketHost.Width - 20, ticketH);
         ticketHost.Controls.Add(_tickets);
 
-        _clearBtn.Size = new Size(64, 26);
-        _clearBtn.Location = new Point(480, 302);
+        _clearBtn.Size = new Size(64, 30); // match the date/ticket input height
+        _clearBtn.Location = new Point(480, 300);
         _clearBtn.Click += (_, _) => _tickets.Text = string.Empty;
 
         card.Controls.Add(sugHost);
@@ -333,28 +332,36 @@ internal sealed class MainForm : Form
         var card = new Card { Size = new Size(CardW, 132) };
         card.Controls.Add(SectionLabel("ACTIONS", 16, 14));
 
-        _queueBtn.Size = new Size(250, 40);
+        // Two rows on a shared column grid (12px gutter). The 2-up top row and the
+        // 4-up bottom row line up: each top button spans exactly two bottom columns,
+        // so the left/center/right edges match across both rows.
+        const int gap = 12;
+        const int half = (InnerW - gap) / 2;      // 258: top-row button width
+        const int quarter = (InnerW - 3 * gap) / 4; // 123: bottom-row button width
+        var col2 = 16 + half + gap;               // 286: start of the right column
+
+        _queueBtn.Size = new Size(half, 40);
         _queueBtn.Location = new Point(16, 36);
         _queueBtn.Click += OnQueue;
 
-        _logNowBtn.Size = new Size(268, 40);
-        _logNowBtn.Location = new Point(276, 36);
+        _logNowBtn.Size = new Size(half, 40);
+        _logNowBtn.Location = new Point(col2, 36);
         _logNowBtn.Click += OnLogNow;
 
-        _logTscBtn.Size = new Size(124, 32);
+        _logTscBtn.Size = new Size(quarter, 32);
         _logTscBtn.Location = new Point(16, 84);
         _logTscBtn.Click += OnLogTsc;
 
-        _logHrmBtn.Size = new Size(124, 32);
-        _logHrmBtn.Location = new Point(150, 84);
+        _logHrmBtn.Size = new Size(quarter, 32);
+        _logHrmBtn.Location = new Point(16 + quarter + gap, 84);
         _logHrmBtn.Click += OnLogHrm;
 
-        _checkBtn.Size = new Size(124, 32);
-        _checkBtn.Location = new Point(284, 84);
+        _checkBtn.Size = new Size(quarter, 32);
+        _checkBtn.Location = new Point(col2, 84);
         _checkBtn.Click += OnCheckTsc;
 
-        _reauthBtn.Size = new Size(124, 32);
-        _reauthBtn.Location = new Point(418, 84);
+        _reauthBtn.Size = new Size(quarter, 32);
+        _reauthBtn.Location = new Point(col2 + quarter + gap, 84);
         _reauthBtn.Click += OnReauth;
 
         card.Controls.Add(_queueBtn);
@@ -698,6 +705,25 @@ internal sealed class MainForm : Form
         _suggestionStatus.Text = message;
     }
 
+    // The tickets currently previewed in "Will log": what is typed, or - when nothing
+    // is typed - the queued tickets for the selected date, so reopening the window
+    // still shows what is scheduled to log at 6 PM.
+    private IReadOnlyList<string> PreviewTickets(out bool fromQueue)
+    {
+        fromQueue = false;
+        var (typed, _) = TicketParser.Parse(_tickets.Text);
+        if (typed.Count != 0) return typed;
+
+        var date = DateOnly.FromDateTime(_date.Value.Date).ToString("yyyy-MM-dd");
+        var entry = TicketQueue.Read().FirstOrDefault(e => e.Date == date);
+        if (entry != null && entry.Tickets.Count != 0)
+        {
+            fromQueue = true;
+            return entry.Tickets;
+        }
+        return typed;
+    }
+
     // Preview what will be logged: the date, then each ticket with its Jira
     // verification status (green = valid + title, red = not found, amber = error) and
     // its time slots.
@@ -707,7 +733,7 @@ internal sealed class MainForm : Form
         _willLogList.SuspendLayout();
         ClearRows(_willLogList);
 
-        var (tickets, _) = TicketParser.Parse(_tickets.Text);
+        var tickets = PreviewTickets(out var fromQueue);
         var rowWidth = Math.Max(140, _willLogList.ClientSize.Width - 8);
 
         if (tickets.Count == 0)
@@ -716,7 +742,8 @@ internal sealed class MainForm : Form
         }
         else
         {
-            _willLogList.Controls.Add(WillLogText(_date.Value.ToString("dddd, MMMM d, yyyy"), rowWidth));
+            var header = _date.Value.ToString("dddd, MMMM d, yyyy") + (fromQueue ? "   (queued for 6 PM)" : "");
+            _willLogList.Controls.Add(WillLogText(header, rowWidth));
             for (var i = 0; i < tickets.Count; i++)
                 _willLogList.Controls.Add(CreateWillLogRow(tickets[i], TimeSlots.Get(tickets.Count, i), rowWidth));
         }
@@ -786,12 +813,13 @@ internal sealed class MainForm : Form
         };
     }
 
-    // Verify each typed ticket against Jira (debounced), showing valid+title or
-    // not-found in the "Will log" list. Known suggestions are pre-marked valid.
+    // Verify each previewed ticket against Jira (debounced), showing valid+title or
+    // not-found in the "Will log" list. Covers the queued fallback too, so reopening
+    // the window shows real status dots. Known suggestions are pre-marked valid.
     private async void VerifyTicketsAsync()
     {
         if (_service is null) return;
-        var (tickets, _) = TicketParser.Parse(_tickets.Text);
+        var tickets = PreviewTickets(out _);
         var pending = tickets.Where(k => !_verify.ContainsKey(k)).Distinct().ToList();
         if (pending.Count == 0) return;
 
@@ -858,6 +886,8 @@ internal sealed class MainForm : Form
 
     // Read the persisted 6 PM queue and show it (read-only) so it stays visible after
     // a relaunch. Refreshed on queue/clear, when the window activates, and after a drain.
+    // Also refreshes the "Will log" preview, which falls back to the queue when the
+    // input is empty.
     internal void RefreshQueuedView()
     {
         if (InvokeRequired)
@@ -870,11 +900,16 @@ internal sealed class MainForm : Form
         {
             _queuedLabel.Text = "Nothing queued.";
             _clearQueueBtn.Enabled = false;
-            return;
         }
-        _queuedLabel.Text = string.Join(Environment.NewLine,
-            entries.Select(e => $"{e.Date}:   {string.Join(", ", e.Tickets)}"));
-        _clearQueueBtn.Enabled = true;
+        else
+        {
+            _queuedLabel.Text = string.Join(Environment.NewLine,
+                entries.Select(e => $"{e.Date}:   {string.Join(", ", e.Tickets)}"));
+            _clearQueueBtn.Enabled = true;
+        }
+
+        UpdateWillLog();
+        VerifyTicketsAsync();
     }
 
     private async void OnLogNow(object? sender, EventArgs e)
