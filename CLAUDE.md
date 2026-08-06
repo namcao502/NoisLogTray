@@ -108,25 +108,29 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   + context menu, and the scheduler. Background work (sniff, MCP, drain) runs off
   the UI thread and is marshaled back through a hidden `Control` (`RunOnUi`) for
   tooltip/balloon/log updates. `_draining` is an `Interlocked` guard so only one
-  drain runs at a time. When config is missing at startup it shows `CredentialsForm`
-  (first-run), and the "Edit credentials..." menu item reopens it; saving writes the
-  per-user `.env` and rebuilds `_service`, then opens the window so the user sees it
-  worked. The dialog **verifies** the entered credentials before saving (Jira via
-  `/myself`, HRM via an MCP connect) and rejects a bad token/key inline; an unreachable
-  service falls back to a "save anyway?" prompt so offline setup isn't blocked.
+  drain runs at a time. When config is missing it runs `RunFirstRunSetup` (a
+  `BeginInvoke` after the message loop starts, not a modal in the ctor) to show
+  `CredentialsForm`; the "Edit credentials..." menu item reopens it. Saving writes the
+  per-user `.env`, rebuilds `_service` via `ReloadServiceAndShow`, and opens the window
+  so the user sees it worked. The dialog **verifies** the entered credentials before
+  saving (Jira via `/myself`, HRM via an MCP connect) and rejects a bad token/key inline;
+  an unreachable service falls back to a "save anyway?" prompt so offline setup isn't
+  blocked. A successful TSC re-auth (tray or window, via the `ReauthSucceeded` event)
+  calls `CatchUpIfDue` to retry any queue entries that were waiting on sign-in.
 - **`MainForm`** - the capture window: a standard-chrome window structured like the
   old web app - a header (title + date), then stacked `Card`s: "Log entries" (a
   "My tickets" list from `LoggingService.GetMyTicketsAsync`, click a row to add it,
-  + date/ticket), "Will log" (a live preview of the date + one `WillLogRow` per
-  ticket - a status dot, the colored ticket key, and its time slots; the dot reflects
-  Jira verification, green valid / red not found / amber error, via `VerifyTicketsAsync`
-  debounced on typing and on blur, suggestions pre-marked valid. When the input is
-  empty it falls back to the queued tickets for the selected date (`PreviewTickets`,
-  headed "(queued for 6 PM)") so reopening the window still shows what is scheduled.
-  The card grows to fit all rows via `FitWillLogToContent` - no inner scroll), and "Actions" (Queue / Log now / Log TSC /
-  Log HRM / Check TSC / Re-auth). A read-only "Queued for 6 PM" card shows the persisted
-  queue (from `queue.json`) with a Clear button - refreshed on queue/clear, on window
-  activate, and after a drain (`RefreshQueuedView`, also called by `TrayApp`). A large
+  + date/ticket), "Will log" (one `WillLogRow` per ticket - a status dot, the colored
+  ticket key, and its time slots; the dot reflects Jira verification, green valid /
+  red not found / amber error, via `VerifyTicketsAsync` debounced on typing and on
+  blur, suggestions pre-marked valid. While typing it previews the typed tickets for
+  the selected date; with the input empty it falls back to the **whole persisted
+  queue** grouped by date (each headed "(queued for 6 PM)"), and shows a "Clear queue"
+  button - this is the single view of what's scheduled (there is no separate queue
+  card). The card grows to fit all rows via `FitWillLogToContent` - no inner scroll),
+  and "Actions" (Queue / Log now / Log TSC /
+  Log HRM / Check TSC / Re-auth). `RefreshQueuedView` (called on queue/clear, on window
+  activate, and after a drain, including by `TrayApp`) just re-renders "Will log". A large
   top status bar (hidden until used) shows
   every activity line live (`AppendLog` -> log file + status) and the green/red result
   of each action (`ShowStatus`), auto-cleared. Just below it, a log run shows TSC/HRM
@@ -178,13 +182,17 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 - **All time is Asia/Ho_Chi_Minh** and must go through `Hcm` (no DST; UTC+7 fallback
   if the tz lookup fails). Worksheet year, day-of-year row, and HRM `workDate` all
   derive from it. Consequence: HRM rejects future stop times, so **today's** queue
-  only succeeds from 18:00 on; past dates work anytime. `SixPmScheduler` fires the
+  only succeeds from 18:00 on; past dates work anytime. `MainForm.HrmClosedForToday`
+  blocks Log now / Log HRM for today before 18:00 with an explanatory status (Queue
+  instead), rather than letting HRM fail confusingly. `SixPmScheduler` fires the
   auto-drain at 18:00 HCM in-process (replacing the old external Task Scheduler job).
   It **polls every 60s** rather than arming one long one-shot timer, so a sleep/wake or
   clock change can't silently skip the fire (a late wake still drains within ~1 min).
-  Complementing it, `TrayApp.CatchUpIfDue` drains once on startup when the queue already
-  has a due entry (a past date, or today once it's 18:00+) - covers the app not running
-  at 18:00.
+  Complementing it, `TrayApp.CatchUpIfDue` drains when the queue already has a due
+  entry (a past date, or today once it's 18:00+) - run on startup and after a
+  successful TSC re-auth, so entries kept by a logged-out drain retry automatically.
+  Note: the date picker is in local time; for a user outside Vietnam a near-midnight
+  pick can differ from the HCM day (a tooltip on the date field flags this).
 - **One browser at a time.** `LaunchPersistentContextAsync` locks the profile on
   disk, so every Playwright entry point goes through `BrowserLock.TryAcquire()` /
   `Release()` (reject-fast, not queued). HRM logging is browser-free and can run in

@@ -54,6 +54,7 @@ internal sealed class MainForm : Form
     private readonly List<Panel> _dividers = new();
 
     private readonly RoundedDatePicker _date = new();
+    private readonly ToolTip _tips = new();
     private readonly TextBox _tickets = new();
     private readonly MacButton _queueBtn = MacButton.Primary("Queue for 6 PM");
     private readonly MacButton _logNowBtn = MacButton.Secondary("Log now (TSC + HRM)");
@@ -68,12 +69,10 @@ internal sealed class MainForm : Form
     private readonly FlowLayoutPanel _willLogList = new();
     private readonly System.Windows.Forms.Timer _verifyTimer = new() { Interval = 500 };
     private readonly Dictionary<string, (VState State, string? Title)> _verify = new();
-    private readonly Label _queuedLabel = new();
-    private readonly MacButton _clearQueueBtn = MacButton.Secondary("Clear");
+    private readonly MacButton _clearQueueBtn = MacButton.Secondary("Clear queue");
 
     private Card? _willLogCard;
     private RoundedHost? _willLogHost;
-    private Card? _queuedCard;
     private Card? _actionsCard;
 
     private readonly Panel _statusBar = new();
@@ -94,6 +93,9 @@ internal sealed class MainForm : Form
     private enum VState { Verifying, Valid, NotFound, Error }
 
     internal event Action? QueueChanged;
+
+    // Raised after a successful TSC re-auth so the tray can retry any due queue entries.
+    internal event Action? ReauthSucceeded;
 
     internal MainForm(LoggingService? service, string? configError)
     {
@@ -118,7 +120,7 @@ internal sealed class MainForm : Form
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         BackColor = Theme.WindowBg;
-        ClientSize = new Size(600, 868);
+        ClientSize = new Size(600, 758); // queued card removed; Will log now shows the queue
         RestoreWindowPosition();
 
         BuildBody();
@@ -180,11 +182,6 @@ internal sealed class MainForm : Form
         willLog.Location = new Point(20, y);
         _body.Controls.Add(willLog);
         y += willLog.Height + 12;
-
-        var queued = BuildQueuedCard();
-        queued.Location = new Point(20, y);
-        _body.Controls.Add(queued);
-        y += queued.Height + 12;
 
         var actions = BuildActionsCard();
         actions.Location = new Point(20, y);
@@ -257,6 +254,7 @@ internal sealed class MainForm : Form
         _date.Location = new Point(16, 300);
         _date.Size = new Size(190, 30);
         _date.ValueChanged += (_, _) => { UpdateWillLog(); VerifyTicketsAsync(); };
+        _tips.SetToolTip(_date, "Dates and the 6 PM auto-log use Vietnam time (Asia/Ho_Chi_Minh, UTC+7).");
 
         var ticketHost = new RoundedHost { Location = new Point(214, 300), Size = new Size(262, 30) };
         _tickets.BorderStyle = BorderStyle.None;
@@ -286,6 +284,14 @@ internal sealed class MainForm : Form
         var card = new Card { Size = new Size(CardW, 90) };
         card.Controls.Add(SectionLabel("WILL LOG", 16, 14));
 
+        // Clears the persisted queue; only shown while the card is displaying the
+        // queued fallback (input empty + something queued).
+        _clearQueueBtn.Size = new Size(90, 24);
+        _clearQueueBtn.Location = new Point(16 + InnerW - 90, 10);
+        _clearQueueBtn.Visible = false;
+        _clearQueueBtn.Click += OnClearQueue;
+        card.Controls.Add(_clearQueueBtn);
+
         var host = new RoundedHost { Location = new Point(16, 38), Size = new Size(InnerW, 40) };
         _willLogList.Dock = DockStyle.Fill;
         _willLogList.FlowDirection = FlowDirection.TopDown;
@@ -300,30 +306,6 @@ internal sealed class MainForm : Form
         card.Controls.Add(host);
         _willLogCard = card;
         _willLogHost = host;
-        return card;
-    }
-
-    private Card BuildQueuedCard()
-    {
-        var card = new Card { Size = new Size(CardW, 98) };
-        card.Controls.Add(SectionLabel("QUEUED FOR 6 PM", 16, 14));
-
-        _clearQueueBtn.Size = new Size(90, 26);
-        _clearQueueBtn.Location = new Point(16 + InnerW - 90, 10);
-        _clearQueueBtn.Click += OnClearQueue;
-        card.Controls.Add(_clearQueueBtn);
-
-        var host = new RoundedHost { Location = new Point(16, 42), Size = new Size(InnerW, 40) };
-        _queuedLabel.Dock = DockStyle.Fill;
-        _queuedLabel.TextAlign = ContentAlignment.MiddleLeft;
-        _queuedLabel.Font = new Font("Segoe UI", 9F);
-        _queuedLabel.ForeColor = Theme.TextPrimary;
-        _queuedLabel.BackColor = Theme.InputBg;
-        _queuedLabel.Padding = new Padding(8, 0, 8, 0);
-        host.Controls.Add(_queuedLabel);
-
-        card.Controls.Add(host);
-        _queuedCard = card;
         return card;
     }
 
@@ -410,8 +392,6 @@ internal sealed class MainForm : Form
         _suggestionStatus.BackColor = Theme.InputBg;
         _suggestionStatus.ForeColor = Theme.TextSecondary;
         _willLogList.BackColor = Theme.InputBg;
-        _queuedLabel.BackColor = Theme.InputBg;
-        _queuedLabel.ForeColor = Theme.TextPrimary;
 
         _tscLabel.ForeColor = Theme.TextSecondary;
         _hrmLabel.ForeColor = Theme.TextSecondary;
@@ -705,51 +685,63 @@ internal sealed class MainForm : Form
         _suggestionStatus.Text = message;
     }
 
-    // The tickets currently previewed in "Will log": what is typed, or - when nothing
-    // is typed - the queued tickets for the selected date, so reopening the window
-    // still shows what is scheduled to log at 6 PM.
-    private IReadOnlyList<string> PreviewTickets(out bool fromQueue)
+    // The distinct tickets currently shown in "Will log" (for Jira verification):
+    // what is typed, or - when nothing is typed - every queued ticket across all dates.
+    private IReadOnlyList<string> ShownTickets()
     {
-        fromQueue = false;
         var (typed, _) = TicketParser.Parse(_tickets.Text);
         if (typed.Count != 0) return typed;
-
-        var date = DateOnly.FromDateTime(_date.Value.Date).ToString("yyyy-MM-dd");
-        var entry = TicketQueue.Read().FirstOrDefault(e => e.Date == date);
-        if (entry != null && entry.Tickets.Count != 0)
-        {
-            fromQueue = true;
-            return entry.Tickets;
-        }
-        return typed;
+        return TicketQueue.Read().SelectMany(e => e.Tickets).Distinct().ToList();
     }
 
-    // Preview what will be logged: the date, then each ticket with its Jira
-    // verification status (green = valid + title, red = not found, amber = error) and
-    // its time slots.
+    // Render "Will log". While typing, it previews the typed tickets for the selected
+    // date. With the input empty it falls back to the whole persisted queue (grouped
+    // by date, each headed "(queued for 6 PM)") - this is the single source for what
+    // is scheduled, replacing a separate queue card. Each row shows a Jira status dot
+    // and its time slots.
     private void UpdateWillLog()
     {
         if (_willLogList.IsDisposed) return;
         _willLogList.SuspendLayout();
         ClearRows(_willLogList);
 
-        var tickets = PreviewTickets(out var fromQueue);
         var rowWidth = Math.Max(140, _willLogList.ClientSize.Width - 8);
+        var (typed, _) = TicketParser.Parse(_tickets.Text);
+        var showingQueue = false;
 
-        if (tickets.Count == 0)
+        if (typed.Count != 0)
         {
-            _willLogList.Controls.Add(WillLogText("Enter a ticket above to preview what will be logged.", rowWidth));
+            _willLogList.Controls.Add(WillLogText(_date.Value.ToString("dddd, MMMM d, yyyy"), rowWidth));
+            AddTicketRows(typed, rowWidth);
         }
         else
         {
-            var header = _date.Value.ToString("dddd, MMMM d, yyyy") + (fromQueue ? "   (queued for 6 PM)" : "");
-            _willLogList.Controls.Add(WillLogText(header, rowWidth));
-            for (var i = 0; i < tickets.Count; i++)
-                _willLogList.Controls.Add(CreateWillLogRow(tickets[i], TimeSlots.Get(tickets.Count, i), rowWidth));
+            var entries = TicketQueue.Read();
+            if (entries.Count == 0)
+            {
+                _willLogList.Controls.Add(WillLogText("Enter a ticket above to preview what will be logged.", rowWidth));
+            }
+            else
+            {
+                showingQueue = true;
+                foreach (var entry in entries)
+                {
+                    if (!DateOnly.TryParseExact(entry.Date, "yyyy-MM-dd", out var d)) continue;
+                    _willLogList.Controls.Add(WillLogText(d.ToString("dddd, MMMM d, yyyy") + "   (queued for 6 PM)", rowWidth));
+                    AddTicketRows(entry.Tickets, rowWidth);
+                }
+            }
         }
 
+        _clearQueueBtn.Visible = showingQueue;
         _willLogList.ResumeLayout();
         FitWillLogToContent();
+    }
+
+    private void AddTicketRows(IReadOnlyList<string> tickets, int rowWidth)
+    {
+        for (var i = 0; i < tickets.Count; i++)
+            _willLogList.Controls.Add(CreateWillLogRow(tickets[i], TimeSlots.Get(tickets.Count, i), rowWidth));
     }
 
     // Grow the "Will log" card to fit all rows (no inner scroll) and push the
@@ -766,11 +758,7 @@ internal sealed class MainForm : Form
         _willLogHost.Height = hostH;
         _willLogCard.Height = _willLogHost.Top + hostH + 12;
 
-        if (_queuedCard != null)
-        {
-            _queuedCard.Top = _willLogCard.Bottom + 12;
-            if (_actionsCard != null) _actionsCard.Top = _queuedCard.Bottom + 12;
-        }
+        if (_actionsCard != null) _actionsCard.Top = _willLogCard.Bottom + 12;
     }
 
     private static Label WillLogText(string text, int width) => new()
@@ -819,7 +807,7 @@ internal sealed class MainForm : Form
     private async void VerifyTicketsAsync()
     {
         if (_service is null) return;
-        var tickets = PreviewTickets(out _);
+        var tickets = ShownTickets();
         var pending = tickets.Where(k => !_verify.ContainsKey(k)).Distinct().ToList();
         if (pending.Count == 0) return;
 
@@ -885,9 +873,9 @@ internal sealed class MainForm : Form
     }
 
     // Read the persisted 6 PM queue and show it (read-only) so it stays visible after
-    // a relaunch. Refreshed on queue/clear, when the window activates, and after a drain.
-    // Also refreshes the "Will log" preview, which falls back to the queue when the
-    // input is empty.
+    // a relaunch. The persisted queue is shown by "Will log" itself (it falls back to
+    // the queue when the input is empty), so this just re-renders it. Called on
+    // queue/clear, when the window activates, and after a drain.
     internal void RefreshQueuedView()
     {
         if (InvokeRequired)
@@ -895,19 +883,6 @@ internal sealed class MainForm : Form
             BeginInvoke(new Action(RefreshQueuedView));
             return;
         }
-        var entries = TicketQueue.Read();
-        if (entries.Count == 0)
-        {
-            _queuedLabel.Text = "Nothing queued.";
-            _clearQueueBtn.Enabled = false;
-        }
-        else
-        {
-            _queuedLabel.Text = string.Join(Environment.NewLine,
-                entries.Select(e => $"{e.Date}:   {string.Join(", ", e.Tickets)}"));
-            _clearQueueBtn.Enabled = true;
-        }
-
         UpdateWillLog();
         VerifyTicketsAsync();
     }
@@ -917,6 +892,11 @@ internal sealed class MainForm : Form
         if (_service is null) { AppendLog("[error] Config not loaded; cannot log."); return; }
         var (tickets, date) = ParseEntry("log");
         if (tickets is null) return;
+        if (HrmClosedForToday(date))
+        {
+            ShowStatus("HRM can't log today's hours before 6 PM (it rejects future times). Queue it for 6 PM, or use Log TSC.", false);
+            return;
+        }
 
         SetBusy(true);
         ShowProgress(true, true);
@@ -967,6 +947,11 @@ internal sealed class MainForm : Form
         if (_service is null) { AppendLog("[error] Config not loaded; cannot log."); return; }
         var (tickets, date) = ParseEntry("hrm");
         if (tickets is null) return;
+        if (HrmClosedForToday(date))
+        {
+            ShowStatus("HRM can't log today's hours before 6 PM (it rejects future times). Queue it for 6 PM instead.", false);
+            return;
+        }
 
         SetBusy(true);
         ShowProgress(false, true);
@@ -1010,6 +995,7 @@ internal sealed class MainForm : Form
             if (ok) _service?.InvalidateGraphToken();
             AppendLog(ok ? "[tsc] Session saved." : $"[tsc] Re-auth failed: {error}");
             ShowStatus(ok ? "TSC session saved." : $"Re-auth failed: {error}", ok);
+            if (ok) ReauthSucceeded?.Invoke();
         }
         finally { SetBusy(false); }
     }
@@ -1027,6 +1013,9 @@ internal sealed class MainForm : Form
         }
         return (tickets, DateOnly.FromDateTime(_date.Value.Date));
     }
+
+    // HRM rejects future stop times, so today's hours cannot be logged before 18:00 HCM.
+    private static bool HrmClosedForToday(DateOnly date) => date == Hcm.Today() && Hcm.Now().Hour < 18;
 
     private void SetBusy(bool busy)
     {

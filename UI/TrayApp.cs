@@ -22,16 +22,6 @@ internal sealed class TrayApp : ApplicationContext
         _ = _marshal.Handle; // force handle creation on the UI thread
 
         var config = AppConfig.TryLoad(out var error);
-        var firstRunConfigured = false;
-        if (config == null)
-        {
-            // First run (or incomplete config): prompt, then try again.
-            if (PromptForCredentials(firstRun: true))
-            {
-                config = AppConfig.TryLoad(out error);
-                firstRunConfigured = config != null;
-            }
-        }
         _configError = error;
         _service = config != null ? new LoggingService(config) : null;
 
@@ -63,23 +53,51 @@ internal sealed class TrayApp : ApplicationContext
 
         UpdateTooltip();
 
-        if (_configError != null)
-            Notify($"Config not loaded: {_configError}", ToolTipIcon.Warning);
-
         _scheduler = new SixPmScheduler(() => DrainAsync(fromUser: false), Log);
         _scheduler.Start();
         CatchUpIfDue();
 
-        // Just set up: open the window (once the message loop is running) so the user
-        // sees it worked, and point them at the remaining TSC sign-in step.
-        if (firstRunConfigured)
-            _marshal.BeginInvoke(new Action(() =>
-            {
-                ShowForm();
-                Notify("Setup complete. Use \"Re-authenticate TSC\" to finish signing in.", ToolTipIcon.Info);
-            }));
+        // Once the message loop is running: prompt for first-run config if it's
+        // missing (rather than a modal dialog inside the constructor), otherwise
+        // nothing to do here.
+        if (_service == null)
+            _marshal.BeginInvoke(new Action(RunFirstRunSetup));
 
         AppLogger.Info("Tray ready.");
+    }
+
+    // First-run (or after a cancelled/incomplete setup): collect config, and on
+    // success rebuild the service and open the window as confirmation.
+    private void RunFirstRunSetup()
+    {
+        if (!PromptForCredentials(firstRun: true))
+        {
+            Notify("Setup skipped - logging is disabled. Use \"Edit credentials...\" to set it up.",
+                ToolTipIcon.Warning);
+            return;
+        }
+        ReloadServiceAndShow();
+        Notify(_service != null
+            ? "Setup complete. Use \"Re-authenticate TSC\" to finish signing in."
+            : $"Saved, but config is still invalid: {_configError}",
+            _service != null ? ToolTipIcon.Info : ToolTipIcon.Warning);
+    }
+
+    // Reload config into a fresh service (which also drops the cached Graph token),
+    // rebuild any open window so it uses it, and show the window as confirmation.
+    private void ReloadServiceAndShow()
+    {
+        var config = AppConfig.TryLoad(out var error);
+        _configError = error;
+        _service = config != null ? new LoggingService(config) : null;
+
+        if (_form != null && !_form.IsDisposed)
+        {
+            _form.Dispose();
+            _form = null;
+        }
+        if (_service != null) ShowForm();
+        UpdateTooltip();
     }
 
     // If the app was not running at 18:00 (asleep, off, or launched later), a queue
@@ -100,7 +118,7 @@ internal sealed class TrayApp : ApplicationContext
         }
 
         if (!due) return;
-        Log("[scheduler] Startup catch-up: queue has due entries; draining now.");
+        Log("[scheduler] Catch-up: queue has due entries; draining now.");
         _ = DrainAsync(fromUser: false);
     }
 
@@ -110,6 +128,7 @@ internal sealed class TrayApp : ApplicationContext
         {
             _form = new MainForm(_service, _configError);
             _form.QueueChanged += UpdateTooltip;
+            _form.ReauthSucceeded += CatchUpIfDue; // retry due entries once TSC is signed in
         }
         _form.Show();
         _form.WindowState = FormWindowState.Normal;
@@ -146,10 +165,14 @@ internal sealed class TrayApp : ApplicationContext
             {
                 if (fromUser) Notify("Queue is empty.", ToolTipIcon.Info);
             }
+            else if (r.Kept > 0)
+            {
+                Notify($"Auto-log: {r.Logged} logged, {r.Kept} kept. Check TSC sign-in (Re-authenticate) - it retries automatically.",
+                    ToolTipIcon.Warning);
+            }
             else
             {
-                Notify($"Auto-log: {r.Logged} logged, {r.Kept} kept.",
-                    r.Kept > 0 ? ToolTipIcon.Warning : ToolTipIcon.Info);
+                Notify($"Auto-log: {r.Logged} logged.", ToolTipIcon.Info);
             }
         }
         catch (Exception e)
@@ -181,6 +204,7 @@ internal sealed class TrayApp : ApplicationContext
         if (ok) _service?.InvalidateGraphToken();
         Notify(ok ? "TSC session saved." : $"Re-auth failed: {error}",
             ok ? ToolTipIcon.Info : ToolTipIcon.Warning);
+        if (ok) CatchUpIfDue(); // retry any queue entries that were waiting on sign-in
     }
 
     // Show the credentials dialog; on save, write the per-user .env. Returns true if
@@ -194,26 +218,13 @@ internal sealed class TrayApp : ApplicationContext
         return true;
     }
 
-    // Tray menu: edit credentials, then rebuild the service (a fresh LoggingService
-    // also drops the cached Graph token) and refresh an open window.
+    // Tray menu: edit credentials, then rebuild the service and show the window as
+    // confirmation the save took effect.
     private void EditCredentials()
     {
         if (!PromptForCredentials(firstRun: false)) return;
-
-        var config = AppConfig.TryLoad(out var error);
-        _configError = error;
-        _service = config != null ? new LoggingService(config) : null;
-
-        // Rebuild any open window so it uses the new service, and show it as
-        // confirmation that the save took effect.
-        if (_form != null && !_form.IsDisposed)
-        {
-            _form.Dispose();
-            _form = null;
-        }
-        if (_service != null) ShowForm();
-        UpdateTooltip();
-        Notify(_service != null ? "Credentials saved." : $"Saved, but config still invalid: {error}",
+        ReloadServiceAndShow();
+        Notify(_service != null ? "Credentials saved." : $"Saved, but config still invalid: {_configError}",
             _service != null ? ToolTipIcon.Info : ToolTipIcon.Warning);
     }
 
