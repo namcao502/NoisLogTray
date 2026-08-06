@@ -17,6 +17,8 @@ internal sealed class CredentialsForm : Form
 
     private readonly Dictionary<string, TextBox> _fields = new();
     private readonly Label _error = new();
+    private MacButton _save = null!;
+    private MacButton _cancel = null!;
     private int _y = Pad;
 
     internal IReadOnlyDictionary<string, string> Values { get; private set; } =
@@ -122,28 +124,28 @@ internal sealed class CredentialsForm : Form
         Controls.Add(_error);
         _y += 24;
 
-        var save = MacButton.Primary("Save");
-        save.OnWindow = true;
-        save.Size = new Size(120, 36);
-        save.Location = new Point(Pad + FieldW - 120, _y);
-        save.Click += OnSave;
+        _save = MacButton.Primary("Save");
+        _save.OnWindow = true;
+        _save.Size = new Size(120, 36);
+        _save.Location = new Point(Pad + FieldW - 120, _y);
+        _save.Click += OnSave;
 
-        var cancel = MacButton.Secondary("Cancel");
-        cancel.OnWindow = true;
-        cancel.Size = new Size(100, 36);
-        cancel.Location = new Point(Pad + FieldW - 120 - 12 - 100, _y);
-        cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
+        _cancel = MacButton.Secondary("Cancel");
+        _cancel.OnWindow = true;
+        _cancel.Size = new Size(100, 36);
+        _cancel.Location = new Point(Pad + FieldW - 120 - 12 - 100, _y);
+        _cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
 
-        Controls.Add(save);
-        Controls.Add(cancel);
+        Controls.Add(_save);
+        Controls.Add(_cancel);
         _y += 36 + Pad;
 
-        AcceptButton = save;
-        CancelButton = cancel;
+        AcceptButton = _save;
+        CancelButton = _cancel;
         ClientSize = new Size(460, _y);
     }
 
-    private void OnSave(object? sender, EventArgs e)
+    private async void OnSave(object? sender, EventArgs e)
     {
         var baseUrl = _fields["JIRA_BASE_URL"].Text.Trim();
         var email = _fields["JIRA_EMAIL"].Text.Trim();
@@ -151,6 +153,7 @@ internal sealed class CredentialsForm : Form
         var hrmKey = _fields["HRM_API_KEY"].Text.Trim();
         var columns = TscCells.ParseColumns(_fields["TSC_GRAPH_COLUMNS"].Text);
 
+        // Format checks first (cheap, offline).
         if (!baseUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
         {
             Fail("Jira site URL must start with http.");
@@ -172,6 +175,47 @@ internal sealed class CredentialsForm : Form
             return;
         }
 
+        // Verify the credentials actually work before saving, so a wrong token/key
+        // is caught here rather than silently failing later.
+        CredentialCheck jira, hrm;
+        SetBusy(true, "Verifying credentials...");
+        try
+        {
+            var jiraTask = new JiraClient(baseUrl, email, token).ValidateAsync();
+            var hrmTask = HrmMcpClient.ValidateAsync(hrmKey);
+            await Task.WhenAll(jiraTask, hrmTask);
+            jira = jiraTask.Result;
+            hrm = hrmTask.Result;
+        }
+        finally
+        {
+            SetBusy(false, "");
+        }
+
+        if (jira == CredentialCheck.Rejected)
+        {
+            Fail("Jira rejected your email or API token.");
+            return;
+        }
+        if (hrm == CredentialCheck.Rejected)
+        {
+            Fail("HRM rejected your API key.");
+            return;
+        }
+
+        // Could not reach a service to confirm: let the user save anyway (they may be
+        // offline) rather than lock them out, but make it a deliberate choice.
+        if (jira == CredentialCheck.Unreachable || hrm == CredentialCheck.Unreachable)
+        {
+            var which = jira == CredentialCheck.Unreachable && hrm == CredentialCheck.Unreachable
+                ? "Jira and the HRM server"
+                : jira == CredentialCheck.Unreachable ? "Jira" : "the HRM server";
+            var answer = MessageBox.Show(this,
+                $"Could not reach {which} to verify your details (are you online?).\n\nSave anyway?",
+                "Couldn't verify", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (answer != DialogResult.Yes) return;
+        }
+
         Values = new Dictionary<string, string>
         {
             ["JIRA_BASE_URL"] = baseUrl,
@@ -184,5 +228,20 @@ internal sealed class CredentialsForm : Form
         Close();
     }
 
-    private void Fail(string message) => _error.Text = message;
+    private void Fail(string message)
+    {
+        _error.ForeColor = Color.FromArgb(230, 76, 76);
+        _error.Text = message;
+    }
+
+    // Toggle the buttons/inputs while a network verification is in flight.
+    private void SetBusy(bool busy, string status)
+    {
+        _save.Enabled = !busy;
+        _cancel.Enabled = !busy;
+        foreach (var box in _fields.Values) box.Enabled = !busy;
+        UseWaitCursor = busy;
+        _error.ForeColor = Theme.TextSecondary;
+        _error.Text = status;
+    }
 }

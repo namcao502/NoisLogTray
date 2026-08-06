@@ -22,11 +22,15 @@ internal sealed class TrayApp : ApplicationContext
         _ = _marshal.Handle; // force handle creation on the UI thread
 
         var config = AppConfig.TryLoad(out var error);
+        var firstRunConfigured = false;
         if (config == null)
         {
             // First run (or incomplete config): prompt, then try again.
             if (PromptForCredentials(firstRun: true))
+            {
                 config = AppConfig.TryLoad(out error);
+                firstRunConfigured = config != null;
+            }
         }
         _configError = error;
         _service = config != null ? new LoggingService(config) : null;
@@ -65,6 +69,15 @@ internal sealed class TrayApp : ApplicationContext
         _scheduler = new SixPmScheduler(() => DrainAsync(fromUser: false), Log);
         _scheduler.Start();
         CatchUpIfDue();
+
+        // Just set up: open the window (once the message loop is running) so the user
+        // sees it worked, and point them at the remaining TSC sign-in step.
+        if (firstRunConfigured)
+            _marshal.BeginInvoke(new Action(() =>
+            {
+                ShowForm();
+                Notify("Setup complete. Use \"Re-authenticate TSC\" to finish signing in.", ToolTipIcon.Info);
+            }));
 
         AppLogger.Info("Tray ready.");
     }
@@ -191,12 +204,14 @@ internal sealed class TrayApp : ApplicationContext
         _configError = error;
         _service = config != null ? new LoggingService(config) : null;
 
+        // Rebuild any open window so it uses the new service, and show it as
+        // confirmation that the save took effect.
         if (_form != null && !_form.IsDisposed)
         {
             _form.Dispose();
             _form = null;
-            ShowForm();
         }
+        if (_service != null) ShowForm();
         UpdateTooltip();
         Notify(_service != null ? "Credentials saved." : $"Saved, but config still invalid: {error}",
             _service != null ? ToolTipIcon.Info : ToolTipIcon.Warning);

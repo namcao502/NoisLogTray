@@ -27,6 +27,27 @@ internal sealed class JiraClient : IJiraClient
         _authHeader = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{email}:{token}"));
     }
 
+    // Verify the email + token by calling the authenticated /myself endpoint.
+    // 200 = valid; 401/403 = rejected; anything else (bad host, timeout, 404) =
+    // unreachable, so the caller can let the user save without being locked out.
+    public async Task<CredentialCheck> ValidateAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/rest/api/3/myself");
+            AddHeaders(req);
+            using var res = await Http.SendAsync(req, ct);
+            if (res.StatusCode == HttpStatusCode.OK) return CredentialCheck.Valid;
+            if (res.StatusCode == HttpStatusCode.Unauthorized || res.StatusCode == HttpStatusCode.Forbidden)
+                return CredentialCheck.Rejected;
+            return CredentialCheck.Unreachable;
+        }
+        catch
+        {
+            return CredentialCheck.Unreachable;
+        }
+    }
+
     public async Task<JiraVerifyResult> VerifyTicketAsync(string ticketId, CancellationToken ct = default)
     {
         using var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/rest/api/3/issue/{ticketId}?fields=summary");

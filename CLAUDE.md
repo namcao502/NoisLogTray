@@ -84,8 +84,9 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `TicketQueue`.
 - `Helpers/` - utilities: `TicketParser`, `TimeSlots`, `TscCells`, `Timesheet`, `Hcm`,
   `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppSettings`, `AppIcon`.
-- `Models/` - record types only: `QueueEntry`, `JiraSuggestion`/`JiraVerifyResult`,
-  `DrainResult`/`EntryLogResult`, `GraphTscOptions`, `TimeSlot`, `ToolEnvelope`.
+- `Models/` - record types (+ the `CredentialCheck` enum): `QueueEntry`,
+  `JiraSuggestion`/`JiraVerifyResult`, `DrainResult`/`EntryLogResult`, `GraphTscOptions`,
+  `TimeSlot`, `ToolEnvelope`, `CredentialCheck`.
 - `Interface/` - abstractions (`IJiraClient`, implemented by `JiraClient`).
 - `UI/` - WinForms. `Theme` is a central light/dark palette; controls read it at paint
   time and subscribe to `Theme.Changed` to repaint (the header's Dark/Light button calls
@@ -109,7 +110,10 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   tooltip/balloon/log updates. `_draining` is an `Interlocked` guard so only one
   drain runs at a time. When config is missing at startup it shows `CredentialsForm`
   (first-run), and the "Edit credentials..." menu item reopens it; saving writes the
-  per-user `.env` and rebuilds `_service`.
+  per-user `.env` and rebuilds `_service`, then opens the window so the user sees it
+  worked. The dialog **verifies** the entered credentials before saving (Jira via
+  `/myself`, HRM via an MCP connect) and rejects a bad token/key inline; an unreachable
+  service falls back to a "save anyway?" prompt so offline setup isn't blocked.
 - **`MainForm`** - the capture window: a standard-chrome window structured like the
   old web app - a header (title + date), then stacked `Card`s: "Log entries" (a
   "My tickets" list from `LoggingService.GetMyTicketsAsync`, click a row to add it,

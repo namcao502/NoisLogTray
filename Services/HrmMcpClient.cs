@@ -11,6 +11,42 @@ internal static class HrmMcpClient
     private const string HrmMcpUrl = "https://api-hrm.nois.vn/mcp";
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
 
+    // Verify the API key by opening an MCP session and listing tools. Success =
+    // valid; an auth-looking failure (401/403) = rejected; any other failure =
+    // unreachable. Best-effort: if the server does not enforce auth on connect it
+    // cannot detect a bad key (Jira is the definitive check).
+    internal static async Task<CredentialCheck> ValidateAsync(string apiKey, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(apiKey)) return CredentialCheck.Rejected;
+        try
+        {
+            var transport = new HttpClientTransport(new HttpClientTransportOptions
+            {
+                Endpoint = new Uri(HrmMcpUrl),
+                TransportMode = HttpTransportMode.StreamableHttp,
+                ConnectionTimeout = TimeSpan.FromSeconds(15),
+                AdditionalHeaders = new Dictionary<string, string> { ["Authorization"] = $"Bearer {apiKey}" },
+            });
+
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(20));
+            await using var client = await McpClient.CreateAsync(transport, cancellationToken: cts.Token);
+            await client.ListToolsAsync(cancellationToken: cts.Token);
+            return CredentialCheck.Valid;
+        }
+        catch (Exception e)
+        {
+            return LooksLikeAuthFailure(e) ? CredentialCheck.Rejected : CredentialCheck.Unreachable;
+        }
+    }
+
+    private static bool LooksLikeAuthFailure(Exception e)
+    {
+        var msg = e.Message.ToLowerInvariant();
+        return msg.Contains("401") || msg.Contains("unauthorized")
+            || msg.Contains("403") || msg.Contains("forbidden");
+    }
+
     // Log each ticket via log_timesheet. A slot straddling lunch yields two
     // segments -> two calls (first creates the task, second appends). Returns on
     // the first hard error; LOGTIME_OVERLAP is treated as an idempotent skip.
