@@ -16,10 +16,28 @@ internal static class TscCells
 
     internal static int GetRowForDate(DateOnly date) => HeaderRows + date.DayOfYear;
 
-    internal static string[] GetCellsForDate(DateOnly date)
+    internal static string[] GetCellsForDate(DateOnly date) => GetCellsForDate(date, TargetColumns);
+
+    internal static string[] GetCellsForDate(DateOnly date, IReadOnlyList<string> columns)
     {
         var row = GetRowForDate(date);
-        return TargetColumns.Select(col => $"{col}{row}").ToArray();
+        var cols = columns.Count != 0 ? columns : TargetColumns;
+        return cols.Select(col => $"{col}{row}").ToArray();
+    }
+
+    // Parse a user-supplied column list ("M, J" or "m j,k") into canonical column
+    // letters. Tolerates commas/whitespace; keeps only A-Z letter runs, uppercased
+    // and de-duplicated in order. Returns an empty list when nothing valid is given.
+    internal static IReadOnlyList<string> ParseColumns(string? raw)
+    {
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(raw)) return result;
+        foreach (Match m in Regex.Matches(raw, "[A-Za-z]+"))
+        {
+            var col = m.Value.ToUpperInvariant();
+            if (!result.Contains(col)) result.Add(col);
+        }
+        return result;
     }
 
     // One tab per year, "Daily Reports - <year>".

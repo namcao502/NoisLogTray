@@ -83,8 +83,11 @@ internal static class GraphTscClient
         if (string.IsNullOrWhiteSpace(token))
             return (false, "", "No Graph token (sniff failed and MS_GRAPH_TOKEN not set).");
 
+        var columns = options.Columns != null && options.Columns.Count != 0
+            ? options.Columns
+            : TscCells.TargetColumns;
         var effectiveDates = dates.Count > 0 ? dates : new[] { Hcm.Today() };
-        var totalCells = effectiveDates.Count * 2; // M + J per date
+        var totalCells = effectiveDates.Count * columns.Count;
         var doneCells = 0;
 
         try
@@ -101,7 +104,7 @@ internal static class GraphTscClient
                 foreach (var d in effectiveDates)
                 {
                     var worksheet = string.IsNullOrEmpty(options.Worksheet) ? TscCells.GetWorksheetForDate(d) : options.Worksheet;
-                    var cells = TscCells.GetCellsForDate(d);
+                    var cells = TscCells.GetCellsForDate(d, columns);
                     var row = TscCells.GetRowForDate(d);
                     var bCell = $"B{row}";
                     var expected = TscCells.GetExpectedDateLabel(d);

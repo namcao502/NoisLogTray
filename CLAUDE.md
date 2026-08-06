@@ -45,6 +45,19 @@ The main `.csproj` excludes `tests/**` and `smoke/**` from compilation, and expo
 internals to `NoisLogTray.Tests` via `InternalsVisibleTo`. Almost everything is
 `internal`; tests reach internals directly rather than through a public surface.
 
+### Distribute to other users
+
+```sh
+# Self-contained single-file build (no .NET install needed on the target PC)
+dotnet publish NoisLogTray.csproj -p:PublishProfile=win-x64
+```
+
+Output: `bin/publish/win-x64/` - a single `NoisLogTray.exe` (runtime baked in) plus
+the `.playwright/` driver folder and `.env.example`. Zip that folder and share it.
+The csproj marks `.env` `CopyToPublishDirectory=Never`, so **no secrets ship**; each
+recipient fills the first-run dialog (writes `%AppData%\NoisLogTray\.env`). Google
+Chrome must be installed on the target PC (the TSC sniff/re-auth uses `channel=chrome`).
+
 ### Smoke projects (manual, not part of the build)
 
 `smoke/SniffSmoke` and `smoke/HrmSmoke` are standalone `net10.0` console exes that
@@ -79,11 +92,13 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `Theme.Toggle`; `MainForm.ApplyTheme` re-colors native controls). It defaults to dark
   and persists the choice through `AppSettings` (`Theme.Load` runs in `Program.Main`;
   `Theme.Toggle` does a read-modify-write so it keeps the window position). Also `TrayApp`,
-  `MainForm`, and owner-drawn controls: `MacButton`
+  `MainForm`, `CredentialsForm` (the themed first-run / edit-credentials dialog), and
+  owner-drawn controls: `MacButton`
   (rounded button), `Card` (rounded card surface), `RoundedHost` (rounded border
   around native controls like the list/textbox), `RoundedDatePicker` (rounded date
   field with a custom `ModernCalendar` popup in a rounded `CalendarPopupForm`, replacing
-  the native `DateTimePicker`/`MonthCalendar`), and `MiniProgress` (thin rounded bar).
+  the native `DateTimePicker`/`MonthCalendar`), `WillLogRow` (one owner-drawn Will Log
+  line), and `MiniProgress` (thin rounded bar).
 - `Program.cs` stays at the repo root.
 
 - **`Program.cs`** - entry point. Single-instance `Global\` mutex, global exception
@@ -92,7 +107,9 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   + context menu, and the scheduler. Background work (sniff, MCP, drain) runs off
   the UI thread and is marshaled back through a hidden `Control` (`RunOnUi`) for
   tooltip/balloon/log updates. `_draining` is an `Interlocked` guard so only one
-  drain runs at a time.
+  drain runs at a time. When config is missing at startup it shows `CredentialsForm`
+  (first-run), and the "Edit credentials..." menu item reopens it; saving writes the
+  per-user `.env` and rebuilds `_service`.
 - **`MainForm`** - the capture window: a standard-chrome window structured like the
   old web app - a header (title + date), then stacked `Card`s: "Log entries" (a
   "My tickets" list from `LoggingService.GetMyTicketsAsync`, click a row to add it,
@@ -127,10 +144,11 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
 Bottom-layer clients:
 
 - **`GraphTscClient`** - writes the ticket to the Excel workbook via Graph. Target
-  `row = 2 + dayOfYear`, columns `M` (primary) and `J` (mirror), one worksheet per
-  year. Uses a persistent workbook session (`persistChanges:true`). **Fail-closed
-  date safety**: reads column B for the row and aborts if it does not match the
-  expected `M/D/YYYY`, to avoid ever logging the wrong day.
+  `row = 2 + dayOfYear`; the columns default to `M` (primary) and `J` (mirror) but are
+  per-user configurable via `GraphTscOptions.Columns` (`TSC_GRAPH_COLUMNS`), one
+  worksheet per year. Uses a persistent workbook session (`persistChanges:true`).
+  **Fail-closed date safety**: reads column B for the row and aborts if it does not
+  match the expected `M/D/YYYY`, to avoid ever logging the wrong day.
 - **`HrmMcpClient`** - calls the `log_timesheet` MCP tool (Bearer = `HRM_API_KEY`).
   A time slot straddling lunch becomes two calls (first creates the task, second
   appends).
@@ -169,19 +187,27 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   directly - use `TrayApp.RunOnUi` or the `InvokeRequired`/`BeginInvoke` guards in
   `MainForm`. WinForms `async void` event handlers are the intended style here.
 - **Config load never crashes startup.** `AppConfig.TryLoad` returns `null` + a
-  message on a missing required key; the tray surfaces it as a warning balloon and
-  disables logging rather than throwing. Config is read from a `.env` in the
-  application directory - the project's `.env`, copied to the build output via the
-  csproj (`CopyToOutputDirectory`) and gitignored as a secret. Process environment is
-  the last-resort fallback (see `Env`).
+  message on a missing required key; on `null` the tray shows `CredentialsForm`
+  (first-run) to collect the values, and if still missing surfaces a warning balloon
+  and disables logging rather than throwing. Config is **layered** (`AppConfig.DefaultSources`,
+  later wins): the app-directory `.env` (optional shared, non-secret defaults - the
+  dev's project `.env` is copied here via the csproj and gitignored) then the per-user
+  `.env` at `%AppData%\NoisLogTray\.env` (each user's secrets, written by the dialog via
+  `AppConfig.SaveUserEnv`), then process environment. **Don't ship a build with the
+  dev's app-dir `.env`** - distribute without it (see `.env.example`) so each user fills
+  their own on first run.
   Required keys: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `HRM_API_KEY`.
-  Optional: `HRM_PROJECT_ID`, `MS_GRAPH_TOKEN` (override that skips the sniff),
+  Optional: `TSC_GRAPH_COLUMNS` (per-user columns in the shared workbook; default
+  `M, J` via `TscCells.TargetColumns`, parsed by `TscCells.ParseColumns`),
+  `HRM_PROJECT_ID`, `MS_GRAPH_TOKEN` (override that skips the sniff),
   `TSC_GRAPH_DRIVE_ID` / `_ITEM_ID` / `_SHARE_URL` / `_WORKSHEET`.
 
 ## Per-user data
 
 Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
 (the pending log queue), `settings.json` (theme + window position, via `AppSettings`),
-and `logs/app.log`. A missing or malformed `queue.json` yields an empty queue by design
+`.env` (per-user config/secrets written by `CredentialsForm`, `AppPaths.EnvPath`), and
+`logs/app.log`. A missing or malformed `queue.json` yields an empty queue by design
 so the 18:00 runner never throws; `AppSettings` likewise falls back to defaults on a
-missing/bad `settings.json`.
+missing/bad `settings.json`. The TSC Chrome profile (the saved Microsoft session) lives
+separately at `%UserProfile%\.tsc-daily-log-browser` (`TscTokenSniffer.ProfileDir`).

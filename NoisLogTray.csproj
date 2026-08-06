@@ -30,10 +30,13 @@
     </AssemblyAttribute>
   </ItemGroup>
 
-  <!-- Ship the local .env (secrets) next to the app so config is read from the
-       application directory, not an external path. -->
+  <!-- Local .env sits next to the app for `dotnet run` (dev), but must NEVER be
+       distributed: excluded from publish so shared/self-contained builds carry no
+       secrets. Each user supplies their own via the first-run dialog. The template
+       (.env.example) IS shipped so a fresh install documents the keys. -->
   <ItemGroup>
-    <None Update=".env" CopyToOutputDirectory="PreserveNewest" />
+    <None Update=".env" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
+    <None Update=".env.example" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

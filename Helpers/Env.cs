@@ -15,7 +15,16 @@ internal sealed class Env
 
     private void LoadFile(string path)
     {
-        if (!File.Exists(path)) return;
+        foreach (var kv in ParseFile(path))
+            _values[kv.Key] = kv.Value;
+    }
+
+    // Parse one .env file into key/value pairs (no process-environment fallback).
+    // A missing file yields an empty map. Shared by the loader and the config writer.
+    internal static Dictionary<string, string> ParseFile(string path)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (!File.Exists(path)) return values;
         foreach (var raw in File.ReadAllLines(path))
         {
             var line = raw.Trim();
@@ -27,8 +36,9 @@ internal sealed class Env
             if (value.Length >= 2 &&
                 ((value[0] == '"' && value[^1] == '"') || (value[0] == '\'' && value[^1] == '\'')))
                 value = value[1..^1];
-            _values[key] = value;
+            values[key] = value;
         }
+        return values;
     }
 
     internal string? Get(string key)

@@ -9,8 +9,8 @@ internal sealed class TrayApp : ApplicationContext
 {
     private readonly NotifyIcon _tray;
     private readonly Control _marshal;
-    private readonly LoggingService? _service;
-    private readonly string? _configError;
+    private LoggingService? _service;
+    private string? _configError;
     private readonly SixPmScheduler _scheduler;
     private readonly ToolStripMenuItem _startupItem;
     private MainForm? _form;
@@ -22,6 +22,12 @@ internal sealed class TrayApp : ApplicationContext
         _ = _marshal.Handle; // force handle creation on the UI thread
 
         var config = AppConfig.TryLoad(out var error);
+        if (config == null)
+        {
+            // First run (or incomplete config): prompt, then try again.
+            if (PromptForCredentials(firstRun: true))
+                config = AppConfig.TryLoad(out error);
+        }
         _configError = error;
         _service = config != null ? new LoggingService(config) : null;
 
@@ -31,6 +37,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Check TSC session", null, async (_, _) => await CheckTscAsync());
         menu.Items.Add("Re-authenticate TSC", null, async (_, _) => await ReauthAsync());
+        menu.Items.Add("Edit credentials...", null, (_, _) => EditCredentials());
         menu.Items.Add(new ToolStripSeparator());
         _startupItem = new ToolStripMenuItem("Start with Windows", null, (_, _) => ToggleStartup())
         {
@@ -161,6 +168,38 @@ internal sealed class TrayApp : ApplicationContext
         if (ok) _service?.InvalidateGraphToken();
         Notify(ok ? "TSC session saved." : $"Re-auth failed: {error}",
             ok ? ToolTipIcon.Info : ToolTipIcon.Warning);
+    }
+
+    // Show the credentials dialog; on save, write the per-user .env. Returns true if
+    // saved. Used both at first run (config missing) and from the tray menu.
+    private bool PromptForCredentials(bool firstRun)
+    {
+        var initial = AppConfig.ReadUserValues();
+        using var dialog = new CredentialsForm(initial, firstRun);
+        if (dialog.ShowDialog() != DialogResult.OK) return false;
+        AppConfig.SaveUserEnv(dialog.Values);
+        return true;
+    }
+
+    // Tray menu: edit credentials, then rebuild the service (a fresh LoggingService
+    // also drops the cached Graph token) and refresh an open window.
+    private void EditCredentials()
+    {
+        if (!PromptForCredentials(firstRun: false)) return;
+
+        var config = AppConfig.TryLoad(out var error);
+        _configError = error;
+        _service = config != null ? new LoggingService(config) : null;
+
+        if (_form != null && !_form.IsDisposed)
+        {
+            _form.Dispose();
+            _form = null;
+            ShowForm();
+        }
+        UpdateTooltip();
+        Notify(_service != null ? "Credentials saved." : $"Saved, but config still invalid: {error}",
+            _service != null ? ToolTipIcon.Info : ToolTipIcon.Warning);
     }
 
     private void ToggleStartup()

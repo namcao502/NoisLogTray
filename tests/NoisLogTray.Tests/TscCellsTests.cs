@@ -22,6 +22,32 @@ public class TscCellsTests
     }
 
     [Fact]
+    public void UsesSuppliedColumnsWhenGiven()
+    {
+        var cells = TscCells.GetCellsForDate(new DateOnly(2026, 7, 1), new[] { "D", "E" });
+        Assert.Equal(new[] { "D184", "E184" }, cells);
+    }
+
+    [Fact]
+    public void FallsBackToDefaultColumnsWhenEmpty()
+    {
+        var cells = TscCells.GetCellsForDate(new DateOnly(2026, 7, 1), Array.Empty<string>());
+        Assert.Equal(new[] { "M184", "J184" }, cells);
+    }
+
+    [Theory]
+    [InlineData("M, J", new[] { "M", "J" })]
+    [InlineData("m j", new[] { "M", "J" })]          // whitespace-separated, lowercased
+    [InlineData("D, D, E", new[] { "D", "E" })]      // de-duplicated in order
+    [InlineData("AA,bb", new[] { "AA", "BB" })]      // multi-letter columns
+    [InlineData("  ", new string[0])]                 // blank -> empty
+    [InlineData(null, new string[0])]                 // null -> empty
+    public void ParseColumnsNormalizes(string? raw, string[] expected)
+    {
+        Assert.Equal(expected, TscCells.ParseColumns(raw));
+    }
+
+    [Fact]
     public void WorksheetIsPerYear()
     {
         Assert.Equal("Daily Reports - 2026", TscCells.GetWorksheetForDate(new DateOnly(2026, 7, 1)));
