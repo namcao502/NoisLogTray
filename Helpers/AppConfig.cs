@@ -24,6 +24,10 @@ internal sealed class AppConfig
         "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "HRM_API_KEY", "TSC_GRAPH_COLUMNS", "LOG_TIME",
     };
 
+    // Config key for the custom "My tickets" query (managed by its own JqlForm dialog,
+    // not the credentials dialog). Unset -> JiraClient.DefaultMyTicketsJql is used.
+    internal const string MyTicketsJqlKey = "JIRA_MY_TICKETS_JQL";
+
     internal string JiraBaseUrl { get; }
     internal string JiraEmail { get; }
     internal string JiraToken { get; }
@@ -31,6 +35,7 @@ internal sealed class AppConfig
     internal string HrmProjectId { get; }
     internal string? MsGraphToken { get; }
     internal TimeOnly LogTime { get; }
+    internal string? JiraMyTicketsJql { get; }
     internal GraphTscOptions Graph { get; }
 
     private AppConfig(Env env)
@@ -42,6 +47,7 @@ internal sealed class AppConfig
         HrmProjectId = env.Get("HRM_PROJECT_ID") ?? DefaultProjectId;
         MsGraphToken = env.Get("MS_GRAPH_TOKEN");
         LogTime = ParseLogTime(env.Get("LOG_TIME"));
+        JiraMyTicketsJql = env.Get(MyTicketsJqlKey);
         Graph = new GraphTscOptions(
             DriveId: env.Get("TSC_GRAPH_DRIVE_ID"),
             ItemId: env.Get("TSC_GRAPH_ITEM_ID"),

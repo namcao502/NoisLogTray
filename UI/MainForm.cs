@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Globalization;
 
 namespace NoisLogTray;
 
@@ -64,6 +65,7 @@ internal sealed class MainForm : Form
     private readonly MacButton _checkBtn = MacButton.Secondary("Check TSC");
     private readonly MacButton _reauthBtn = MacButton.Secondary("Re-auth");
     private readonly MacButton _refreshBtn = MacButton.Secondary("Refresh");
+    private readonly MacButton _jqlBtn = MacButton.Secondary("Edit JQL");
     private readonly MacButton _clearBtn = MacButton.Secondary("Clear");
     private readonly FlowLayoutPanel _suggestions = new();
     private readonly Label _suggestionStatus = new();
@@ -215,6 +217,11 @@ internal sealed class MainForm : Form
         var card = new Card { Size = new Size(CardW, 342) };
         card.Controls.Add(SectionLabel("LOG ENTRIES", 16, 14));
         card.Controls.Add(SectionLabel("MY TICKETS  (click to add)", 16, 42));
+
+        _jqlBtn.Size = new Size(90, 26);
+        _jqlBtn.Location = new Point(16 + InnerW - 188, 38);
+        _jqlBtn.Click += (_, _) => EditJql();
+        card.Controls.Add(_jqlBtn);
 
         _refreshBtn.Size = new Size(90, 26);
         _refreshBtn.Location = new Point(16 + InnerW - 90, 38);
@@ -407,6 +414,25 @@ internal sealed class MainForm : Form
     private void ReportTsc(int done, int total) => _activity.ReportTsc(done, total);
     private void ReportHrm(int done, int total) => _activity.ReportHrm(done, total);
 
+    // Open the JQL editor for the "My tickets" query; on save, apply it to the live
+    // service, persist it, and re-fetch the list with the new query.
+    private void EditJql()
+    {
+        if (_service is null)
+        {
+            SetSuggestionStatus("Config not loaded; cannot edit query.");
+            return;
+        }
+
+        using var dlg = new JqlForm(_service.MyTicketsJql, JiraClient.DefaultMyTicketsJql,
+            _service.ValidateMyTicketsJqlAsync);
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+
+        _service.SetMyTicketsJql(dlg.Jql);
+        AppConfig.SaveUserConfig(new Dictionary<string, string> { [AppConfig.MyTicketsJqlKey] = dlg.Jql });
+        LoadMyTicketsAsync();
+    }
+
     // Load the user's open Jira tickets into the suggestions panel (click to add).
     private async void LoadMyTicketsAsync()
     {
@@ -502,13 +528,17 @@ internal sealed class MainForm : Form
             Cursor = Cursors.Hand,
         };
 
+        // Due date sits right-aligned at the row's end; the summary shrinks to leave room.
+        var dueText = FormatDue(ticket.DueDate);
+        var dueWidth = dueText.Length == 0 ? 0 : TextRenderer.MeasureText(dueText, SummaryFont).Width + 8;
+
         var summaryX = 12 + keyWidth + 8;
         var summary = new Label
         {
             Text = ticket.Summary,
             AutoSize = false,
             Location = new Point(summaryX, 0),
-            Size = new Size(Math.Max(20, width - summaryX - 8), 30),
+            Size = new Size(Math.Max(20, width - summaryX - dueWidth - 8), 30),
             TextAlign = ContentAlignment.MiddleLeft,
             AutoEllipsis = true,
             Font = SummaryFont,
@@ -516,6 +546,23 @@ internal sealed class MainForm : Form
             BackColor = Color.Transparent,
             Cursor = Cursors.Hand,
         };
+
+        Label? due = null;
+        if (dueWidth != 0)
+        {
+            due = new Label
+            {
+                Text = dueText,
+                AutoSize = false,
+                Location = new Point(width - dueWidth - 8, 0),
+                Size = new Size(dueWidth, 30),
+                TextAlign = ContentAlignment.MiddleRight,
+                Font = SummaryFont,
+                ForeColor = Theme.TextSecondary,
+                BackColor = Color.Transparent,
+                Cursor = Cursors.Hand,
+            };
+        }
 
         var separator = new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Divider };
 
@@ -527,7 +574,10 @@ internal sealed class MainForm : Form
                 row.BackColor = Theme.InputBg;
         }
 
-        foreach (var c in new Control[] { row, bar, key, summary })
+        var controls = due is null
+            ? new Control[] { row, bar, key, summary }
+            : new Control[] { row, bar, key, summary, due };
+        foreach (var c in controls)
         {
             c.Click += Add;
             c.MouseEnter += Enter;
@@ -537,8 +587,18 @@ internal sealed class MainForm : Form
         row.Controls.Add(bar);
         row.Controls.Add(key);
         row.Controls.Add(summary);
+        if (due is not null) row.Controls.Add(due);
         row.Controls.Add(separator);
         return row;
+    }
+
+    // Format a Jira ISO due date ("yyyy-MM-dd") as a short "MMM d" label; empty when unset.
+    private static string FormatDue(string? due)
+    {
+        if (string.IsNullOrWhiteSpace(due)) return "";
+        return DateTime.TryParse(due, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt)
+            ? dt.ToString("MMM d", CultureInfo.InvariantCulture)
+            : due;
     }
 
     private void AddTicketToInput(string key)

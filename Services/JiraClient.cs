@@ -10,9 +10,10 @@ internal sealed class JiraClient : IJiraClient
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
 
-    // Nam's open MDP work: assigned to AND contributing on, excluding done-ish
-    // statuses, ordered by due then backlog rank (cf[10012]).
-    private const string MyTicketsJql =
+    // Default "My tickets" query when the user has not set a custom JIRA_MY_TICKETS_JQL:
+    // assigned to AND contributing on, excluding done-ish statuses, ordered by due then
+    // backlog rank (cf[10012]).
+    internal const string DefaultMyTicketsJql =
         "project = MDP AND assignee = currentUser() AND " +
         "\"contributors[user picker (multiple users)]\" = currentUser() AND " +
         "status NOT IN (\"Deployed to Production\", \"QA Confirmed\", Done) " +
@@ -67,9 +68,10 @@ internal sealed class JiraClient : IJiraClient
         throw new InvalidOperationException($"Jira API error: {(int)res.StatusCode} {res.ReasonPhrase}");
     }
 
-    public async Task<IReadOnlyList<JiraSuggestion>> GetMyTicketsAsync(int limit = 5, CancellationToken ct = default)
+    public async Task<IReadOnlyList<JiraSuggestion>> GetMyTicketsAsync(int limit = 5, string? jql = null, CancellationToken ct = default)
     {
-        var body = JsonSerializer.Serialize(new { jql = MyTicketsJql, maxResults = limit, fields = new[] { "summary" } });
+        var effectiveJql = string.IsNullOrWhiteSpace(jql) ? DefaultMyTicketsJql : jql;
+        var body = JsonSerializer.Serialize(new { jql = effectiveJql, maxResults = limit, fields = new[] { "summary", "duedate" } });
         using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/rest/api/3/search/jql")
         {
             Content = new StringContent(body, Encoding.UTF8, "application/json"),
@@ -88,13 +90,62 @@ internal sealed class JiraClient : IJiraClient
             foreach (var issue in issues.EnumerateArray())
             {
                 var key = issue.TryGetProperty("key", out var k) ? k.GetString() ?? "" : "";
-                var summary = issue.TryGetProperty("fields", out var f) && f.TryGetProperty("summary", out var s)
+                var hasFields = issue.TryGetProperty("fields", out var f);
+                var summary = hasFields && f.TryGetProperty("summary", out var s)
                     ? s.GetString() ?? ""
                     : "";
-                list.Add(new JiraSuggestion(key, summary));
+                var due = hasFields && f.TryGetProperty("duedate", out var d) && d.ValueKind == JsonValueKind.String
+                    ? d.GetString()
+                    : null;
+                list.Add(new JiraSuggestion(key, summary, due));
             }
         }
         return list;
+    }
+
+    // Check a custom "My tickets" JQL by running it (maxResults = 1) before it is saved.
+    // 200 = Valid; a non-success (Jira returns 400 for bad JQL) = Invalid with Jira's
+    // own error text; a network/timeout error = Unreachable so the caller can offer to
+    // save anyway rather than block an offline user.
+    public async Task<JqlCheckResult> ValidateJqlAsync(string jql, CancellationToken ct = default)
+    {
+        try
+        {
+            var body = JsonSerializer.Serialize(new { jql, maxResults = 1, fields = new[] { "summary" } });
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/rest/api/3/search/jql")
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            };
+            AddHeaders(req);
+            using var res = await Http.SendAsync(req, ct);
+            if (res.IsSuccessStatusCode) return new JqlCheckResult(JqlCheck.Valid, null);
+
+            var json = await res.Content.ReadAsStringAsync(ct);
+            var reason = TryExtractJiraError(json) ?? $"Jira rejected the query ({(int)res.StatusCode}).";
+            return new JqlCheckResult(JqlCheck.Invalid, reason);
+        }
+        catch
+        {
+            return new JqlCheckResult(JqlCheck.Unreachable, null);
+        }
+    }
+
+    // Pull the first message out of a Jira error body ({ "errorMessages": [...] }); null
+    // if the body is not the expected shape.
+    private static string? TryExtractJiraError(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.TryGetProperty("errorMessages", out var msgs)
+                && msgs.ValueKind == JsonValueKind.Array && msgs.GetArrayLength() != 0)
+                return msgs[0].GetString();
+        }
+        catch
+        {
+            // Not JSON, or not the shape we expect: fall through to the caller's default.
+        }
+        return null;
     }
 
     private void AddHeaders(HttpRequestMessage req)

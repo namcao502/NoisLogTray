@@ -123,8 +123,11 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   calls `CatchUpIfDue` to retry any queue entries that were waiting on sign-in.
 - **`MainForm`** - the capture window: a standard-chrome window structured like the
   old web app - a header (title + date), then stacked `Card`s: "Log entries" (a
-  "My tickets" list from `LoggingService.GetMyTicketsAsync`, click a row to add it,
-  + date/ticket), "Will log" (one `WillLogRow` per ticket - a status dot, the colored
+  "My tickets" list from `LoggingService.GetMyTicketsAsync` - each row shows the key,
+  summary, then a right-aligned due date - click a row to add it; an "Edit JQL" button
+  opens `JqlForm` to customise the query driving that list (validated against Jira, then
+  persisted + re-fetched), + date/ticket), "Will log" (one `WillLogRow` per ticket - a
+  status dot, the colored
   ticket key, and its time slots; the dot reflects Jira verification, green valid /
   red not found / amber error, via `VerifyTicketsAsync` debounced on typing and on
   blur, suggestions pre-marked valid. While typing it previews the typed tickets for
@@ -242,6 +245,8 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   `LOG_TIME` (daily auto-log + reminder time; the dialog uses 12-hour `h:mm tt`, e.g.
   `6:00 PM`, and `AppConfig.ParseLogTime` also accepts 24-hour `H:mm`; default 18:00 via
   `AppConfig.DefaultLogTime`),
+  `JIRA_MY_TICKETS_JQL` (custom "My tickets" query, edited via `JqlForm`; default is the
+  built-in MDP filter `JiraClient.DefaultMyTicketsJql`),
   `HRM_PROJECT_ID`, `MS_GRAPH_TOKEN` (override that skips the sniff),
   `TSC_GRAPH_DRIVE_ID` / `_ITEM_ID` / `_SHARE_URL` / `_WORKSHEET`.
 
