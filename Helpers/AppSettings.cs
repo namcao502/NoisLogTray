@@ -22,20 +22,20 @@ internal sealed class AppSettings
         WriteIndented = true,
     };
 
-    internal static AppSettings Load() => LoadOrBackup(out _);
+    internal static AppSettings Load(string? path = null) => LoadOrBackup(out _, path);
 
     // A missing file yields defaults (corrupt=false). A file that exists but cannot be
     // parsed is copied aside to settings.json.bad - so the raw content, including any
     // credentials, is preserved for recovery - and defaults are returned with
     // corrupt=true. The primary file is never silently overwritten on a read failure.
-    internal static AppSettings LoadOrBackup(out bool corrupt)
+    internal static AppSettings LoadOrBackup(out bool corrupt, string? path = null)
     {
         corrupt = false;
-        var path = AppPaths.SettingsPath;
-        if (!File.Exists(path)) return new AppSettings();
+        var file = path ?? AppPaths.SettingsPath;
+        if (!File.Exists(file)) return new AppSettings();
         try
         {
-            var parsed = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(path), Options);
+            var parsed = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(file), Options);
             if (parsed != null)
             {
                 parsed.Config ??= new();
@@ -48,16 +48,16 @@ internal sealed class AppSettings
         }
 
         corrupt = true;
-        TryBackupCorrupt(path);
+        TryBackupCorrupt(file);
         return new AppSettings();
     }
 
-    private static void TryBackupCorrupt(string path)
+    private static void TryBackupCorrupt(string file)
     {
         try
         {
-            File.Copy(path, path + ".bad", overwrite: true);
-            AppLogger.Error($"settings.json was unreadable; preserved a copy at {path}.bad");
+            File.Copy(file, file + ".bad", overwrite: true);
+            AppLogger.Error($"settings.json was unreadable; preserved a copy at {file}.bad");
         }
         catch
         {
@@ -65,19 +65,19 @@ internal sealed class AppSettings
         }
     }
 
-    internal static void Save(AppSettings settings)
+    internal static void Save(AppSettings settings, string? path = null)
     {
         try
         {
-            var path = AppPaths.SettingsPath;
-            var dir = Path.GetDirectoryName(path);
+            var file = path ?? AppPaths.SettingsPath;
+            var dir = Path.GetDirectoryName(file);
             if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
             // Write to a temp file then atomically replace, so an interrupted write can
             // never leave a truncated (unreadable) settings.json behind.
-            var tmp = path + ".tmp";
+            var tmp = file + ".tmp";
             File.WriteAllText(tmp, JsonSerializer.Serialize(settings, Options));
-            File.Move(tmp, path, overwrite: true);
+            File.Move(tmp, file, overwrite: true);
         }
         catch
         {

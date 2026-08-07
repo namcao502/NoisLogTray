@@ -15,12 +15,45 @@ internal static class TicketQueue
 
     internal static IReadOnlyList<QueueEntry> Read(string? path = null)
     {
+        lock (Gate) return ReadUnlocked(path ?? AppPaths.QueuePath);
+    }
+
+    // Overwrite the queue (an empty list clears it). Throws on write failure so a
+    // failed save never looks like success.
+    internal static void Write(IReadOnlyList<QueueEntry> entries, string? path = null)
+    {
+        lock (Gate) WriteUnlocked(entries, path ?? AppPaths.QueuePath);
+    }
+
+    // Remove already-processed entries from the CURRENT on-disk queue under the lock,
+    // so tickets queued concurrently during a drain are not clobbered by a stale
+    // snapshot. For each processed entry only its listed tickets are dropped from that
+    // date; a date that still has tickets left is kept.
+    internal static void RemoveLogged(IReadOnlyList<QueueEntry> processed, string? path = null)
+    {
+        if (processed.Count == 0) return;
         var queuePath = path ?? AppPaths.QueuePath;
+        lock (Gate)
+        {
+            var result = new List<QueueEntry>();
+            foreach (var entry in ReadUnlocked(queuePath))
+            {
+                var drop = processed.Where(p => p.Date == entry.Date).SelectMany(p => p.Tickets).ToHashSet();
+                if (drop.Count == 0) { result.Add(entry); continue; }
+                var keep = entry.Tickets.Where(t => !drop.Contains(t)).ToList();
+                if (keep.Count != 0) result.Add(new QueueEntry(entry.Date, keep));
+            }
+            WriteUnlocked(result, queuePath);
+        }
+    }
+
+    // Parse + sanitize the queue file. A missing or malformed file yields an empty
+    // list (fail safe). Caller holds Gate.
+    private static IReadOnlyList<QueueEntry> ReadUnlocked(string queuePath)
+    {
         try
         {
-            string json;
-            lock (Gate) json = File.ReadAllText(queuePath);
-            using var doc = JsonDocument.Parse(json);
+            using var doc = JsonDocument.Parse(File.ReadAllText(queuePath));
             if (!doc.RootElement.TryGetProperty("entries", out var entries) || entries.ValueKind != JsonValueKind.Array)
                 return Array.Empty<QueueEntry>();
 
@@ -38,16 +71,14 @@ internal static class TicketQueue
         }
     }
 
-    // Overwrite the queue (an empty list clears it). Throws on write failure so a
-    // failed save never looks like success.
-    internal static void Write(IReadOnlyList<QueueEntry> entries, string? path = null)
+    // Serialize + write the queue. Throws on write failure. Caller holds Gate.
+    private static void WriteUnlocked(IReadOnlyList<QueueEntry> entries, string queuePath)
     {
-        var queuePath = path ?? AppPaths.QueuePath;
         var dir = Path.GetDirectoryName(queuePath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
         var payload = new { entries = entries.Select(e => new { date = e.Date, tickets = e.Tickets }) };
         var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
-        lock (Gate) File.WriteAllText(queuePath, json);
+        File.WriteAllText(queuePath, json);
     }
 
     // Coerce one raw record into a clean QueueEntry, or null to drop it. Keeps a

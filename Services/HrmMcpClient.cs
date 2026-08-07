@@ -84,6 +84,7 @@ internal static class HrmMcpClient
             Emit($"[hrm-mcp] Connecting to {HrmMcpUrl} ...");
             await using var client = await McpClient.CreateAsync(transport, cancellationToken: ct);
 
+            var errors = new List<string>();
             for (var i = 0; i < tickets.Count; i++)
             {
                 var ticket = tickets[i];
@@ -108,8 +109,12 @@ internal static class HrmMcpClient
                             onProgress?.Invoke(done, total);
                             continue;
                         }
-                        Emit($"[hrm-mcp] {ticket} rejected: {env.Error ?? "unknown"}");
-                        return (false, $"HRM rejected {ticket}: {env.Error ?? "unknown error"}");
+                        // Hard error: record it and move on to the next ticket (skip this
+                        // ticket's remaining slots) so one bad ticket doesn't block the rest.
+                        var reason = env.Error ?? "unknown error";
+                        Emit($"[hrm-mcp] {ticket} rejected: {reason}");
+                        errors.Add($"{ticket}: {reason}");
+                        break;
                     }
 
                     Emit($"[hrm-mcp] {ticket} {args["startTime"]}-{args["stopTime"]} logged");
@@ -118,11 +123,72 @@ internal static class HrmMcpClient
                 }
             }
 
-            return (true, null);
+            return errors.Count == 0
+                ? (true, null)
+                : (false, "HRM rejected " + string.Join("; ", errors));
         }
         catch (Exception e)
         {
             return (false, e.Message);
         }
+    }
+
+    // Read the total hours logged (all projects) for each date via get_my_day_logs.
+    // Returns a per-date map; a date maps to null when the read errors or the shape is
+    // unrecognised (shown as "unknown"). One MCP session for the whole batch.
+    internal static async Task<IReadOnlyDictionary<DateOnly, double?>> GetDayHoursAsync(
+        IReadOnlyList<DateOnly> dates,
+        string apiKey,
+        Action<string>? onLog = null,
+        CancellationToken ct = default)
+    {
+        void Emit(string line) => onLog?.Invoke(line);
+        var result = new Dictionary<DateOnly, double?>();
+        foreach (var d in dates) result[d] = null;
+
+        if (string.IsNullOrWhiteSpace(apiKey) || dates.Count == 0) return result;
+
+        try
+        {
+            var transport = new HttpClientTransport(new HttpClientTransportOptions
+            {
+                Endpoint = new Uri(HrmMcpUrl),
+                TransportMode = HttpTransportMode.StreamableHttp,
+                ConnectionTimeout = TimeSpan.FromSeconds(30),
+                AdditionalHeaders = new Dictionary<string, string> { ["Authorization"] = $"Bearer {apiKey}" },
+            });
+
+            Emit($"[hrm-check] Connecting to {HrmMcpUrl} ...");
+            await using var client = await McpClient.CreateAsync(transport, cancellationToken: ct);
+
+            foreach (var date in dates)
+            {
+                var iso = Hcm.ApiDate(date);
+                try
+                {
+                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    cts.CancelAfter(RequestTimeout);
+                    // projectId must be present even though it is "optional" (the schema
+                    // marks it required, like log_timesheet); null = all projects.
+                    var res = await client.CallToolAsync("get_my_day_logs",
+                        new Dictionary<string, object?> { ["workDate"] = iso, ["projectId"] = null },
+                        cancellationToken: cts.Token);
+
+                    var text = res.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text;
+                    var hours = Timesheet.ParseDayHours(res.IsError is true, text);
+                    result[date] = hours;
+                    Emit($"[hrm-check] {iso}: {(hours is null ? "unknown" : hours.Value.ToString("0.0") + "h")}");
+                }
+                catch (Exception e)
+                {
+                    Emit($"[hrm-check] {iso}: error ({e.Message})");
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Emit($"[hrm-check] connect failed: {e.Message}");
+        }
+        return result;
     }
 }

@@ -24,4 +24,11 @@ internal static class Hcm
 
     // HRM workDate (YYYY-MM-DD) for a chosen calendar date.
     internal static string ApiDate(DateOnly date) => date.ToString("yyyy-MM-dd");
+
+    // Monday of the week containing the given date (weeks start Monday).
+    internal static DateOnly MondayOf(DateOnly date)
+    {
+        var sinceMonday = ((int)date.DayOfWeek + 6) % 7; // Mon=0 ... Sun=6
+        return date.AddDays(-sinceMonday);
+    }
 }

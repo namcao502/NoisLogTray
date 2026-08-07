@@ -156,6 +156,69 @@ internal static class GraphTscClient
         }
     }
 
+    // Read the ticket text present in the target cells for each date (for the weekly
+    // coverage check). Returns a per-date map: the first non-empty target cell's text,
+    // or null when the day is empty, the sheet's date cell (B) does not match, or a read
+    // fails. One persistent workbook session for the whole batch.
+    internal static async Task<IReadOnlyDictionary<DateOnly, string?>> ReadTicketsAsync(
+        IReadOnlyList<DateOnly> dates,
+        string token,
+        GraphTscOptions options,
+        Action<string>? onLog = null,
+        CancellationToken ct = default)
+    {
+        void Emit(string line) => onLog?.Invoke(line);
+        var result = new Dictionary<DateOnly, string?>();
+        foreach (var d in dates) result[d] = null;
+
+        if (string.IsNullOrWhiteSpace(token) || dates.Count == 0) return result;
+
+        var columns = options.Columns != null && options.Columns.Count != 0
+            ? options.Columns
+            : TscCells.TargetColumns;
+
+        try
+        {
+            var reference = await ResolveDriveItemAsync(token, options, Emit, ct);
+            var sessionId = await CreateSessionAsync(token, reference, ct);
+            try
+            {
+                foreach (var d in dates)
+                {
+                    var worksheet = string.IsNullOrEmpty(options.Worksheet) ? TscCells.GetWorksheetForDate(d) : options.Worksheet;
+                    var row = TscCells.GetRowForDate(d);
+                    var expected = TscCells.GetExpectedDateLabel(d);
+
+                    // Sanity: only trust cells on a row whose column B matches the date.
+                    var bVal = await ReadCellAsync(token, reference, worksheet, $"B{row}", sessionId, ct);
+                    if (!TscCells.DateLabelsMatch(bVal, expected))
+                    {
+                        Emit($"[tsc-check] {d:yyyy-MM-dd}: B{row} \"{bVal}\" != expected \"{expected}\"; skipping");
+                        continue;
+                    }
+
+                    string? found = null;
+                    foreach (var cell in TscCells.GetCellsForDate(d, columns))
+                    {
+                        var val = await ReadCellAsync(token, reference, worksheet, cell, sessionId, ct);
+                        if (val.Length != 0) { found = val; break; }
+                    }
+                    result[d] = found;
+                    Emit($"[tsc-check] {d:yyyy-MM-dd}: {(found is null ? "(empty)" : found)}");
+                }
+            }
+            finally
+            {
+                await CloseSessionAsync(token, reference, sessionId);
+            }
+        }
+        catch (Exception e)
+        {
+            Emit($"[tsc-check] Error: {e.Message}");
+        }
+        return result;
+    }
+
     private static async Task<DriveItemRef> ResolveDriveItemAsync(string token, GraphTscOptions options, Action<string> emit, CancellationToken ct)
     {
         if (!string.IsNullOrEmpty(options.DriveId) && !string.IsNullOrEmpty(options.ItemId))

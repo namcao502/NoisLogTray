@@ -71,4 +71,45 @@ public class TimesheetTests
         Assert.True(args.ContainsKey("idempotencyKey"));
         Assert.Null(args["idempotencyKey"]);
     }
+
+    [Fact]
+    public void ParseDayHoursReadsTotalHours()
+    {
+        var h = Timesheet.ParseDayHours(false, "{\"success\":true,\"data\":{\"totalHours\":8.0,\"totalSeconds\":28800}}");
+        Assert.Equal(8.0, h);
+    }
+
+    [Fact]
+    public void ParseDayHoursReadsRealGetMyDayLogsShape()
+    {
+        // The actual get_my_day_logs envelope (workDate + projectId=null).
+        var text = "{\"success\":true,\"data\":{\"workDate\":\"2025-07-01\",\"totalSeconds\":28800,\"totalHours\":8," +
+                   "\"intervals\":[{\"taskId\":\"MDP-4243\",\"start\":\"08:30:00\",\"stop\":\"12:00:00\",\"durationSeconds\":12600}]}}";
+        Assert.Equal(8.0, Timesheet.ParseDayHours(false, text));
+    }
+
+    [Fact]
+    public void ParseDayHoursFallsBackToTotalSeconds()
+    {
+        var h = Timesheet.ParseDayHours(false, "{\"success\":true,\"data\":{\"totalSeconds\":18000}}");
+        Assert.Equal(5.0, h);
+    }
+
+    [Fact]
+    public void ParseDayHoursIsCaseInsensitive()
+    {
+        var h = Timesheet.ParseDayHours(false, "{\"success\":true,\"data\":{\"TotalHours\":7.5}}");
+        Assert.Equal(7.5, h);
+    }
+
+    [Theory]
+    [InlineData(true, "{\"success\":true,\"data\":{\"totalHours\":8}}")] // MCP-level error
+    [InlineData(false, "{\"success\":false,\"error\":{\"code\":\"X\"}}")] // business failure
+    [InlineData(false, "{\"success\":true,\"data\":{}}")]                 // no hours field
+    [InlineData(false, "not json")]                                       // unparseable
+    [InlineData(false, "")]                                               // empty
+    public void ParseDayHoursReturnsNullWhenUnavailable(bool isError, string text)
+    {
+        Assert.Null(Timesheet.ParseDayHours(isError, text));
+    }
 }

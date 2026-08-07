@@ -71,4 +71,46 @@ public class TicketQueueTests : IDisposable
         File.WriteAllText(_path, "{ not json");
         Assert.Empty(TicketQueue.Read(_path));
     }
+
+    [Fact]
+    public void RemoveLoggedDropsOnlyProcessedTickets()
+    {
+        TicketQueue.Write(new List<QueueEntry>
+        {
+            new("2026-07-24", new[] { "MDP-1", "MDP-2" }),
+            new("2026-07-25", new[] { "MDP-3" }),
+        }, _path);
+
+        // Logged MDP-1 of the 24th, and all of the 25th.
+        TicketQueue.RemoveLogged(new List<QueueEntry>
+        {
+            new("2026-07-24", new[] { "MDP-1" }),
+            new("2026-07-25", new[] { "MDP-3" }),
+        }, _path);
+
+        var read = TicketQueue.Read(_path);
+        Assert.Single(read);
+        Assert.Equal("2026-07-24", read[0].Date);
+        Assert.Equal(new[] { "MDP-2" }, read[0].Tickets); // MDP-2 kept; 25th fully removed
+    }
+
+    [Fact]
+    public void RemoveLoggedKeepsEntriesQueuedDuringDrain()
+    {
+        // Simulates the race the fix addresses: the drain snapshotted [24th], and while
+        // it ran the user queued [26th]. RemoveLogged is given only the snapshot it
+        // processed, so the concurrently-added 26th must survive on disk.
+        TicketQueue.Write(new List<QueueEntry>
+        {
+            new("2026-07-24", new[] { "MDP-1" }),
+            new("2026-07-26", new[] { "MDP-9" }), // added mid-drain
+        }, _path);
+
+        TicketQueue.RemoveLogged(new List<QueueEntry> { new("2026-07-24", new[] { "MDP-1" }) }, _path);
+
+        var read = TicketQueue.Read(_path);
+        Assert.Single(read);
+        Assert.Equal("2026-07-26", read[0].Date);
+        Assert.Equal(new[] { "MDP-9" }, read[0].Tickets);
+    }
 }

@@ -111,6 +111,35 @@ internal sealed class LoggingService
         return new EntryLogResult(tscTask.Result.Success, tscTask.Result.Error, hrmTask.Result.Success, hrmTask.Result.Error);
     }
 
+    // Read back each date's coverage from both destinations for the weekly check:
+    // TSC ticket cell + HRM total hours. Acquires one Graph token, then runs the TSC
+    // read and HRM hours in parallel (HRM is browser-free). Future dates are not read
+    // (HRM rejects future stop times and nothing is logged yet) and come back as nulls.
+    internal async Task<IReadOnlyList<DayCoverage>> CheckWeekAsync(
+        IReadOnlyList<DateOnly> dates, Action<string>? onLog = null, CancellationToken ct = default)
+    {
+        var today = Hcm.Today();
+        var readable = dates.Where(d => d <= today).ToList();
+
+        var token = await AcquireGraphTokenAsync(onLog);
+
+        var tscTask = string.IsNullOrEmpty(token)
+            ? Task.FromResult((IReadOnlyDictionary<DateOnly, string?>)new Dictionary<DateOnly, string?>())
+            : GraphTscClient.ReadTicketsAsync(readable, token, _config.Graph, onLog, ct);
+        var hrmTask = HrmMcpClient.GetDayHoursAsync(readable, _config.HrmApiKey, onLog, ct);
+
+        await Task.WhenAll(tscTask, hrmTask);
+
+        var result = new List<DayCoverage>();
+        foreach (var d in dates)
+        {
+            tscTask.Result.TryGetValue(d, out var ticket);
+            hrmTask.Result.TryGetValue(d, out var hours);
+            result.Add(new DayCoverage(d, hours, ticket));
+        }
+        return result;
+    }
+
     // Drain the queue: sniff one Graph token, log every entry to both
     // destinations, and remove only the entries that fully succeeded (re-runs are
     // idempotent via TSC skip-if-equal + HRM LOGTIME_OVERLAP, so kept entries are
@@ -127,13 +156,17 @@ internal sealed class LoggingService
         onLog?.Invoke($"[drain] {entries.Count} queued entr{(entries.Count == 1 ? "y" : "ies")}.");
         var token = await AcquireGraphTokenAsync(onLog);
 
-        var remaining = new List<QueueEntry>();
+        // Entries we are done with (logged, or a permanently-bad date). Removed from the
+        // CURRENT queue at the end so anything queued mid-drain survives.
+        var processed = new List<QueueEntry>();
         var logged = 0;
+        var kept = 0;
         foreach (var entry in entries)
         {
             if (!DateOnly.TryParseExact(entry.Date, "yyyy-MM-dd", out var date))
             {
-                onLog?.Invoke($"[drain] Skipping entry with bad date '{entry.Date}'.");
+                onLog?.Invoke($"[drain] Dropping entry with bad date '{entry.Date}'.");
+                processed.Add(entry);
                 continue;
             }
 
@@ -142,16 +175,17 @@ internal sealed class LoggingService
             if (result.AllSuccess)
             {
                 logged++;
+                processed.Add(entry);
             }
             else
             {
-                remaining.Add(entry);
+                kept++;
                 onLog?.Invoke($"[drain] {entry.Date} kept for retry (tsc={(result.TscSuccess ? "ok" : result.TscError)}, hrm={(result.HrmSuccess ? "ok" : result.HrmError)}).");
             }
         }
 
-        TicketQueue.Write(remaining);
-        onLog?.Invoke($"[drain] Done. logged={logged}, kept={remaining.Count}.");
-        return new DrainResult(entries.Count, logged, remaining.Count);
+        TicketQueue.RemoveLogged(processed);
+        onLog?.Invoke($"[drain] Done. logged={logged}, kept={kept}.");
+        return new DrainResult(entries.Count, logged, kept);
     }
 }

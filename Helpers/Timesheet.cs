@@ -64,4 +64,40 @@ internal static class Timesheet
 
         return new ToolEnvelope(true, null, null);
     }
+
+    // Parse the total hours logged for a day out of a get_my_day_logs result. The tool
+    // returns `{ success, data: { ... total seconds/hours ... } }`; we read data's
+    // totalHours (case-insensitive), else totalSeconds / 3600. Null on error, a
+    // non-success envelope, or an unrecognised shape (shown as "unknown" in the UI).
+    internal static double? ParseDayHours(bool isError, string? text)
+    {
+        if (isError || string.IsNullOrEmpty(text)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(text);
+            var root = doc.RootElement;
+            if (!root.TryGetProperty("success", out var s) || s.ValueKind != JsonValueKind.True) return null;
+            if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Object) return null;
+
+            if (TryGetNumber(data, "totalHours", out var hours)) return hours;
+            if (TryGetNumber(data, "totalSeconds", out var seconds)) return seconds / 3600.0;
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TryGetNumber(JsonElement obj, string name, out double value)
+    {
+        value = 0;
+        foreach (var p in obj.EnumerateObject())
+            if (string.Equals(p.Name, name, StringComparison.OrdinalIgnoreCase) && p.Value.ValueKind == JsonValueKind.Number)
+            {
+                value = p.Value.GetDouble();
+                return true;
+            }
+        return false;
+    }
 }

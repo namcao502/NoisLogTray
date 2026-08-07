@@ -93,13 +93,17 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `Theme.Toggle`; `MainForm.ApplyTheme` re-colors native controls). It defaults to dark
   and persists the choice through `AppSettings` (`Theme.Load` runs in `Program.Main`;
   `Theme.Toggle` does a read-modify-write so it keeps the window position). Also `TrayApp`,
-  `MainForm`, `CredentialsForm` (the themed first-run / edit-credentials dialog), and
+  `MainForm`, `CredentialsForm` (the themed first-run / edit-credentials dialog),
+  `WeeklyCheckForm` (read-only weekly coverage: HRM hours + TSC ticket per weekday,
+  opened from the tray "Weekly check..." item), and
   owner-drawn controls: `MacButton`
   (rounded button), `Card` (rounded card surface), `RoundedHost` (rounded border
   around native controls like the list/textbox), `RoundedDatePicker` (rounded date
   field with a custom `ModernCalendar` popup in a rounded `CalendarPopupForm`, replacing
   the native `DateTimePicker`/`MonthCalendar`), `WillLogRow` (one owner-drawn Will Log
-  line), and `MiniProgress` (thin rounded bar).
+  line), `MiniProgress` (thin rounded bar), and `ActivityLogPanel` (the bottom activity
+  block - a self-theming control owning the scrolling console + TSC/HRM progress bars;
+  `MainForm` just delegates `AppendLog`/`ShowStatus`/`ShowProgress` to it).
 - `Program.cs` stays at the repo root.
 
 - **`Program.cs`** - entry point. Single-instance `Global\` mutex, global exception
@@ -151,7 +155,9 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   progress. `AcquireGraphTokenAsync` **caches** the sniffed token (reused until ~2 min
   before its JWT `exp`, guarded by a `SemaphoreSlim`) so repeated TSC actions don't each
   relaunch Chrome; `InvalidateGraphToken` clears it and is called after a successful
-  re-auth.
+  re-auth. `CheckWeekAsync` is the read-back path (weekly coverage): one Graph token,
+  then `GraphTscClient.ReadTicketsAsync` + `HrmMcpClient.GetDayHoursAsync` in parallel,
+  merged into `DayCoverage` per date (future dates skipped -> nulls).
 
 Bottom-layer clients:
 
@@ -160,10 +166,13 @@ Bottom-layer clients:
   per-user configurable via `GraphTscOptions.Columns` (`TSC_GRAPH_COLUMNS`), one
   worksheet per year. Uses a persistent workbook session (`persistChanges:true`).
   **Fail-closed date safety**: reads column B for the row and aborts if it does not
-  match the expected `M/D/YYYY`, to avoid ever logging the wrong day.
+  match the expected `M/D/YYYY`, to avoid ever logging the wrong day. `ReadTicketsAsync`
+  reads back the ticket cell per date for the weekly check (same B sanity, read-only).
 - **`HrmMcpClient`** - calls the `log_timesheet` MCP tool (Bearer = `HRM_API_KEY`).
   A time slot straddling lunch becomes two calls (first creates the task, second
-  appends).
+  appends); a hard-failing ticket is skipped so the rest still log (partial failure).
+  `GetDayHoursAsync` reads back total hours per date via the `get_my_day_logs` tool
+  (parsed by `Timesheet.ParseDayHours`) for the weekly check.
 - **`TscTokenSniffer`** - Playwright-driven token source for Graph. Runs **headless**
   to sniff a `Files.ReadWrite.All` Bearer off `office.com`/SharePoint from the saved
   session, and to check the session; **only re-auth opens a visible browser**. Uses a
@@ -178,9 +187,13 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 ## Cross-cutting rules to preserve
 
 - **Idempotent re-runs.** Re-logging is safe: TSC skips a cell already equal to the
-  ticket; HRM treats `LOGTIME_OVERLAP` as an already-done skip. `DrainQueueAsync`
-  therefore only removes fully-succeeded entries and keeps the rest for retry. Do
-  not change drain to remove partially-failed entries.
+  ticket; HRM treats `LOGTIME_OVERLAP` as an already-done skip (and continues past a
+  hard-failing ticket so one bad ticket doesn't block the rest, reporting a partial
+  failure). `DrainQueueAsync` therefore only removes fully-succeeded entries and keeps
+  the rest for retry. Do not change drain to remove partially-failed entries. Removal
+  goes through `TicketQueue.RemoveLogged`, a locked read-modify-write against the
+  CURRENT queue (removing only the processed entries), so a ticket queued concurrently
+  during a drain is never clobbered - do not revert this to overwriting with a snapshot.
 - **All time is Asia/Ho_Chi_Minh** and must go through `Hcm` (no DST; UTC+7 fallback
   if the tz lookup fails). Worksheet year, day-of-year row, and HRM `workDate` all
   derive from it. Consequence: HRM rejects future stop times, so **today's** queue
@@ -219,7 +232,10 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   (`AppConfig.MigrateLegacyEnv`) then deleted, so config lives in one file. `settings.json`
   writes are **atomic** (temp + rename) and a corrupt file is preserved as
   `settings.json.bad` rather than silently reset (`AppSettings.LoadOrBackup`). The
-  project `.env` is gitignored and never copied to a build.
+  project `.env` is gitignored and never copied to a build. Secret keys
+  (`JIRA_API_TOKEN`, `HRM_API_KEY`, see `Secrets.Keys`) are encrypted at rest with
+  Windows DPAPI (CurrentUser) - stored `enc:`-prefixed, decrypted only when building
+  the runtime config; `AppConfig` upgrades any leftover plaintext secret on load.
   Required keys: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `HRM_API_KEY`.
   Optional: `TSC_GRAPH_COLUMNS` (per-user columns in the shared workbook; default
   `M, J` via `TscCells.TargetColumns`, parsed by `TscCells.ParseColumns`),
@@ -237,6 +253,7 @@ key/value map of secrets/settings written by `CredentialsForm`, via `AppSettings
 `logs/app.log`. A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
 first load and removed. A missing or malformed `queue.json` yields an empty queue by
 design so the 18:00 runner never throws; `AppSettings` likewise falls back to defaults on
-a missing/bad `settings.json` (preserving the bad copy as `settings.json.bad`). The TSC
-Chrome profile (the saved Microsoft session) lives separately at
+a missing/bad `settings.json` (preserving the bad copy as `settings.json.bad`). `app.log`
+is size-capped and rolls to `app.log.1` (`AppLogger`). The TSC Chrome profile (the saved
+Microsoft session) lives separately at
 `%UserProfile%\.tsc-daily-log-browser` (`TscTokenSniffer.ProfileDir`).

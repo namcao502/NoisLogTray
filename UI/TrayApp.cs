@@ -14,6 +14,7 @@ internal sealed class TrayApp : ApplicationContext
     private readonly SixPmScheduler _scheduler;
     private readonly ToolStripMenuItem _startupItem;
     private MainForm? _form;
+    private WeeklyCheckForm? _weeklyForm;
     private int _draining; // 0 = idle, 1 = a drain is running
 
     internal TrayApp()
@@ -28,6 +29,7 @@ internal sealed class TrayApp : ApplicationContext
         var menu = new ContextMenuStrip();
         menu.Items.Add("Open", null, (_, _) => ShowForm());
         menu.Items.Add("Log queue now", null, async (_, _) => await DrainAsync(fromUser: true));
+        menu.Items.Add("Weekly check...", null, (_, _) => ShowWeeklyCheck());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Check TSC session", null, async (_, _) => await CheckTscAsync());
         menu.Items.Add("Re-authenticate TSC", null, async (_, _) => await ReauthAsync());
@@ -135,6 +137,17 @@ internal sealed class TrayApp : ApplicationContext
         _form.WindowState = FormWindowState.Normal;
         _form.Activate();
         _form.BringToFront();
+    }
+
+    // Open (or re-focus) the read-only weekly coverage window.
+    private void ShowWeeklyCheck()
+    {
+        if (_service == null) { Notify("Config not loaded; set up credentials first.", ToolTipIcon.Warning); return; }
+        if (_weeklyForm == null || _weeklyForm.IsDisposed) _weeklyForm = new WeeklyCheckForm(_service);
+        _weeklyForm.Show();
+        _weeklyForm.WindowState = FormWindowState.Normal;
+        _weeklyForm.Activate();
+        _weeklyForm.BringToFront();
     }
 
     private void UpdateTooltip() => RunOnUi(() =>
@@ -282,8 +295,8 @@ internal sealed class TrayApp : ApplicationContext
 
     private void Log(string line)
     {
-        AppLogger.Info(line);
-        RunOnUi(() => { if (_form is { IsDisposed: false }) _form.AppendLog(line); });
+        AppLogger.Info(line); // log to file once here...
+        RunOnUi(() => { if (_form != null && !_form.IsDisposed) _form.ShowActivityLine(line); }); // ...display only
     }
 
     private void Notify(string message, ToolTipIcon icon) =>

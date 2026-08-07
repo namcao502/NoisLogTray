@@ -44,12 +44,6 @@ internal sealed class MainForm : Form
     private const int CardW = 560;
     private const int InnerW = 528; // CardW - 2*16
 
-    // Bottom activity block geometry (inside the activity Card).
-    private const int ActivityCardH = 150;
-    private const int ActivityLogTop = 38;
-    private const int ActivityProgHrmY = ActivityCardH - 28; // 122
-    private const int ActivityProgTscY = ActivityProgHrmY - 22; // 100
-
     private readonly LoggingService? _service;
 
     private readonly Panel _body = new();
@@ -82,33 +76,13 @@ internal sealed class MainForm : Form
     private RoundedHost? _willLogHost;
     private Card? _actionsCard;
 
-    // Bottom "activity" block: a Card with a scrolling console log and, below it,
-    // the TSC/HRM progress bars.
-    private static readonly Color OkColor = Color.FromArgb(46, 160, 80);
-    private static readonly Color ErrColor = Color.FromArgb(230, 76, 76);
-    private const int ActivityCap = 200; // keep the last N lines; trim older ones
-
-    private readonly Panel _activityPanel = new();
-    private readonly Card _activityCard = new();
-    private readonly RoundedHost _activityHost = new();
-    private readonly RichTextBox _activityLog = new();
-    private readonly List<ActivityLine> _activityLines = new();
-
-    private readonly MiniProgress _tscBar = new();
-    private readonly MiniProgress _hrmBar = new();
-    private readonly Label _tscLabel = new();
-    private readonly Label _hrmLabel = new();
-    private readonly Label _tscPct = new();
-    private readonly Label _hrmPct = new();
+    // The bottom activity block (scrolling console + TSC/HRM progress bars).
+    private readonly ActivityLogPanel _activity = new();
 
     private IReadOnlyList<JiraSuggestion> _lastSuggestions = Array.Empty<JiraSuggestion>();
     private bool _busy;
 
     private enum VState { Verifying, Valid, NotFound, Error }
-
-    // One line in the activity console (a normal line, or a green/red result line).
-    // Time is captured when the line is added, so a re-render keeps the original stamp.
-    private readonly record struct ActivityLine(DateTime Time, string Text, bool IsResult, bool Ok);
 
     internal event Action? QueueChanged;
 
@@ -142,7 +116,7 @@ internal sealed class MainForm : Form
         RestoreWindowPosition();
 
         BuildBody();
-        BuildActivityPanel();
+        Controls.Add(_activity);
     }
 
     // Restore the last window position if it still lands on a connected monitor;
@@ -395,7 +369,6 @@ internal sealed class MainForm : Form
         BackColor = Theme.WindowBg;
         _body.BackColor = Theme.WindowBg;
         _header.BackColor = Theme.WindowBg;
-        _activityPanel.BackColor = Theme.WindowBg;
 
         _headerTitle.ForeColor = Theme.TextPrimary;
         _headerSubtitle.ForeColor = Theme.TextSecondary;
@@ -408,170 +381,31 @@ internal sealed class MainForm : Form
         _suggestionStatus.BackColor = Theme.InputBg;
         _suggestionStatus.ForeColor = Theme.TextSecondary;
         _willLogList.BackColor = Theme.InputBg;
-        _activityLog.BackColor = Theme.InputBg;
-        _activityLog.ForeColor = Theme.TextPrimary;
 
-        _tscLabel.ForeColor = Theme.TextSecondary;
-        _hrmLabel.ForeColor = Theme.TextSecondary;
-        _tscPct.ForeColor = Theme.TextSecondary;
-        _hrmPct.ForeColor = Theme.TextSecondary;
-
-        RenderActivityLog();
         RenderSuggestions(_lastSuggestions);
         UpdateWillLog();
         Invalidate(true);
     }
 
-    // Bottom activity block: a Card holding the "ACTIVITY" console log and, below it,
-    // the TSC/HRM progress bars (hidden until a log run). Docked to the end of the
-    // window; the body (cards) fills the space above it.
-    private void BuildActivityPanel()
-    {
-        _activityPanel.Dock = DockStyle.Bottom;
-        _activityPanel.Height = ActivityCardH + 16; // 8px margin above and below the card
-        _activityPanel.BackColor = Theme.WindowBg;
-
-        _activityCard.Size = new Size(CardW, ActivityCardH);
-        _activityCard.Location = new Point(20, 8);
-        _activityCard.Controls.Add(SectionLabel("ACTIVITY", 16, 14));
-
-        _activityHost.Location = new Point(16, ActivityLogTop);
-        _activityLog.Dock = DockStyle.Fill;
-        _activityLog.BorderStyle = BorderStyle.None;
-        _activityLog.ReadOnly = true;
-        _activityLog.TabStop = false;
-        _activityLog.WordWrap = true;
-        _activityLog.ScrollBars = RichTextBoxScrollBars.Vertical;
-        _activityLog.BackColor = Theme.InputBg;
-        _activityLog.ForeColor = Theme.TextPrimary;
-        _activityLog.Font = new Font("Consolas", 9F);
-        _activityLog.Cursor = Cursors.Default;
-        _activityHost.Controls.Add(_activityLog);
-        _activityCard.Controls.Add(_activityHost);
-
-        ConfigureProgressRow(_tscLabel, "TSC", _tscBar, _tscPct, ActivityProgTscY);
-        ConfigureProgressRow(_hrmLabel, "HRM", _hrmBar, _hrmPct, ActivityProgHrmY);
-
-        _activityPanel.Controls.Add(_activityCard);
-        Controls.Add(_activityPanel);
-        LayoutActivityLog(progressVisible: false);
-    }
-
     // Every activity line goes to the log file AND the activity console. Safe to call
-    // from a background thread (marshals to the UI thread).
+    // from a background thread (the console marshals to the UI thread internally).
     internal void AppendLog(string line)
     {
         AppLogger.Info(line);
-        AddActivity(line, isResult: false, ok: false);
+        _activity.Append(line, isResult: false, ok: false);
     }
+
+    // Show a line in the console WITHOUT writing it to the log file - the caller has
+    // already logged it. Used by TrayApp so a line is not written to app.log twice.
+    internal void ShowActivityLine(string line) => _activity.Append(line, isResult: false, ok: false);
 
     // Append a coloured result line (green on success, red on failure) to the console.
-    private void ShowStatus(string message, bool ok) => AddActivity(message, isResult: true, ok: ok);
+    private void ShowStatus(string message, bool ok) => _activity.Append(message, isResult: true, ok: ok);
 
-    private void AddActivity(string text, bool isResult, bool ok)
-    {
-        if (InvokeRequired)
-        {
-            BeginInvoke(new Action<string, bool, bool>(AddActivity), text, isResult, ok);
-            return;
-        }
-
-        _activityLines.Add(new ActivityLine(DateTime.Now, text, isResult, ok));
-        if (_activityLines.Count > ActivityCap)
-        {
-            _activityLines.RemoveRange(0, _activityLines.Count - ActivityCap);
-            RenderActivityLog(); // list was trimmed; rebuild so the box matches
-            return;
-        }
-        AppendLineToBox(_activityLines[^1]);
-    }
-
-    // Rebuild the whole console from the backing list, applying the current theme
-    // (called on a theme switch, and after the list is trimmed).
-    private void RenderActivityLog()
-    {
-        _activityLog.Clear();
-        foreach (var line in _activityLines) AppendLineToBox(line);
-    }
-
-    private void AppendLineToBox(ActivityLine line)
-    {
-        var color = line.IsResult ? (line.Ok ? OkColor : ErrColor) : Theme.TextPrimary;
-        _activityLog.SelectionStart = _activityLog.TextLength;
-        _activityLog.SelectionLength = 0;
-
-        // Dim timestamp prefix, then the message in its own colour.
-        _activityLog.SelectionColor = Theme.TextSecondary;
-        _activityLog.AppendText(line.Time.ToString("HH:mm:ss") + "  ");
-        _activityLog.SelectionColor = color;
-        _activityLog.AppendText(line.Text + Environment.NewLine);
-
-        _activityLog.SelectionColor = _activityLog.ForeColor;
-        _activityLog.SelectionStart = _activityLog.TextLength;
-        if (_activityLog.IsHandleCreated) _activityLog.ScrollToCaret();
-    }
-
-    private void ConfigureProgressRow(Label label, string text, MiniProgress bar, Label pct, int y)
-    {
-        label.Text = text;
-        label.AutoSize = false;
-        label.Bounds = new Rectangle(16, y - 2, 36, 16);
-        label.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
-        label.ForeColor = Theme.TextSecondary;
-        label.BackColor = Color.Transparent;
-        label.TextAlign = ContentAlignment.MiddleLeft;
-
-        bar.Bounds = new Rectangle(54, y + 3, 440, 6);
-
-        pct.Text = "0%";
-        pct.AutoSize = false;
-        pct.Bounds = new Rectangle(500, y - 2, 44, 16);
-        pct.Font = new Font("Segoe UI", 8.5F);
-        pct.ForeColor = Theme.TextSecondary;
-        pct.BackColor = Color.Transparent;
-        pct.TextAlign = ContentAlignment.MiddleRight;
-
-        _activityCard.Controls.Add(label);
-        _activityCard.Controls.Add(bar);
-        _activityCard.Controls.Add(pct);
-    }
-
-    private void ShowProgress(bool tsc, bool hrm)
-    {
-        _tscBar.SetFraction(0);
-        _hrmBar.SetFraction(0);
-        _tscPct.Text = "0%";
-        _hrmPct.Text = "0%";
-        LayoutActivityLog(progressVisible: true);
-        _tscLabel.Visible = _tscBar.Visible = _tscPct.Visible = tsc;
-        _hrmLabel.Visible = _hrmBar.Visible = _hrmPct.Visible = hrm;
-    }
-
-    private void HideProgress() => LayoutActivityLog(progressVisible: false);
-
-    // Size the console to leave room for the progress bars only while they show.
-    private void LayoutActivityLog(bool progressVisible)
-    {
-        _tscLabel.Visible = _tscBar.Visible = _tscPct.Visible = progressVisible;
-        _hrmLabel.Visible = _hrmBar.Visible = _hrmPct.Visible = progressVisible;
-        var bottom = progressVisible ? ActivityProgTscY - 8 : ActivityCardH - 12;
-        _activityHost.Size = new Size(InnerW, Math.Max(40, bottom - _activityHost.Top));
-    }
-
-    private void ReportTsc(int done, int total) => ReportProgress(_tscBar, _tscPct, done, total);
-    private void ReportHrm(int done, int total) => ReportProgress(_hrmBar, _hrmPct, done, total);
-
-    private void ReportProgress(MiniProgress bar, Label pct, int done, int total)
-    {
-        if (InvokeRequired)
-        {
-            BeginInvoke(new Action(() => ReportProgress(bar, pct, done, total)));
-            return;
-        }
-        var fraction = total > 0 ? (double)done / total : 0;
-        bar.SetFraction(fraction);
-        pct.Text = $"{(int)Math.Round(fraction * 100)}%";
-    }
+    private void ShowProgress(bool tsc, bool hrm) => _activity.ShowProgress(tsc, hrm);
+    private void HideProgress() => _activity.HideProgress();
+    private void ReportTsc(int done, int total) => _activity.ReportTsc(done, total);
+    private void ReportHrm(int done, int total) => _activity.ReportHrm(done, total);
 
     // Load the user's open Jira tickets into the suggestions panel (click to add).
     private async void LoadMyTicketsAsync()

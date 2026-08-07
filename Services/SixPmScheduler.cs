@@ -14,6 +14,7 @@ internal sealed class SixPmScheduler : IDisposable
 
     private readonly Func<Task> _onFire;
     private readonly Action<string>? _log;
+    private readonly object _gate = new(); // guards _fireTime / _nextFire across threads
     private System.Threading.Timer? _timer;
     private TimeOnly _fireTime;
     private DateTimeOffset _nextFire;
@@ -27,32 +28,36 @@ internal sealed class SixPmScheduler : IDisposable
         _log = log;
     }
 
-    internal DateTimeOffset NextFireTime()
+    // The next fire instant for a daily time: today if still ahead, else tomorrow.
+    private static DateTimeOffset ComputeNextFire(TimeOnly fireTime)
     {
         var now = Hcm.Now();
-        var todayFire = new DateTimeOffset(now.Year, now.Month, now.Day, _fireTime.Hour, _fireTime.Minute, 0, now.Offset);
+        var todayFire = new DateTimeOffset(now.Year, now.Month, now.Day, fireTime.Hour, fireTime.Minute, 0, now.Offset);
         return now < todayFire ? todayFire : todayFire.AddDays(1);
     }
 
     // Change the daily fire time (e.g. after the user edits it) and re-arm the next fire.
     internal void SetFireTime(TimeOnly fireTime)
     {
-        _fireTime = fireTime;
-        _nextFire = NextFireTime();
-        _log?.Invoke($"[scheduler] Log time set to {_fireTime:HH:mm}; next fire at {_nextFire:yyyy-MM-dd HH:mm}.");
+        DateTimeOffset next;
+        lock (_gate) { _fireTime = fireTime; _nextFire = ComputeNextFire(_fireTime); next = _nextFire; }
+        _log?.Invoke($"[scheduler] Log time set to {fireTime:HH:mm}; next fire at {next:yyyy-MM-dd HH:mm}.");
     }
 
     internal void Start()
     {
-        _nextFire = NextFireTime();
-        _log?.Invoke($"[scheduler] Next auto-log at {_nextFire:yyyy-MM-dd HH:mm} (checking every {CheckInterval.TotalSeconds:0}s).");
+        DateTimeOffset next;
+        lock (_gate) { _nextFire = ComputeNextFire(_fireTime); next = _nextFire; }
+        _log?.Invoke($"[scheduler] Next auto-log at {next:yyyy-MM-dd HH:mm} (checking every {CheckInterval.TotalSeconds:0}s).");
         _timer = new System.Threading.Timer(_ => Tick(), null, TimeSpan.Zero, CheckInterval);
     }
 
     private void Tick()
     {
         if (_disposed) return;
-        if (Hcm.Now() < _nextFire) return;
+        DateTimeOffset next;
+        lock (_gate) next = _nextFire;
+        if (Hcm.Now() < next) return;
         if (Interlocked.CompareExchange(ref _firing, 1, 0) != 0) return; // a fire is already running
         _ = FireAsync();
     }
@@ -71,8 +76,9 @@ internal sealed class SixPmScheduler : IDisposable
         }
         finally
         {
-            _nextFire = NextFireTime();
-            _log?.Invoke($"[scheduler] Next auto-log at {_nextFire:yyyy-MM-dd HH:mm}.");
+            DateTimeOffset next;
+            lock (_gate) { _nextFire = ComputeNextFire(_fireTime); next = _nextFire; }
+            _log?.Invoke($"[scheduler] Next auto-log at {next:yyyy-MM-dd HH:mm}.");
             Interlocked.Exchange(ref _firing, 0);
         }
     }

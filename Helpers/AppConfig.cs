@@ -63,7 +63,7 @@ internal sealed class AppConfig
     // Current effective values for the managed keys, for pre-filling the edit dialog.
     internal static IReadOnlyDictionary<string, string> ReadUserValues()
     {
-        var env = new Env(AppSettings.Load().Config);
+        var env = new Env(Decrypted(AppSettings.Load().Config));
         var values = new Dictionary<string, string>();
         foreach (var key in UserKeys)
         {
@@ -78,7 +78,8 @@ internal sealed class AppConfig
     internal static void SaveUserConfig(IReadOnlyDictionary<string, string> values)
     {
         var settings = AppSettings.Load();
-        foreach (var kv in values) settings.Config[kv.Key] = kv.Value;
+        foreach (var kv in values)
+            settings.Config[kv.Key] = Secrets.IsSecretKey(kv.Key) ? Secrets.Protect(kv.Value) : kv.Value;
         AppSettings.Save(settings);
     }
 
@@ -88,9 +89,10 @@ internal sealed class AppConfig
     {
         var settings = AppSettings.LoadOrBackup(out var corrupt);
         MigrateLegacyEnv(settings);
+        UpgradeSecretsAtRest(settings);
         try
         {
-            var config = new AppConfig(new Env(settings.Config));
+            var config = new AppConfig(new Env(Decrypted(settings.Config)));
             error = null;
             return config;
         }
@@ -115,7 +117,8 @@ internal sealed class AppConfig
 
             var parsed = Env.ParseFile(legacy);
             foreach (var kv in parsed)
-                if (!settings.Config.ContainsKey(kv.Key)) settings.Config[kv.Key] = kv.Value;
+                if (!settings.Config.ContainsKey(kv.Key))
+                    settings.Config[kv.Key] = Secrets.IsSecretKey(kv.Key) ? Secrets.Protect(kv.Value) : kv.Value;
 
             AppSettings.Save(settings);
             File.Delete(legacy);
@@ -125,5 +128,29 @@ internal sealed class AppConfig
         {
             AppLogger.Error($"Legacy .env migration failed: {e.Message}");
         }
+    }
+
+    // A copy of the stored config with secret values decrypted, for building the
+    // runtime Env. Non-secret keys pass through unchanged.
+    private static Dictionary<string, string> Decrypted(IReadOnlyDictionary<string, string> config)
+    {
+        var result = new Dictionary<string, string>(config.Count);
+        foreach (var kv in config)
+            result[kv.Key] = Secrets.IsSecretKey(kv.Key) ? Secrets.Unprotect(kv.Value) : kv.Value;
+        return result;
+    }
+
+    // One-time upgrade: encrypt any secret values still stored as plaintext (e.g.
+    // migrated before encryption existed) so they are protected at rest from now on.
+    private static void UpgradeSecretsAtRest(AppSettings settings)
+    {
+        var changed = false;
+        foreach (var key in Secrets.Keys)
+            if (settings.Config.TryGetValue(key, out var v) && !string.IsNullOrEmpty(v) && !Secrets.IsProtected(v))
+            {
+                settings.Config[key] = Secrets.Protect(v);
+                changed = true;
+            }
+        if (changed) AppSettings.Save(settings);
     }
 }
