@@ -4,8 +4,9 @@ namespace NoisLogTray;
 
 // The capture window, structured like the old web app: a header (with a light/dark
 // toggle), then stacked cards -- "Log entries" (My tickets + date/ticket), "Will
-// log" (preview), and "Actions". A top status bar streams every activity line and
-// the coloured result; TSC/HRM progress bars show below it during a log run.
+// log" (preview), and "Actions". A scrolling "activity" log at the bottom of the
+// window streams every activity line and the coloured result; TSC/HRM progress bars
+// show inside that block during a log run.
 // Closing (X) hides to the tray; TrayApp owns the process lifetime.
 internal sealed class MainForm : Form
 {
@@ -43,6 +44,12 @@ internal sealed class MainForm : Form
     private const int CardW = 560;
     private const int InnerW = 528; // CardW - 2*16
 
+    // Bottom activity block geometry (inside the activity Card).
+    private const int ActivityCardH = 150;
+    private const int ActivityLogTop = 38;
+    private const int ActivityProgHrmY = ActivityCardH - 28; // 122
+    private const int ActivityProgTscY = ActivityProgHrmY - 22; // 100
+
     private readonly LoggingService? _service;
 
     private readonly Panel _body = new();
@@ -75,11 +82,18 @@ internal sealed class MainForm : Form
     private RoundedHost? _willLogHost;
     private Card? _actionsCard;
 
-    private readonly Panel _statusBar = new();
-    private readonly Label _status = new();
-    private readonly System.Windows.Forms.Timer _statusTimer = new() { Interval = 6000 };
+    // Bottom "activity" block: a Card with a scrolling console log and, below it,
+    // the TSC/HRM progress bars.
+    private static readonly Color OkColor = Color.FromArgb(46, 160, 80);
+    private static readonly Color ErrColor = Color.FromArgb(230, 76, 76);
+    private const int ActivityCap = 200; // keep the last N lines; trim older ones
 
-    private readonly Panel _progressPanel = new();
+    private readonly Panel _activityPanel = new();
+    private readonly Card _activityCard = new();
+    private readonly RoundedHost _activityHost = new();
+    private readonly RichTextBox _activityLog = new();
+    private readonly List<ActivityLine> _activityLines = new();
+
     private readonly MiniProgress _tscBar = new();
     private readonly MiniProgress _hrmBar = new();
     private readonly Label _tscLabel = new();
@@ -91,6 +105,10 @@ internal sealed class MainForm : Form
     private bool _busy;
 
     private enum VState { Verifying, Valid, NotFound, Error }
+
+    // One line in the activity console (a normal line, or a green/red result line).
+    // Time is captured when the line is added, so a re-render keeps the original stamp.
+    private readonly record struct ActivityLine(DateTime Time, string Text, bool IsResult, bool Ok);
 
     internal event Action? QueueChanged;
 
@@ -120,12 +138,11 @@ internal sealed class MainForm : Form
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         BackColor = Theme.WindowBg;
-        ClientSize = new Size(600, 758); // queued card removed; Will log now shows the queue
+        ClientSize = new Size(600, 856); // body fits the cards snugly; activity log docks below
         RestoreWindowPosition();
 
         BuildBody();
-        BuildProgressPanel();
-        BuildStatusBar();
+        BuildActivityPanel();
     }
 
     // Restore the last window position if it still lands on a connected monitor;
@@ -165,7 +182,7 @@ internal sealed class MainForm : Form
     {
         _body.Dock = DockStyle.Fill;
         _body.BackColor = Theme.WindowBg;
-        _body.AutoScroll = true;
+        _body.AutoScroll = false; // main window never scrolls; only the activity log does
 
         var y = 14;
         var header = BuildHeader();
@@ -378,8 +395,7 @@ internal sealed class MainForm : Form
         BackColor = Theme.WindowBg;
         _body.BackColor = Theme.WindowBg;
         _header.BackColor = Theme.WindowBg;
-        _statusBar.BackColor = Theme.WindowBg;
-        _progressPanel.BackColor = Theme.WindowBg;
+        _activityPanel.BackColor = Theme.WindowBg;
 
         _headerTitle.ForeColor = Theme.TextPrimary;
         _headerSubtitle.ForeColor = Theme.TextSecondary;
@@ -392,136 +408,155 @@ internal sealed class MainForm : Form
         _suggestionStatus.BackColor = Theme.InputBg;
         _suggestionStatus.ForeColor = Theme.TextSecondary;
         _willLogList.BackColor = Theme.InputBg;
+        _activityLog.BackColor = Theme.InputBg;
+        _activityLog.ForeColor = Theme.TextPrimary;
 
         _tscLabel.ForeColor = Theme.TextSecondary;
         _hrmLabel.ForeColor = Theme.TextSecondary;
         _tscPct.ForeColor = Theme.TextSecondary;
         _hrmPct.ForeColor = Theme.TextSecondary;
 
+        RenderActivityLog();
         RenderSuggestions(_lastSuggestions);
         UpdateWillLog();
         Invalidate(true);
     }
 
-    private void BuildStatusBar()
+    // Bottom activity block: a Card holding the "ACTIVITY" console log and, below it,
+    // the TSC/HRM progress bars (hidden until a log run). Docked to the end of the
+    // window; the body (cards) fills the space above it.
+    private void BuildActivityPanel()
     {
-        _statusBar.Dock = DockStyle.Top;
-        _statusBar.Height = 36;
-        _statusBar.BackColor = Theme.WindowBg;
-        _statusBar.Visible = false;
+        _activityPanel.Dock = DockStyle.Bottom;
+        _activityPanel.Height = ActivityCardH + 16; // 8px margin above and below the card
+        _activityPanel.BackColor = Theme.WindowBg;
 
-        var line = new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Divider };
-        _dividers.Add(line);
+        _activityCard.Size = new Size(CardW, ActivityCardH);
+        _activityCard.Location = new Point(20, 8);
+        _activityCard.Controls.Add(SectionLabel("ACTIVITY", 16, 14));
 
-        _status.Dock = DockStyle.Fill;
-        _status.TextAlign = ContentAlignment.MiddleCenter;
-        _status.Padding = new Padding(12, 4, 12, 4);
-        _status.BackColor = Color.Transparent;
-        _status.Font = new Font("Segoe UI", 14F, FontStyle.Bold);
+        _activityHost.Location = new Point(16, ActivityLogTop);
+        _activityLog.Dock = DockStyle.Fill;
+        _activityLog.BorderStyle = BorderStyle.None;
+        _activityLog.ReadOnly = true;
+        _activityLog.TabStop = false;
+        _activityLog.WordWrap = true;
+        _activityLog.ScrollBars = RichTextBoxScrollBars.Vertical;
+        _activityLog.BackColor = Theme.InputBg;
+        _activityLog.ForeColor = Theme.TextPrimary;
+        _activityLog.Font = new Font("Consolas", 9F);
+        _activityLog.Cursor = Cursors.Default;
+        _activityHost.Controls.Add(_activityLog);
+        _activityCard.Controls.Add(_activityHost);
 
-        _statusTimer.Tick += (_, _) => { _statusTimer.Stop(); _status.Text = string.Empty; _statusBar.Visible = false; };
+        ConfigureProgressRow(_tscLabel, "TSC", _tscBar, _tscPct, ActivityProgTscY);
+        ConfigureProgressRow(_hrmLabel, "HRM", _hrmBar, _hrmPct, ActivityProgHrmY);
 
-        _statusBar.Controls.Add(_status);
-        _statusBar.Controls.Add(line);
-        Controls.Add(_statusBar);
+        _activityPanel.Controls.Add(_activityCard);
+        Controls.Add(_activityPanel);
+        LayoutActivityLog(progressVisible: false);
     }
 
-    private void ShowStatus(string message, bool ok)
-    {
-        _status.Text = message;
-        _status.ForeColor = ok ? Color.FromArgb(46, 160, 80) : Color.FromArgb(230, 76, 76);
-        SizeStatusBar();
-        _statusBar.Visible = true;
-        _statusTimer.Stop();
-        _statusTimer.Start();
-    }
-
-    // Grow the status bar's height to fit the full (wrapped) message -- no ellipsis.
-    private void SizeStatusBar()
-    {
-        var width = Math.Max(100, ClientSize.Width - 28);
-        var size = TextRenderer.MeasureText(_status.Text, _status.Font, new Size(width, 0),
-            TextFormatFlags.WordBreak | TextFormatFlags.HorizontalCenter);
-        _statusBar.Height = Math.Max(36, size.Height + 16);
-    }
-
-    private void ShowActivity(string line)
-    {
-        if (InvokeRequired)
-        {
-            BeginInvoke(new Action<string>(ShowActivity), line);
-            return;
-        }
-        _status.Text = line;
-        _status.ForeColor = Theme.TextPrimary;
-        SizeStatusBar();
-        _statusBar.Visible = true;
-        _statusTimer.Stop();
-        _statusTimer.Start();
-    }
-
-    // Every activity line goes to the log file AND the top status bar (live feed).
+    // Every activity line goes to the log file AND the activity console. Safe to call
+    // from a background thread (marshals to the UI thread).
     internal void AppendLog(string line)
     {
         AppLogger.Info(line);
-        ShowActivity(line);
+        AddActivity(line, isResult: false, ok: false);
     }
 
-    // A TSC and/or HRM progress bar shown just below the status bar during a log.
-    private void BuildProgressPanel()
+    // Append a coloured result line (green on success, red on failure) to the console.
+    private void ShowStatus(string message, bool ok) => AddActivity(message, isResult: true, ok: ok);
+
+    private void AddActivity(string text, bool isResult, bool ok)
     {
-        _progressPanel.Dock = DockStyle.Top;
-        _progressPanel.Height = 54;
-        _progressPanel.BackColor = Theme.WindowBg;
-        _progressPanel.Visible = false;
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action<string, bool, bool>(AddActivity), text, isResult, ok);
+            return;
+        }
 
-        var line = new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Divider };
-        _dividers.Add(line);
-        _progressPanel.Controls.Add(line);
+        _activityLines.Add(new ActivityLine(DateTime.Now, text, isResult, ok));
+        if (_activityLines.Count > ActivityCap)
+        {
+            _activityLines.RemoveRange(0, _activityLines.Count - ActivityCap);
+            RenderActivityLog(); // list was trimmed; rebuild so the box matches
+            return;
+        }
+        AppendLineToBox(_activityLines[^1]);
+    }
 
-        ConfigureProgressRow(_tscLabel, "TSC", _tscBar, _tscPct, 10);
-        ConfigureProgressRow(_hrmLabel, "HRM", _hrmBar, _hrmPct, 32);
+    // Rebuild the whole console from the backing list, applying the current theme
+    // (called on a theme switch, and after the list is trimmed).
+    private void RenderActivityLog()
+    {
+        _activityLog.Clear();
+        foreach (var line in _activityLines) AppendLineToBox(line);
+    }
 
-        Controls.Add(_progressPanel);
+    private void AppendLineToBox(ActivityLine line)
+    {
+        var color = line.IsResult ? (line.Ok ? OkColor : ErrColor) : Theme.TextPrimary;
+        _activityLog.SelectionStart = _activityLog.TextLength;
+        _activityLog.SelectionLength = 0;
+
+        // Dim timestamp prefix, then the message in its own colour.
+        _activityLog.SelectionColor = Theme.TextSecondary;
+        _activityLog.AppendText(line.Time.ToString("HH:mm:ss") + "  ");
+        _activityLog.SelectionColor = color;
+        _activityLog.AppendText(line.Text + Environment.NewLine);
+
+        _activityLog.SelectionColor = _activityLog.ForeColor;
+        _activityLog.SelectionStart = _activityLog.TextLength;
+        if (_activityLog.IsHandleCreated) _activityLog.ScrollToCaret();
     }
 
     private void ConfigureProgressRow(Label label, string text, MiniProgress bar, Label pct, int y)
     {
         label.Text = text;
         label.AutoSize = false;
-        label.Bounds = new Rectangle(20, y - 2, 36, 16);
+        label.Bounds = new Rectangle(16, y - 2, 36, 16);
         label.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
         label.ForeColor = Theme.TextSecondary;
         label.BackColor = Color.Transparent;
         label.TextAlign = ContentAlignment.MiddleLeft;
 
-        bar.Bounds = new Rectangle(58, y + 3, 476, 6);
+        bar.Bounds = new Rectangle(54, y + 3, 440, 6);
 
         pct.Text = "0%";
         pct.AutoSize = false;
-        pct.Bounds = new Rectangle(540, y - 2, 44, 16);
+        pct.Bounds = new Rectangle(500, y - 2, 44, 16);
         pct.Font = new Font("Segoe UI", 8.5F);
         pct.ForeColor = Theme.TextSecondary;
         pct.BackColor = Color.Transparent;
         pct.TextAlign = ContentAlignment.MiddleRight;
 
-        _progressPanel.Controls.Add(label);
-        _progressPanel.Controls.Add(bar);
-        _progressPanel.Controls.Add(pct);
+        _activityCard.Controls.Add(label);
+        _activityCard.Controls.Add(bar);
+        _activityCard.Controls.Add(pct);
     }
 
     private void ShowProgress(bool tsc, bool hrm)
     {
-        _tscLabel.Visible = _tscBar.Visible = _tscPct.Visible = tsc;
-        _hrmLabel.Visible = _hrmBar.Visible = _hrmPct.Visible = hrm;
         _tscBar.SetFraction(0);
         _hrmBar.SetFraction(0);
         _tscPct.Text = "0%";
         _hrmPct.Text = "0%";
-        _progressPanel.Visible = true;
+        LayoutActivityLog(progressVisible: true);
+        _tscLabel.Visible = _tscBar.Visible = _tscPct.Visible = tsc;
+        _hrmLabel.Visible = _hrmBar.Visible = _hrmPct.Visible = hrm;
     }
 
-    private void HideProgress() => _progressPanel.Visible = false;
+    private void HideProgress() => LayoutActivityLog(progressVisible: false);
+
+    // Size the console to leave room for the progress bars only while they show.
+    private void LayoutActivityLog(bool progressVisible)
+    {
+        _tscLabel.Visible = _tscBar.Visible = _tscPct.Visible = progressVisible;
+        _hrmLabel.Visible = _hrmBar.Visible = _hrmPct.Visible = progressVisible;
+        var bottom = progressVisible ? ActivityProgTscY - 8 : ActivityCardH - 12;
+        _activityHost.Size = new Size(InnerW, Math.Max(40, bottom - _activityHost.Top));
+    }
 
     private void ReportTsc(int done, int total) => ReportProgress(_tscBar, _tscPct, done, total);
     private void ReportHrm(int done, int total) => ReportProgress(_hrmBar, _hrmPct, done, total);

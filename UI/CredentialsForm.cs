@@ -1,10 +1,11 @@
 using System.Drawing;
+using System.Globalization;
 
 namespace NoisLogTray;
 
 // First-run / edit-credentials dialog. Collects the per-user config (Jira site +
-// account, HRM key, and the user's TSC columns) and returns it as key/value pairs
-// for AppConfig.SaveUserEnv. Themed to match the app; secrets are masked.
+// account, HRM key, the user's TSC columns, and the daily log time) and returns it as
+// key/value pairs for AppConfig.SaveUserConfig. Themed to match the app; secrets are masked.
 internal sealed class CredentialsForm : Form
 {
     private static readonly Font TitleFont = new("Segoe UI Semibold", 13F, FontStyle.Bold);
@@ -43,6 +44,8 @@ internal sealed class CredentialsForm : Form
         AddField("HRM API KEY", "HRM_API_KEY", secret: true, Value(initial, "HRM_API_KEY", ""));
         AddField("TSC COLUMNS  (comma-separated, e.g. M, J)", "TSC_GRAPH_COLUMNS", secret: false,
             Value(initial, "TSC_GRAPH_COLUMNS", "M, J"));
+        AddField("DAILY LOG TIME  (12h, e.g. 6:00 PM)", "LOG_TIME", secret: false,
+            AppConfig.ParseLogTime(Value(initial, "LOG_TIME", "")).ToString("h:mm tt", CultureInfo.InvariantCulture));
 
         AddErrorLabelAndButtons();
     }
@@ -152,6 +155,7 @@ internal sealed class CredentialsForm : Form
         var token = _fields["JIRA_API_TOKEN"].Text.Trim();
         var hrmKey = _fields["HRM_API_KEY"].Text.Trim();
         var columns = TscCells.ParseColumns(_fields["TSC_GRAPH_COLUMNS"].Text);
+        var logTimeText = _fields["LOG_TIME"].Text.Trim();
 
         // Format checks first (cheap, offline).
         if (!baseUrl.StartsWith("http", StringComparison.OrdinalIgnoreCase))
@@ -172,6 +176,12 @@ internal sealed class CredentialsForm : Form
         if (columns.Count == 0)
         {
             Fail("Enter at least one TSC column (e.g. M, J).");
+            return;
+        }
+        if (!TimeOnly.TryParseExact(logTimeText, AppConfig.LogTimeFormats,
+                CultureInfo.InvariantCulture, DateTimeStyles.None, out var logTime))
+        {
+            Fail("Enter the daily log time in 12-hour format, e.g. 6:00 PM.");
             return;
         }
 
@@ -223,6 +233,7 @@ internal sealed class CredentialsForm : Form
             ["JIRA_API_TOKEN"] = token,
             ["HRM_API_KEY"] = hrmKey,
             ["TSC_GRAPH_COLUMNS"] = string.Join(", ", columns),
+            ["LOG_TIME"] = logTime.ToString("h:mm tt", CultureInfo.InvariantCulture),
         };
         DialogResult = DialogResult.OK;
         Close();

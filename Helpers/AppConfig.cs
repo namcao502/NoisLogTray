@@ -1,7 +1,9 @@
+using System.Globalization;
+
 namespace NoisLogTray;
 
-// Typed runtime config. Reads a .env from the application directory (the project's
-// .env, copied to the output on build); process environment is the last resort.
+// Typed runtime config, read from the Config map in settings.json (%AppData%). A
+// legacy per-user .env is migrated into it once on load; process env is the last resort.
 internal sealed class AppConfig
 {
     // The "TSC Project" id (stable). Override via HRM_PROJECT_ID.
@@ -10,10 +12,16 @@ internal sealed class AppConfig
     // Team default so the first-run dialog can pre-fill the (non-secret) Jira site.
     internal const string DefaultJiraBaseUrl = "https://newoceaninfosys.atlassian.net";
 
-    // Keys the first-run / edit-credentials dialog manages in the per-user .env.
+    // Daily time (Asia/Ho_Chi_Minh) for the auto-log drain and the empty-queue reminder.
+    internal static readonly TimeOnly DefaultLogTime = new(18, 0);
+
+    // Accepted LOG_TIME input formats: 12-hour with AM/PM first, 24-hour still allowed.
+    internal static readonly string[] LogTimeFormats = { "h:mm tt", "hh:mm tt", "H:mm", "HH:mm" };
+
+    // Keys the first-run / edit-credentials dialog manages in settings.json's Config.
     internal static readonly string[] UserKeys =
     {
-        "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "HRM_API_KEY", "TSC_GRAPH_COLUMNS",
+        "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "HRM_API_KEY", "TSC_GRAPH_COLUMNS", "LOG_TIME",
     };
 
     internal string JiraBaseUrl { get; }
@@ -22,6 +30,7 @@ internal sealed class AppConfig
     internal string HrmApiKey { get; }
     internal string HrmProjectId { get; }
     internal string? MsGraphToken { get; }
+    internal TimeOnly LogTime { get; }
     internal GraphTscOptions Graph { get; }
 
     private AppConfig(Env env)
@@ -32,6 +41,7 @@ internal sealed class AppConfig
         HrmApiKey = env.Require("HRM_API_KEY");
         HrmProjectId = env.Get("HRM_PROJECT_ID") ?? DefaultProjectId;
         MsGraphToken = env.Get("MS_GRAPH_TOKEN");
+        LogTime = ParseLogTime(env.Get("LOG_TIME"));
         Graph = new GraphTscOptions(
             DriveId: env.Get("TSC_GRAPH_DRIVE_ID"),
             ItemId: env.Get("TSC_GRAPH_ITEM_ID"),
@@ -40,19 +50,20 @@ internal sealed class AppConfig
             Columns: TscCells.ParseColumns(env.Get("TSC_GRAPH_COLUMNS")));
     }
 
-    // Layered config: the app-directory .env holds optional shared, non-secret
-    // defaults; the per-user .env in %AppData% holds each user's secrets and
-    // overrides it (later files win in Env). Process environment is the last resort.
-    internal static string[] DefaultSources => new[]
+    // Parse the daily log time (12-hour "h:mm tt" or 24-hour "H:mm"); fall back to
+    // 18:00 on anything unrecognised so a bad value can never break startup.
+    internal static TimeOnly ParseLogTime(string? value)
     {
-        Path.Combine(AppContext.BaseDirectory, ".env"),
-        AppPaths.EnvPath,
-    };
+        if (value != null && TimeOnly.TryParseExact(value.Trim(), LogTimeFormats,
+                CultureInfo.InvariantCulture, DateTimeStyles.None, out var time))
+            return time;
+        return DefaultLogTime;
+    }
 
     // Current effective values for the managed keys, for pre-filling the edit dialog.
     internal static IReadOnlyDictionary<string, string> ReadUserValues()
     {
-        var env = new Env(DefaultSources);
+        var env = new Env(AppSettings.Load().Config);
         var values = new Dictionary<string, string>();
         foreach (var key in UserKeys)
         {
@@ -62,35 +73,57 @@ internal sealed class AppConfig
         return values;
     }
 
-    // Merge the given keys into the per-user .env (keeping any other keys already
-    // there) and write it back, creating the data directory if needed.
-    internal static void SaveUserEnv(IReadOnlyDictionary<string, string> values)
+    // Merge the given keys into settings.json's Config (read-modify-write so the theme,
+    // window position, and any other config keys are preserved) and persist atomically.
+    internal static void SaveUserConfig(IReadOnlyDictionary<string, string> values)
     {
-        var path = AppPaths.EnvPath;
-        var dir = Path.GetDirectoryName(path);
-        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-
-        var merged = Env.ParseFile(path);
-        foreach (var kv in values) merged[kv.Key] = kv.Value;
-
-        var lines = merged.Select(kv => $"{kv.Key}={kv.Value}");
-        File.WriteAllText(path, string.Join(Environment.NewLine, lines) + Environment.NewLine);
+        var settings = AppSettings.Load();
+        foreach (var kv in values) settings.Config[kv.Key] = kv.Value;
+        AppSettings.Save(settings);
     }
 
-    // Load config, or return null with a message if a required key is missing so
-    // the tray can surface it instead of crashing at startup.
+    // Load config, or return null with a message if a required key is missing so the
+    // tray can surface it instead of crashing at startup.
     internal static AppConfig? TryLoad(out string? error)
     {
+        var settings = AppSettings.LoadOrBackup(out var corrupt);
+        MigrateLegacyEnv(settings);
         try
         {
-            var config = new AppConfig(new Env(DefaultSources));
+            var config = new AppConfig(new Env(settings.Config));
             error = null;
             return config;
         }
         catch (Exception e)
         {
-            error = e.Message;
+            error = corrupt
+                ? "Settings were unreadable and have been backed up to settings.json.bad. Please re-enter your credentials."
+                : e.Message;
             return null;
+        }
+    }
+
+    // One-time migration: fold an old-style per-user .env into settings.json's Config
+    // (without overwriting keys already present), persist, then delete the .env so all
+    // config lives in one file going forward.
+    private static void MigrateLegacyEnv(AppSettings settings)
+    {
+        try
+        {
+            var legacy = AppPaths.EnvPath;
+            if (!File.Exists(legacy)) return;
+
+            var parsed = Env.ParseFile(legacy);
+            foreach (var kv in parsed)
+                if (!settings.Config.ContainsKey(kv.Key)) settings.Config[kv.Key] = kv.Value;
+
+            AppSettings.Save(settings);
+            File.Delete(legacy);
+            AppLogger.Info($"Migrated {parsed.Count} config key(s) from legacy .env into settings.json.");
+        }
+        catch (Exception e)
+        {
+            AppLogger.Error($"Legacy .env migration failed: {e.Message}");
         }
     }
 }

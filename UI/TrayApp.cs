@@ -3,7 +3,7 @@ using System.Drawing;
 namespace NoisLogTray;
 
 // Tray-resident application context. Owns the NotifyIcon, the capture window, and
-// the 18:00 scheduler. Background work (sniff, MCP, drain) runs off the UI thread
+// the daily scheduler. Background work (sniff, MCP, drain) runs off the UI thread
 // and is marshaled back through a hidden control for tooltip/balloon/log updates.
 internal sealed class TrayApp : ApplicationContext
 {
@@ -53,7 +53,7 @@ internal sealed class TrayApp : ApplicationContext
 
         UpdateTooltip();
 
-        _scheduler = new SixPmScheduler(() => DrainAsync(fromUser: false), Log);
+        _scheduler = new SixPmScheduler(config?.LogTime ?? AppConfig.DefaultLogTime, OnScheduledFireAsync, Log);
         _scheduler.Start();
         CatchUpIfDue();
 
@@ -90,6 +90,7 @@ internal sealed class TrayApp : ApplicationContext
         var config = AppConfig.TryLoad(out var error);
         _configError = error;
         _service = config != null ? new LoggingService(config) : null;
+        _scheduler.SetFireTime(config?.LogTime ?? AppConfig.DefaultLogTime);
 
         if (_form != null && !_form.IsDisposed)
         {
@@ -141,6 +142,36 @@ internal sealed class TrayApp : ApplicationContext
         var count = TicketQueue.Read().Count;
         _tray.Text = count > 0 ? $"NOIS Daily Log ({count} queued)" : "NOIS Daily Log";
     });
+
+    // The daily scheduled fire (at the configured time). If something is queued, drain
+    // it as usual. If nothing is queued and it's a weekday, open the window as a
+    // reminder to log manually; on weekends stay silent.
+    private async Task OnScheduledFireAsync()
+    {
+        if (_service == null) return;
+
+        if (TicketQueue.Read().Count != 0)
+        {
+            await DrainAsync(fromUser: false);
+            return;
+        }
+
+        if (!IsWeekday(Hcm.Now()))
+        {
+            Log("[scheduler] Nothing queued (weekend); no reminder.");
+            return;
+        }
+
+        Log("[scheduler] Nothing queued on a weekday; opening the window as a reminder.");
+        RunOnUi(() =>
+        {
+            ShowForm();
+            _form?.AppendLog("Reminder: nothing is queued for today - log your work before you leave.");
+        });
+    }
+
+    private static bool IsWeekday(DateTimeOffset t) =>
+        t.DayOfWeek != DayOfWeek.Saturday && t.DayOfWeek != DayOfWeek.Sunday;
 
     private async Task DrainAsync(bool fromUser)
     {
@@ -207,14 +238,14 @@ internal sealed class TrayApp : ApplicationContext
         if (ok) CatchUpIfDue(); // retry any queue entries that were waiting on sign-in
     }
 
-    // Show the credentials dialog; on save, write the per-user .env. Returns true if
-    // saved. Used both at first run (config missing) and from the tray menu.
+    // Show the credentials dialog; on save, write the per-user config into settings.json.
+    // Returns true if saved. Used both at first run (config missing) and from the menu.
     private bool PromptForCredentials(bool firstRun)
     {
         var initial = AppConfig.ReadUserValues();
         using var dialog = new CredentialsForm(initial, firstRun);
         if (dialog.ShowDialog() != DialogResult.OK) return false;
-        AppConfig.SaveUserEnv(dialog.Values);
+        AppConfig.SaveUserConfig(dialog.Values);
         return true;
     }
 

@@ -30,12 +30,12 @@
     </AssemblyAttribute>
   </ItemGroup>
 
-  <!-- Local .env sits next to the app for `dotnet run` (dev), but must NEVER be
-       distributed: excluded from publish so shared/self-contained builds carry no
-       secrets. Each user supplies their own via the first-run dialog. The template
-       (.env.example) IS shipped so a fresh install documents the keys. -->
+  <!-- All runtime config lives in the per-user %AppData%\NoisLogTray\.env (written by
+       the first-run dialog); the app no longer reads a .env next to the exe, so the
+       project .env is never copied to output or publish and no build carries secrets.
+       The template (.env.example) IS shipped so a fresh install documents the keys. -->
   <ItemGroup>
-    <None Update=".env" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="Never" />
+    <None Update=".env" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <None Update=".env.example" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 

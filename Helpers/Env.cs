@@ -1,26 +1,21 @@
 namespace NoisLogTray;
 
-// Minimal .env loader with a process-environment fallback. Files are applied in
-// order, so later files override earlier ones; the process environment is the
-// last-resort fallback for any key not present in a file.
+// In-memory config lookup with a process-environment fallback. Built from a key/value
+// map (settings.json's Config section); the process environment is the last-resort
+// fallback for any key not present in the map. ParseFile still reads the legacy .env
+// format, used only for the one-time migration into settings.json.
 internal sealed class Env
 {
     private readonly Dictionary<string, string> _values = new(StringComparer.Ordinal);
 
-    internal Env(IEnumerable<string> filePaths)
+    internal Env(IReadOnlyDictionary<string, string> values)
     {
-        foreach (var path in filePaths)
-            LoadFile(path);
-    }
-
-    private void LoadFile(string path)
-    {
-        foreach (var kv in ParseFile(path))
+        foreach (var kv in values)
             _values[kv.Key] = kv.Value;
     }
 
-    // Parse one .env file into key/value pairs (no process-environment fallback).
-    // A missing file yields an empty map. Shared by the loader and the config writer.
+    // Parse one legacy .env file into key/value pairs (no process-environment fallback).
+    // A missing file yields an empty map. Used for one-time migration into settings.json.
     internal static Dictionary<string, string> ParseFile(string path)
     {
         var values = new Dictionary<string, string>(StringComparer.Ordinal);

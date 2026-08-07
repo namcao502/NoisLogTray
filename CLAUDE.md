@@ -111,8 +111,8 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   drain runs at a time. When config is missing it runs `RunFirstRunSetup` (a
   `BeginInvoke` after the message loop starts, not a modal in the ctor) to show
   `CredentialsForm`; the "Edit credentials..." menu item reopens it. Saving writes the
-  per-user `.env`, rebuilds `_service` via `ReloadServiceAndShow`, and opens the window
-  so the user sees it worked. The dialog **verifies** the entered credentials before
+  per-user config into `settings.json`, rebuilds `_service` via `ReloadServiceAndShow`,
+  and opens the window so the user sees it worked. The dialog **verifies** the entered credentials before
   saving (Jira via `/myself`, HRM via an MCP connect) and rejects a bad token/key inline;
   an unreachable service falls back to a "save anyway?" prompt so offline setup isn't
   blocked. A successful TSC re-auth (tray or window, via the `ReauthSucceeded` event)
@@ -130,11 +130,13 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   card). The card grows to fit all rows via `FitWillLogToContent` - no inner scroll),
   and "Actions" (Queue / Log now / Log TSC /
   Log HRM / Check TSC / Re-auth). `RefreshQueuedView` (called on queue/clear, on window
-  activate, and after a drain, including by `TrayApp`) just re-renders "Will log". A large
-  top status bar (hidden until used) shows
-  every activity line live (`AppendLog` -> log file + status) and the green/red result
-  of each action (`ShowStatus`), auto-cleared. Just below it, a log run shows TSC/HRM
-  progress bars - `LoggingService` forwards `onProgress(done,total)` callbacks to
+  activate, and after a drain, including by `TrayApp`) just re-renders "Will log". At the
+  bottom of the window a docked "Activity" card holds a scrolling console log that
+  streams every activity line live (`AppendLog` -> log file + console) and the green/red
+  result of each action (`ShowStatus`); it is persistent (no auto-clear) and capped to
+  the last `ActivityCap` lines, re-rendered on a theme switch so old lines re-color. A
+  log run shows TSC/HRM progress bars inside that same card (the console shrinks to make
+  room) - `LoggingService` forwards `onProgress(done,total)` callbacks to
   `GraphTscClient` / `HrmMcpClient`. Ticket-dependent buttons are gated on valid input
   via `UpdateActionState`.
   `MacButton`, `Card`, and `RoundedHost` are owner-drawn
@@ -185,9 +187,15 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   only succeeds from 18:00 on; past dates work anytime. `MainForm.HrmClosedForToday`
   blocks Log now / Log HRM for today before 18:00 with an explanatory status (Queue
   instead), rather than letting HRM fail confusingly. `SixPmScheduler` fires the
-  auto-drain at 18:00 HCM in-process (replacing the old external Task Scheduler job).
+  daily run in-process at a **configurable** time (`LOG_TIME`, default 18:00 HCM;
+  replacing the old external Task Scheduler job). Setting `LOG_TIME` earlier than 18:00
+  makes today's HRM entries fail until 18:00 (the future-stop-time rule still applies).
   It **polls every 60s** rather than arming one long one-shot timer, so a sleep/wake or
   clock change can't silently skip the fire (a late wake still drains within ~1 min).
+  `TrayApp.OnScheduledFireAsync` is the fire callback: if the queue has entries it
+  drains; if the queue is **empty on a weekday** it opens the window as a reminder to
+  log manually (silent on weekends). Editing `LOG_TIME` in `CredentialsForm` calls
+  `SixPmScheduler.SetFireTime` to re-arm without a restart.
   Complementing it, `TrayApp.CatchUpIfDue` drains when the queue already has a due
   entry (a past date, or today once it's 18:00+) - run on startup and after a
   successful TSC re-auth, so entries kept by a logged-out drain retry automatically.
@@ -203,25 +211,32 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 - **Config load never crashes startup.** `AppConfig.TryLoad` returns `null` + a
   message on a missing required key; on `null` the tray shows `CredentialsForm`
   (first-run) to collect the values, and if still missing surfaces a warning balloon
-  and disables logging rather than throwing. Config is **layered** (`AppConfig.DefaultSources`,
-  later wins): the app-directory `.env` (optional shared, non-secret defaults - the
-  dev's project `.env` is copied here via the csproj and gitignored) then the per-user
-  `.env` at `%AppData%\NoisLogTray\.env` (each user's secrets, written by the dialog via
-  `AppConfig.SaveUserEnv`), then process environment. **Don't ship a build with the
-  dev's app-dir `.env`** - distribute without it (see `.env.example`) so each user fills
-  their own on first run.
+  and disables logging rather than throwing. Config is read from the `Config` map in
+  `settings.json` (`%AppData%\NoisLogTray\settings.json`, via `AppSettings`), written by
+  the dialog through `AppConfig.SaveUserConfig` (read-modify-write so the theme/window
+  keys survive); the process environment is a last-resort fallback per key (`Env.Get`).
+  A legacy per-user `.env` is folded into `settings.json` once on load
+  (`AppConfig.MigrateLegacyEnv`) then deleted, so config lives in one file. `settings.json`
+  writes are **atomic** (temp + rename) and a corrupt file is preserved as
+  `settings.json.bad` rather than silently reset (`AppSettings.LoadOrBackup`). The
+  project `.env` is gitignored and never copied to a build.
   Required keys: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `HRM_API_KEY`.
   Optional: `TSC_GRAPH_COLUMNS` (per-user columns in the shared workbook; default
   `M, J` via `TscCells.TargetColumns`, parsed by `TscCells.ParseColumns`),
+  `LOG_TIME` (daily auto-log + reminder time; the dialog uses 12-hour `h:mm tt`, e.g.
+  `6:00 PM`, and `AppConfig.ParseLogTime` also accepts 24-hour `H:mm`; default 18:00 via
+  `AppConfig.DefaultLogTime`),
   `HRM_PROJECT_ID`, `MS_GRAPH_TOKEN` (override that skips the sniff),
   `TSC_GRAPH_DRIVE_ID` / `_ITEM_ID` / `_SHARE_URL` / `_WORKSHEET`.
 
 ## Per-user data
 
 Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
-(the pending log queue), `settings.json` (theme + window position, via `AppSettings`),
-`.env` (per-user config/secrets written by `CredentialsForm`, `AppPaths.EnvPath`), and
-`logs/app.log`. A missing or malformed `queue.json` yields an empty queue by design
-so the 18:00 runner never throws; `AppSettings` likewise falls back to defaults on a
-missing/bad `settings.json`. The TSC Chrome profile (the saved Microsoft session) lives
-separately at `%UserProfile%\.tsc-daily-log-browser` (`TscTokenSniffer.ProfileDir`).
+(the pending log queue), `settings.json` (theme, window position, **and** the `Config`
+key/value map of secrets/settings written by `CredentialsForm`, via `AppSettings`), and
+`logs/app.log`. A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
+first load and removed. A missing or malformed `queue.json` yields an empty queue by
+design so the 18:00 runner never throws; `AppSettings` likewise falls back to defaults on
+a missing/bad `settings.json` (preserving the bad copy as `settings.json.bad`). The TSC
+Chrome profile (the saved Microsoft session) lives separately at
+`%UserProfile%\.tsc-daily-log-browser` (`TscTokenSniffer.ProfileDir`).

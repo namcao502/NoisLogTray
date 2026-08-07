@@ -12,8 +12,8 @@ internal static class AppPaths
 
     internal static string SettingsPath => Path.Combine(DataDirectory, "settings.json");
 
-    // Per-user config/secrets, written by the first-run/edit dialog. Overrides the
-    // optional shared defaults in the app-directory .env (see AppConfig.DefaultSources).
+    // Legacy per-user config file. Config now lives in settings.json; on load,
+    // AppConfig.MigrateLegacyEnv folds any leftover .env into it and deletes this file.
     internal static string EnvPath => Path.Combine(DataDirectory, ".env");
 
     internal static string LogPath => Path.Combine(DataDirectory, "logs", "app.log");

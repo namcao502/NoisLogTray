@@ -1,27 +1,28 @@
 namespace NoisLogTray;
 
-// Fires a callback at 18:00 Asia/Ho_Chi_Minh each day. Replaces the external Task
-// Scheduler job + wscript shim: the resident tray process owns the timer. HRM
-// rejects future stop times, so today's queue only succeeds from 18:00 on (past
-// dates work anytime).
+// Fires a callback at a configured daily time (default 18:00) in Asia/Ho_Chi_Minh.
+// Replaces the external Task Scheduler job + wscript shim: the resident tray process
+// owns the timer. HRM rejects future stop times, so today's queue only succeeds from
+// 18:00 on (past dates work anytime).
 //
 // Rather than arm one long one-shot timer to the next 18:00 (which a sleep or clock
 // change can silently skip), it polls every minute and fires the first tick at or
 // after the target time. A late wake therefore still fires within ~1 minute.
 internal sealed class SixPmScheduler : IDisposable
 {
-    private const int FireHour = 18;
     private static readonly TimeSpan CheckInterval = TimeSpan.FromSeconds(60);
 
     private readonly Func<Task> _onFire;
     private readonly Action<string>? _log;
     private System.Threading.Timer? _timer;
+    private TimeOnly _fireTime;
     private DateTimeOffset _nextFire;
     private int _firing; // 0 = idle, 1 = a fire is running (re-entrancy guard)
     private bool _disposed;
 
-    internal SixPmScheduler(Func<Task> onFire, Action<string>? log = null)
+    internal SixPmScheduler(TimeOnly fireTime, Func<Task> onFire, Action<string>? log = null)
     {
+        _fireTime = fireTime;
         _onFire = onFire;
         _log = log;
     }
@@ -29,8 +30,16 @@ internal sealed class SixPmScheduler : IDisposable
     internal DateTimeOffset NextFireTime()
     {
         var now = Hcm.Now();
-        var todayFire = new DateTimeOffset(now.Year, now.Month, now.Day, FireHour, 0, 0, now.Offset);
+        var todayFire = new DateTimeOffset(now.Year, now.Month, now.Day, _fireTime.Hour, _fireTime.Minute, 0, now.Offset);
         return now < todayFire ? todayFire : todayFire.AddDays(1);
+    }
+
+    // Change the daily fire time (e.g. after the user edits it) and re-arm the next fire.
+    internal void SetFireTime(TimeOnly fireTime)
+    {
+        _fireTime = fireTime;
+        _nextFire = NextFireTime();
+        _log?.Invoke($"[scheduler] Log time set to {_fireTime:HH:mm}; next fire at {_nextFire:yyyy-MM-dd HH:mm}.");
     }
 
     internal void Start()
@@ -52,7 +61,7 @@ internal sealed class SixPmScheduler : IDisposable
     {
         try
         {
-            _log?.Invoke("[scheduler] 18:00 reached; draining the queue.");
+            _log?.Invoke("[scheduler] Scheduled log time reached.");
             await _onFire();
         }
         catch (Exception e)
