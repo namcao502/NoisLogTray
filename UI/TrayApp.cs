@@ -153,6 +153,7 @@ internal sealed class TrayApp : ApplicationContext
             _form = new MainForm(_service, _configError);
             _form.QueueChanged += UpdateTooltip;
             _form.ReauthSucceeded += CatchUpIfDue; // retry due entries once TSC is signed in
+            _form.DrainRequested += () => _ = DrainAsync(fromUser: true); // "Log all now"
         }
         _form.Show();
         _form.WindowState = FormWindowState.Normal;

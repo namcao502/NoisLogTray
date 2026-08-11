@@ -83,7 +83,7 @@ internal sealed class MainForm : Form
     private readonly RoundedDatePicker _date = new();
     private readonly ToolTip _tips = new();
     private readonly TextBox _tickets = new();
-    private readonly MacButton _queueBtn = MacButton.Primary("Queue for 6 PM");
+    private readonly MacButton _queueBtn = MacButton.Primary("Add to list");
     private readonly MacButton _logNowBtn = MacButton.Secondary("Log now (TSC + HRM)");
     private readonly MacButton _logTscBtn = MacButton.Secondary("Log TSC");
     private readonly MacButton _logHrmBtn = MacButton.Secondary("Log HRM");
@@ -98,6 +98,7 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _verifyTimer = new() { Interval = 500 };
     private readonly Dictionary<string, (VState State, string? Title)> _verify = new();
     private readonly MacButton _clearQueueBtn = MacButton.Secondary("Clear queue");
+    private readonly MacButton _logAllBtn = MacButton.Primary("Log all now");
     private readonly Label _hoursHint = new();
 
     // Per typed-ticket HRM minutes while composing an entry. null = the default even
@@ -116,6 +117,9 @@ internal sealed class MainForm : Form
 
     // Raised after a successful TSC re-auth so the tray can retry any due queue entries.
     internal event Action? ReauthSucceeded;
+
+    // Raised by "Log all now" so the tray drains the whole queue through its guarded path.
+    internal event Action? DrainRequested;
 
     internal MainForm(LoggingService? service, string? configError)
     {
@@ -326,6 +330,14 @@ internal sealed class MainForm : Form
         _clearQueueBtn.Visible = false;
         _clearQueueBtn.Click += OnClearQueue;
         card.Controls.Add(_clearQueueBtn);
+
+        // Logs the whole queued list now (same guarded drain as the tray "Log queue now");
+        // shown beside Clear queue, only in the queued fallback view.
+        _logAllBtn.Size = new Size(96, 24);
+        _logAllBtn.Location = new Point(16 + InnerW - 90 - 96 - 8, 10);
+        _logAllBtn.Visible = false;
+        _logAllBtn.Click += OnLogAllNow;
+        card.Controls.Add(_logAllBtn);
 
         // Fixed-height list; rows scroll internally once they overflow so the Actions
         // card below stays at a stable, visible position.
@@ -702,11 +714,11 @@ internal sealed class MainForm : Form
         return TicketQueue.Read().SelectMany(e => e.Tickets).Distinct().ToList();
     }
 
-    // Render "Will log". While typing, it previews the typed tickets for the selected
-    // date. With the input empty it falls back to the whole persisted queue (grouped
-    // by date, each headed "(queued for 6 PM)") - this is the single source for what
-    // is scheduled, replacing a separate queue card. Each row shows a Jira status dot
-    // and its time slots.
+    // Render "Will log". It always lists the whole persisted queue (grouped by date, each
+    // headed "(queued for 6 PM)") so the accumulating list stays visible. While typing, the
+    // current date's tickets are previewed on top (editable, headed "(not added yet)") so you
+    // see what you are about to add without the already-queued rows disappearing. Each row
+    // shows a Jira status dot and its time slots; queued rows carry a per-ticket remove [X].
     private void UpdateWillLog()
     {
         if (_willLogList.IsDisposed) return;
@@ -716,35 +728,40 @@ internal sealed class MainForm : Form
         // Leave room for the vertical scrollbar so rows never trigger a horizontal one.
         var rowWidth = Math.Max(140, _willLogList.ClientSize.Width - 24);
         var (typed, _) = TicketParser.Parse(_tickets.Text);
-        var showingQueue = false;
+        var entries = TicketQueue.Read();
+        var composing = typed.Count != 0;
 
-        if (typed.Count != 0)
+        // Current composition preview on top (editable hours), not yet added to the queue.
+        if (composing)
         {
             var minutes = TypedMinutes(typed.Count);
-            _willLogList.Controls.Add(WillLogText(_date.Value.ToString("dddd, MMMM d, yyyy"), rowWidth));
+            _willLogList.Controls.Add(WillLogText(_date.Value.ToString("dddd, MMMM d, yyyy") + "   (not added yet)", rowWidth));
             AddEditableTicketRows(typed, minutes, rowWidth);
         }
-        else
+
+        // The persisted queue below, always shown so the list visibly builds up.
+        if (entries.Count != 0)
         {
-            var entries = TicketQueue.Read();
-            if (entries.Count == 0)
+            foreach (var entry in entries)
             {
-                _willLogList.Controls.Add(WillLogText("Enter a ticket above to preview what will be logged.", rowWidth));
-            }
-            else
-            {
-                showingQueue = true;
-                foreach (var entry in entries)
-                {
-                    if (!DateOnly.TryParseExact(entry.Date, "yyyy-MM-dd", out var d)) continue;
-                    _willLogList.Controls.Add(WillLogText(d.ToString("dddd, MMMM d, yyyy") + "   (queued for 6 PM)", rowWidth));
-                    AddTicketRows(entry.Tickets, entry.Minutes, rowWidth);
-                }
+                if (!DateOnly.TryParseExact(entry.Date, "yyyy-MM-dd", out var d)) continue;
+                _willLogList.Controls.Add(WillLogText(d.ToString("dddd, MMMM d, yyyy") + "   (queued for 6 PM)", rowWidth));
+                AddTicketRows(entry.Date, entry.Tickets, entry.Minutes, rowWidth);
             }
         }
+        else if (!composing)
+        {
+            _willLogList.Controls.Add(WillLogText("Enter a ticket above to preview what will be logged.", rowWidth));
+        }
 
-        _clearQueueBtn.Visible = showingQueue;
-        UpdateHoursHint(typedView: typed.Count != 0);
+        // Queue-wide buttons show only when not composing: they act on the whole queue and
+        // would collide with the hours hint. Per-row [X] still removes queued tickets while
+        // composing, and you finish the current entry before batch-acting anyway.
+        var showQueueButtons = !composing && entries.Count != 0;
+        _clearQueueBtn.Visible = showQueueButtons;
+        _logAllBtn.Visible = showQueueButtons;
+        _logAllBtn.Enabled = !_busy; // reset after a drain (the tray re-renders on completion)
+        UpdateHoursHint(typedView: composing);
         _willLogList.ResumeLayout();
     }
 
@@ -762,20 +779,23 @@ internal sealed class MainForm : Form
             _willLogList.Controls.Add(CreateWillLogEditRow(tickets[i], i, minutes[i], TimeSlots.Get(minutes, i), rowWidth));
     }
 
-    // Read-only rows (queued fallback): honor a stored custom split, else even.
-    private void AddTicketRows(IReadOnlyList<string> tickets, IReadOnlyList<int>? minutes, int rowWidth)
+    // Read-only rows (queued fallback): honor a stored custom split, else even. Each row
+    // carries its date so its [X] can remove that one ticket from that date's entry.
+    private void AddTicketRows(string date, IReadOnlyList<string> tickets, IReadOnlyList<int>? minutes, int rowWidth)
     {
         var mins = minutes ?? TimeSlots.EvenSplit(tickets.Count);
         for (var i = 0; i < tickets.Count; i++)
-            _willLogList.Controls.Add(CreateWillLogRow(tickets[i], TimeSlots.Get(mins, i), rowWidth));
+            _willLogList.Controls.Add(CreateWillLogRow(date, tickets[i], TimeSlots.Get(mins, i), rowWidth));
     }
 
-    // Show the running total / validation state in the header while composing (typed view).
+    // Show the running total / validation state in the header while composing. The total is
+    // the whole selected day (already-queued tickets + what is being typed), so it warns
+    // before Add rejects an over-8h merge rather than after.
     private void UpdateHoursHint(bool typedView)
     {
         if (!typedView) { _hoursHint.Visible = false; return; }
 
-        var (sum, allPositive) = TypedMinuteStats();
+        var (sum, allPositive) = ProjectedDayStats();
         _hoursHint.Visible = true;
         if (!allPositive)
         {
@@ -808,6 +828,26 @@ internal sealed class MainForm : Form
             if (m <= 0) allPositive = false;
         }
         return (sum, allPositive);
+    }
+
+    // Projected total minutes for the SELECTED date if the current typed set were added:
+    // merges any queued entry for that date with the typed tickets, so the hint and the
+    // hours gate reflect the whole day (queued + typed) - matching what OnQueue enforces.
+    // No existing entry for the date -> just the typed sum. AllPositive is about the typed
+    // tickets (already-queued minutes were validated when they were queued).
+    private (int Sum, bool AllPositive) ProjectedDayStats()
+    {
+        var (typed, _) = TicketParser.Parse(_tickets.Text);
+        if (typed.Count == 0) return (0, true);
+
+        var (typedSum, allPositive) = TypedMinuteStats();
+
+        var date = DateOnly.FromDateTime(_date.Value.Date).ToString("yyyy-MM-dd");
+        var existing = TicketQueue.Read().FirstOrDefault(e => e.Date == date);
+        if (existing is null) return (typedSum, allPositive);
+
+        var merged = TicketQueue.MergeInto(existing, typed, TypedMinutesFor(typed));
+        return (TicketQueue.DayMinutes(merged), allPositive);
     }
 
     // Apply an edited hours value to the typed set, then re-flow every row's slots.
@@ -843,8 +883,9 @@ internal sealed class MainForm : Form
         UseMnemonic = false,
     };
 
-    private Control CreateWillLogRow(string key, IReadOnlyList<TimeSlot> slots, int width)
-        => new WillLogRow
+    private Control CreateWillLogRow(string date, string key, IReadOnlyList<TimeSlot> slots, int width)
+    {
+        var row = new WillLogRow
         {
             Width = width,
             Key = key,
@@ -852,6 +893,10 @@ internal sealed class MainForm : Form
             Slots = SlotText(slots),
             DotColor = DotColorFor(key),
         };
+        row.SetRemoveAccessibleName($"Remove {key} on {date}");
+        row.RemoveClicked += () => RemoveQueuedTicket(date, key);
+        return row;
+    }
 
     private Control CreateWillLogEditRow(string key, int index, int minutes, IReadOnlyList<TimeSlot> slots, int width)
     {
@@ -955,8 +1000,9 @@ internal sealed class MainForm : Form
         }
 
         TicketQueue.Write(entries.OrderBy(x => x.Date).ToList());
-        AppendLog($"[queue] Queued {date}: {string.Join(", ", tickets)}");
-        ShowStatus($"Queued {tickets.Count} ticket{(tickets.Count == 1 ? "" : "s")} for {date} (auto-logs at 6 PM).", true);
+        AppendLog($"[queue] Added {date}: {string.Join(", ", tickets)}");
+        _tickets.Text = string.Empty; // clear so "Will log" flips to the list and shows the new row
+        ShowStatus($"Added {tickets.Count} ticket{(tickets.Count == 1 ? "" : "s")} to the list for {date} (auto-logs at 6 PM).", true);
         RefreshQueuedView();
         QueueChanged?.Invoke();
     }
@@ -967,6 +1013,30 @@ internal sealed class MainForm : Form
         RefreshQueuedView();
         ShowStatus("Queue cleared.", true);
         QueueChanged?.Invoke();
+    }
+
+    // Remove one ticket from its date's queue entry (the row [X]) and refresh the list.
+    private void RemoveQueuedTicket(string date, string ticket)
+    {
+        TicketQueue.RemoveTicket(date, ticket);
+        RefreshQueuedView();
+        ShowStatus($"Removed {ticket} from {date}.", true);
+        QueueChanged?.Invoke();
+    }
+
+    // Log the whole queued list now via the tray's guarded drain (DrainRequested). The
+    // drain itself streams progress to the activity console and re-renders on completion.
+    private void OnLogAllNow(object? sender, EventArgs e)
+    {
+        if (_service is null) { AppendLog("[error] Config not loaded; cannot log."); return; }
+        if (TicketQueue.Read().Count == 0)
+        {
+            ShowStatus("Nothing queued to log.", false);
+            return;
+        }
+        _logAllBtn.Enabled = false;
+        AppendLog("[log] Logging the whole queued list now...");
+        DrainRequested?.Invoke();
     }
 
     // Read the persisted 6 PM queue and show it (read-only) so it stays visible after
@@ -1138,11 +1208,12 @@ internal sealed class MainForm : Form
 
     // Enable the ticket-dependent actions only when there is at least one valid ticket
     // and no operation is in flight. Queue / Log now / Log HRM additionally require valid
-    // hours (each > 0, day <= 8h); Log TSC ignores time, so it only needs a ticket.
+    // hours: each ticket > 0 and the selected day (already-queued + typed) <= 8h; Log TSC
+    // ignores time, so it only needs a ticket.
     private void UpdateActionState()
     {
         var hasTickets = TicketParser.Parse(_tickets.Text).Tickets.Count != 0;
-        var (sum, allPositive) = TypedMinuteStats();
+        var (sum, allPositive) = ProjectedDayStats();
         var hoursOk = allPositive && sum <= TimeSlots.TotalWorkMinutes;
 
         _queueBtn.Enabled = !_busy && hasTickets && hoursOk;
@@ -1151,6 +1222,7 @@ internal sealed class MainForm : Form
         _logHrmBtn.Enabled = !_busy && hasTickets && hoursOk;
         _checkBtn.Enabled = !_busy;
         _reauthBtn.Enabled = !_busy;
+        _logAllBtn.Enabled = !_busy; // batch drain must not fight an in-flight browser/log op
         _refreshBtn.Enabled = !_busy;
     }
 

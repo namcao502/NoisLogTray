@@ -196,6 +196,31 @@ public class TicketQueueTests : IDisposable
     }
 
     [Fact]
+    public void RemoveTicketDropsOnlyThatTicketKeepingOthers()
+    {
+        TicketQueue.Write(new List<QueueEntry>
+        {
+            new("2026-07-24", new[] { "MDP-1", "MDP-2" }),
+        }, _path);
+
+        TicketQueue.RemoveTicket("2026-07-24", "MDP-1", _path);
+
+        var read = TicketQueue.Read(_path);
+        Assert.Single(read);
+        Assert.Equal(new[] { "MDP-2" }, read[0].Tickets);
+    }
+
+    [Fact]
+    public void RemoveTicketDropsTheDateWhenLastTicketRemoved()
+    {
+        TicketQueue.Write(new List<QueueEntry> { new("2026-07-24", new[] { "MDP-1" }) }, _path);
+
+        TicketQueue.RemoveTicket("2026-07-24", "MDP-1", _path);
+
+        Assert.Empty(TicketQueue.Read(_path));
+    }
+
+    [Fact]
     public void RemoveLoggedKeepsEntriesQueuedDuringDrain()
     {
         // Simulates the race the fix addresses: the drain snapshotted [24th], and while

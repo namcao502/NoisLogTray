@@ -57,6 +57,13 @@ internal static class TicketQueue
         }
     }
 
+    // Remove a single ticket from a date's queue entry (the in-window per-row [X]); if it
+    // was the last ticket on that date the whole entry goes. Reuses RemoveLogged's locked,
+    // minutes-in-lockstep removal against the CURRENT queue, so a concurrent add/drain is
+    // not clobbered and a ticket not present is a no-op.
+    internal static void RemoveTicket(string date, string ticket, string? path = null)
+        => RemoveLogged(new[] { new QueueEntry(date, new[] { ticket }) }, path);
+
     // Merge a newly-typed set into an existing same-date entry: append the tickets that
     // are not already present, keeping Minutes in lockstep. Concrete minutes are only
     // materialized when either side is custom; otherwise Minutes stays null (even split).
