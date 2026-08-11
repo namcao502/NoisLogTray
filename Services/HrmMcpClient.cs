@@ -55,6 +55,7 @@ internal static class HrmMcpClient
         DateOnly date,
         string apiKey,
         string projectId,
+        IReadOnlyList<int>? minutes = null,
         Action<string>? onLog = null,
         Action<int, int>? onProgress = null,
         CancellationToken ct = default)
@@ -66,9 +67,13 @@ internal static class HrmMcpClient
         if (string.IsNullOrWhiteSpace(apiKey))
             return (false, "HRM_API_KEY is not set (required for HRM MCP logging).");
 
+        // Custom per-ticket durations when supplied, else the even split.
+        IReadOnlyList<TimeSlot> SlotsFor(int index) =>
+            minutes is null ? TimeSlots.Get(tickets.Count, index) : TimeSlots.Get(minutes, index);
+
         // Total sub-units = every ticket's time slots (a lunch-straddling slot splits in two).
         var total = 0;
-        for (var i = 0; i < tickets.Count; i++) total += TimeSlots.Get(tickets.Count, i).Count;
+        for (var i = 0; i < tickets.Count; i++) total += SlotsFor(i).Count;
         var done = 0;
 
         try
@@ -82,20 +87,28 @@ internal static class HrmMcpClient
             });
 
             Emit($"[hrm-mcp] Connecting to {HrmMcpUrl} ...");
-            await using var client = await McpClient.CreateAsync(transport, cancellationToken: ct);
+            // Connecting opens a session (no side effects); retry transient transport faults.
+            await using var client = await Retry.OnTransientAsync(
+                c => McpClient.CreateAsync(transport, cancellationToken: c), onLog, ct: ct);
 
             var errors = new List<string>();
             for (var i = 0; i < tickets.Count; i++)
             {
                 var ticket = tickets[i];
-                foreach (var slot in TimeSlots.Get(tickets.Count, i))
+                foreach (var slot in SlotsFor(i))
                 {
                     var args = Timesheet.BuildArgs(projectId, ticket, isoDate, slot);
                     Emit($"[hrm-mcp] log_timesheet {ticket} {args["startTime"]}-{args["stopTime"]}");
 
-                    using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                    cts.CancelAfter(RequestTimeout);
-                    var res = await client.CallToolAsync("log_timesheet", args, cancellationToken: cts.Token);
+                    // Retry transient transport faults: a re-send after a lost response is
+                    // absorbed as LOGTIME_OVERLAP below, so it never double-logs. Each attempt
+                    // gets a fresh timeout so a retry is not born already cancelled.
+                    var res = await Retry.OnTransientAsync(async c =>
+                    {
+                        using var cts = CancellationTokenSource.CreateLinkedTokenSource(c);
+                        cts.CancelAfter(RequestTimeout);
+                        return await client.CallToolAsync("log_timesheet", args, cancellationToken: cts.Token);
+                    }, onLog, ct: ct);
 
                     var text = res.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text;
                     var env = Timesheet.ParseToolEnvelope(res.IsError is true, text);
@@ -159,7 +172,9 @@ internal static class HrmMcpClient
             });
 
             Emit($"[hrm-check] Connecting to {HrmMcpUrl} ...");
-            await using var client = await McpClient.CreateAsync(transport, cancellationToken: ct);
+            // Connecting opens a session (no side effects); retry transient transport faults.
+            await using var client = await Retry.OnTransientAsync(
+                c => McpClient.CreateAsync(transport, cancellationToken: c), onLog, ct: ct);
 
             foreach (var date in dates)
             {

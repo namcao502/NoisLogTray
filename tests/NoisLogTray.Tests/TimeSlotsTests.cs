@@ -103,4 +103,38 @@ public class TimeSlotsTests
             else Assert.Equal(prevEnd, currStart);
         }
     }
+
+    [Fact]
+    public void CustomMinutesLayOutSixThenTwoHours()
+    {
+        var minutes = new[] { 360, 120 };
+        Assert.Equal(new[] { new TimeSlot("09:00", "12:00"), new TimeSlot("13:00", "16:00") },
+            TimeSlots.Get(minutes, 0));
+        Assert.Equal(new[] { new TimeSlot("16:00", "18:00") }, TimeSlots.Get(minutes, 1));
+        Assert.Equal(360, TotalMinutes(TimeSlots.Get(minutes, 0)));
+        Assert.Equal(120, TotalMinutes(TimeSlots.Get(minutes, 1)));
+    }
+
+    [Fact]
+    public void PartialDayStopsEarlyWithoutSwallowingLunch()
+    {
+        // 3h + 2h = 5h: the second ticket starts exactly at the lunch boundary and must
+        // map to 13:00 (not 12:00); the remaining 15:00-18:00 is simply not logged.
+        var minutes = new[] { 180, 120 };
+        Assert.Equal(new[] { new TimeSlot("09:00", "12:00") }, TimeSlots.Get(minutes, 0));
+        Assert.Equal(new[] { new TimeSlot("13:00", "15:00") }, TimeSlots.Get(minutes, 1));
+        Assert.Equal(300, TotalMinutes(TimeSlots.Get(minutes, 0)) + TotalMinutes(TimeSlots.Get(minutes, 1)));
+    }
+
+    [Fact]
+    public void EvenSplitMatchesTheDefaultOverload()
+    {
+        Assert.Equal(new[] { 240, 240 }, TimeSlots.EvenSplit(2));
+        for (var count = 1; count <= 5; count++)
+        {
+            Assert.Equal(480, TimeSlots.EvenSplit(count).Sum());
+            for (var idx = 0; idx < count; idx++)
+                Assert.Equal(TimeSlots.Get(count, idx), TimeSlots.Get(TimeSlots.EvenSplit(count), idx));
+        }
+    }
 }

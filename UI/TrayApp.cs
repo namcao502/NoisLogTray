@@ -1,4 +1,6 @@
+using System.Diagnostics;
 using System.Drawing;
+using System.Reflection;
 
 namespace NoisLogTray;
 
@@ -13,9 +15,14 @@ internal sealed class TrayApp : ApplicationContext
     private string? _configError;
     private readonly SixPmScheduler _scheduler;
     private readonly ToolStripMenuItem _startupItem;
+    private readonly ToolStripMenuItem _updateItem;
+    private readonly ToolStripSeparator _updateSeparator;
+    private UpdateInfo? _pendingUpdate; // set when a newer GitHub Release is found
     private MainForm? _form;
     private WeeklyCheckForm? _weeklyForm;
     private int _draining; // 0 = idle, 1 = a drain is running
+    private int _redrainPending; // 1 = a drain was requested while one ran; run one more pass
+    private static readonly TimeSpan DrainTimeout = TimeSpan.FromMinutes(5);
 
     internal TrayApp()
     {
@@ -27,6 +34,14 @@ internal sealed class TrayApp : ApplicationContext
         _service = config != null ? new LoggingService(config) : null;
 
         var menu = new ContextMenuStrip();
+        // Hidden until the startup check finds a newer release; then it sits at the top.
+        _updateItem = new ToolStripMenuItem("Download update...", null, (_, _) => OpenUpdatePage())
+        {
+            Visible = false,
+        };
+        _updateSeparator = new ToolStripSeparator { Visible = false };
+        menu.Items.Add(_updateItem);
+        menu.Items.Add(_updateSeparator);
         menu.Items.Add("Open", null, (_, _) => ShowForm());
         menu.Items.Add("Log queue now", null, async (_, _) => await DrainAsync(fromUser: true));
         menu.Items.Add("Weekly check...", null, (_, _) => ShowWeeklyCheck());
@@ -58,6 +73,12 @@ internal sealed class TrayApp : ApplicationContext
         _scheduler = new SixPmScheduler(config?.LogTime ?? AppConfig.DefaultLogTime, OnScheduledFireAsync, Log);
         _scheduler.Start();
         CatchUpIfDue();
+        _ = CheckForUpdateAsync(); // fire-and-forget; silent on any failure
+
+        // TSC logging needs the system Chrome; warn once up front rather than at 6 PM.
+        if (_service != null && !TscTokenSniffer.ChromeInstalled())
+            Notify("Google Chrome is not installed - TSC logging needs it. Install Chrome from google.com/chrome.",
+                ToolTipIcon.Warning);
 
         // Once the message loop is running: prompt for first-run config if it's
         // missing (rather than a modal dialog inside the constructor), otherwise
@@ -143,11 +164,48 @@ internal sealed class TrayApp : ApplicationContext
     private void ShowWeeklyCheck()
     {
         if (_service == null) { Notify("Config not loaded; set up credentials first.", ToolTipIcon.Warning); return; }
-        if (_weeklyForm == null || _weeklyForm.IsDisposed) _weeklyForm = new WeeklyCheckForm(_service);
+        if (_weeklyForm == null || _weeklyForm.IsDisposed)
+        {
+            _weeklyForm = new WeeklyCheckForm(_service);
+            // Clicking an under-logged day opens the main window focused on that date.
+            _weeklyForm.LogDayRequested += date => { ShowForm(); _form?.PrepareForDate(date); };
+        }
         _weeklyForm.Show();
         _weeklyForm.WindowState = FormWindowState.Normal;
         _weeklyForm.Activate();
         _weeklyForm.BringToFront();
+    }
+
+    // Check GitHub Releases once at startup. On a newer release, reveal the "Download
+    // update" menu item and show a one-time balloon. Silent on any failure/offline.
+    private async Task CheckForUpdateAsync()
+    {
+        var current = Assembly.GetEntryAssembly()?.GetName().Version ?? new Version(0, 0, 0);
+        var update = await UpdateService.CheckAsync(current);
+        if (update == null) return;
+
+        _pendingUpdate = update;
+        RunOnUi(() =>
+        {
+            _updateItem.Text = $"Download update v{update.Latest}...";
+            _updateItem.Visible = true;
+            _updateSeparator.Visible = true;
+        });
+        Notify($"Update v{update.Latest} available - open the tray menu to download.", ToolTipIcon.Info);
+    }
+
+    // Open the release page in the default browser so the user can download the new build.
+    private void OpenUpdatePage()
+    {
+        if (_pendingUpdate == null) return;
+        try
+        {
+            Process.Start(new ProcessStartInfo(_pendingUpdate.Url) { UseShellExecute = true });
+        }
+        catch (Exception e)
+        {
+            Notify($"Could not open the download page: {e.Message}", ToolTipIcon.Warning);
+        }
     }
 
     private void UpdateTooltip() => RunOnUi(() =>
@@ -195,13 +253,17 @@ internal sealed class TrayApp : ApplicationContext
         }
         if (Interlocked.CompareExchange(ref _draining, 1, 0) != 0)
         {
+            // A drain is already running; its snapshot may predate work just requested,
+            // so flag one more pass to run after it finishes.
+            Interlocked.Exchange(ref _redrainPending, 1);
             if (fromUser) Notify("A logging run is already in progress.", ToolTipIcon.Info);
             return;
         }
 
         try
         {
-            var r = await _service.DrainQueueAsync(Log);
+            using var cts = new CancellationTokenSource(DrainTimeout);
+            var r = await _service.DrainQueueAsync(Log, cts.Token);
             UpdateTooltip();
             RunOnUi(() => { if (_form != null && !_form.IsDisposed) _form.RefreshQueuedView(); });
 
@@ -219,6 +281,14 @@ internal sealed class TrayApp : ApplicationContext
                 Notify($"Auto-log: {r.Logged} logged.", ToolTipIcon.Info);
             }
         }
+        catch (OperationCanceledException)
+        {
+            UpdateTooltip();
+            RunOnUi(() => { if (_form != null && !_form.IsDisposed) _form.RefreshQueuedView(); });
+            Log($"[drain] Timed out after {DrainTimeout.TotalMinutes:0} min; kept unlogged entries for retry.");
+            Notify("Auto-log timed out; kept entries for retry. Check TSC sign-in if this repeats.",
+                ToolTipIcon.Warning);
+        }
         catch (Exception e)
         {
             Log($"[drain] Error: {e.Message}");
@@ -228,6 +298,11 @@ internal sealed class TrayApp : ApplicationContext
         {
             Interlocked.Exchange(ref _draining, 0);
         }
+
+        // If work was requested while the drain above was running, run one more pass to
+        // pick up entries that arrived after that drain read its snapshot.
+        if (Interlocked.Exchange(ref _redrainPending, 0) == 1)
+            await DrainAsync(fromUser: false);
     }
 
     private async Task CheckTscAsync()

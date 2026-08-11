@@ -1,0 +1,39 @@
+name: Release
+
+# Push a tag like v1.0.1 to build the single-file exe and publish it as a GitHub
+# Release. The tag (minus the leading v) becomes the assembly version the running
+# app compares against in its update check, so tags must be numeric (v1.2.3).
+on:
+  push:
+    tags: [ 'v*' ]
+
+permissions:
+  contents: write # required to create the release
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Derive version from tag
+        id: ver
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish single-file
+        run: dotnet publish NoisLogTray.csproj -p:PublishProfile=win-x64 -p:Version=${{ steps.ver.outputs.version }}
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path bin/publish/win-x64/* -DestinationPath NoisLogTray-${{ steps.ver.outputs.version }}-win-x64.zip
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: NoisLogTray-*-win-x64.zip
+          generate_release_notes: true

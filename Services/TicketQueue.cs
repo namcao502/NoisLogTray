@@ -40,12 +40,51 @@ internal static class TicketQueue
             {
                 var drop = processed.Where(p => p.Date == entry.Date).SelectMany(p => p.Tickets).ToHashSet();
                 if (drop.Count == 0) { result.Add(entry); continue; }
-                var keep = entry.Tickets.Where(t => !drop.Contains(t)).ToList();
-                if (keep.Count != 0) result.Add(new QueueEntry(entry.Date, keep));
+
+                // Keep the surviving tickets, and keep each one's minutes in lockstep so
+                // a partially-logged custom entry does not lose its per-ticket durations.
+                var keep = new List<string>();
+                var keepMinutes = entry.Minutes != null ? new List<int>() : null;
+                for (var i = 0; i < entry.Tickets.Count; i++)
+                {
+                    if (drop.Contains(entry.Tickets[i])) continue;
+                    keep.Add(entry.Tickets[i]);
+                    keepMinutes?.Add(entry.Minutes![i]);
+                }
+                if (keep.Count != 0) result.Add(new QueueEntry(entry.Date, keep, keepMinutes));
             }
             WriteUnlocked(result, queuePath);
         }
     }
+
+    // Merge a newly-typed set into an existing same-date entry: append the tickets that
+    // are not already present, keeping Minutes in lockstep. Concrete minutes are only
+    // materialized when either side is custom; otherwise Minutes stays null (even split).
+    // Pure - the caller decides whether to persist the result.
+    internal static QueueEntry MergeInto(QueueEntry existing, IReadOnlyList<string> newTickets,
+        IReadOnlyList<int>? newMinutes)
+    {
+        var mergedTickets = existing.Tickets.ToList();
+        var custom = existing.Minutes != null || newMinutes != null;
+        var mergedMinutes = custom
+            ? (existing.Minutes ?? TimeSlots.EvenSplit(existing.Tickets.Count)).ToList()
+            : null;
+        var newMins = newMinutes ?? TimeSlots.EvenSplit(newTickets.Count);
+
+        for (var i = 0; i < newTickets.Count; i++)
+        {
+            if (mergedTickets.Contains(newTickets[i])) continue;
+            mergedTickets.Add(newTickets[i]);
+            mergedMinutes?.Add(newMins[i]);
+        }
+        return new QueueEntry(existing.Date, mergedTickets, mergedMinutes);
+    }
+
+    // Effective logged minutes for a day: a custom entry's actual sum, or a full workday
+    // for the even split (which always fills the day). Lets a caller detect an over-8h day
+    // uniformly with `DayMinutes(entry) > TimeSlots.TotalWorkMinutes`.
+    internal static int DayMinutes(QueueEntry entry)
+        => entry.Minutes != null ? entry.Minutes.Sum() : TimeSlots.TotalWorkMinutes;
 
     // Parse + sanitize the queue file. A missing or malformed file yields an empty
     // list (fail safe). Caller holds Gate.
@@ -76,7 +115,14 @@ internal static class TicketQueue
     {
         var dir = Path.GetDirectoryName(queuePath);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        var payload = new { entries = entries.Select(e => new { date = e.Date, tickets = e.Tickets }) };
+        // Omit "minutes" entirely for the default (even-split) case so untouched entries
+        // stay byte-for-byte compatible with the pre-feature schema.
+        var payload = new
+        {
+            entries = entries.Select(e => e.Minutes != null
+                ? (object)new { date = e.Date, tickets = e.Tickets, minutes = e.Minutes }
+                : new { date = e.Date, tickets = e.Tickets }),
+        };
         var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
         File.WriteAllText(queuePath, json);
     }
@@ -99,6 +145,26 @@ internal static class TicketQueue
             if (TicketPattern.IsMatch(ticket)) clean.Add(ticket);
         }
         if (clean.Count == 0) return null;
-        return new QueueEntry(date, clean);
+
+        return new QueueEntry(date, clean, ReadMinutes(raw, clean.Count));
+    }
+
+    // Read the optional per-ticket "minutes" array. Accepted only when it is well-formed
+    // and consistent (one positive int per ticket, summing to no more than a full day);
+    // anything off falls back to null (the even split), never dropping the entry.
+    private static IReadOnlyList<int>? ReadMinutes(JsonElement raw, int ticketCount)
+    {
+        if (!raw.TryGetProperty("minutes", out var m) || m.ValueKind != JsonValueKind.Array) return null;
+        if (m.GetArrayLength() != ticketCount) return null;
+
+        var minutes = new List<int>(ticketCount);
+        var sum = 0;
+        foreach (var item in m.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Number || !item.TryGetInt32(out var value) || value <= 0) return null;
+            minutes.Add(value);
+            sum += value;
+        }
+        return sum <= TimeSlots.TotalWorkMinutes ? minutes : null;
     }
 }

@@ -21,6 +21,10 @@ internal sealed class WeeklyCheckForm : Form
     private static readonly Font DayFont = new("Segoe UI", 9.5F, FontStyle.Bold);
     private static readonly Font SectionFont = new("Segoe UI", 8.5F, FontStyle.Bold);
 
+    // Raised when the user clicks an under-logged weekday, asking the host to open the
+    // main window on that date. TrayApp owns the wiring (it owns both windows).
+    internal event Action<DateOnly>? LogDayRequested;
+
     private readonly LoggingService? _service;
     private DateOnly _weekMonday;
     private IReadOnlyList<DayCoverage> _last = Array.Empty<DayCoverage>();
@@ -198,7 +202,21 @@ internal sealed class WeeklyCheckForm : Form
         var (hColor, hText) = HrmStatus(c, future);
         var (tColor, tText) = TscStatus(c, future);
 
-        var row = new Panel { Width = Inner - 36, Height = 42, Margin = new Padding(0), BackColor = Color.Transparent };
+        // A past/today weekday that is not fully logged on both sides can be clicked to
+        // jump into logging it; fully-logged and future days stay inert.
+        var actionable = !future && (hColor != Green || tColor != Green);
+
+        Panel row = actionable
+            ? new ClickableRow { AccessibleName = $"{c.Date:dddd, MMMM d}, needs logging - open to log" }
+            : new Panel();
+        row.Width = Inner - 36;
+        row.Height = 42;
+        row.Margin = new Padding(0);
+        row.BackColor = Color.Transparent;
+
+        // Accent bar on the left marks an actionable row (a subtle affordance).
+        if (actionable)
+            row.Controls.Add(new Panel { Location = new Point(0, 0), Size = new Size(3, 41), BackColor = Theme.Accent });
 
         row.Controls.Add(new Label
         {
@@ -216,8 +234,35 @@ internal sealed class WeeklyCheckForm : Form
         row.Controls.Add(Dot(tColor, 300));
         row.Controls.Add(StatusLabel(tText, tColor, 318, Inner - 36 - 318 - 6));
 
+        if (actionable) WireRowActions(row, c.Date);
+
         row.Controls.Add(new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Divider });
         return row;
+    }
+
+    // Make an actionable row behave like a button: hand cursor, hover highlight, and a
+    // click (mouse or keyboard, via ClickableRow) that asks to open logging for its date.
+    private void WireRowActions(Panel row, DateOnly date)
+    {
+        row.Cursor = Cursors.Hand;
+        void Fire(object? s, EventArgs e) => LogDayRequested?.Invoke(date);
+        void Enter(object? s, EventArgs e) => row.BackColor = Theme.Hover;
+        void Leave(object? s, EventArgs e)
+        {
+            if (!row.ClientRectangle.Contains(row.PointToClient(Cursor.Position)))
+                row.BackColor = Color.Transparent;
+        }
+
+        row.Click += Fire;
+        row.MouseEnter += Enter;
+        row.MouseLeave += Leave;
+        foreach (Control child in row.Controls)
+        {
+            child.Cursor = Cursors.Hand;
+            child.Click += Fire;
+            child.MouseEnter += Enter;
+            child.MouseLeave += Leave;
+        }
     }
 
     private static Panel Dot(Color color, int x) => new()

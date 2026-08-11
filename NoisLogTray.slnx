@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/smoke/">
+    <Project Path="smoke/GraphAuthSmoke/GraphAuthSmoke.csproj" />
     <Project Path="smoke/HrmSmoke/HrmSmoke.csproj" />
     <Project Path="smoke/SniffSmoke/SniffSmoke.csproj" />
   </Folder>

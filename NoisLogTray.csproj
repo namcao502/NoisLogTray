@@ -10,6 +10,9 @@
     <RootNamespace>NoisLogTray</RootNamespace>
     <AssemblyName>NoisLogTray</AssemblyName>
     <ApplicationIcon>app.ico</ApplicationIcon>
+    <!-- Base version; the release workflow overrides via -p:Version from the git tag.
+         The running app compares this against the latest GitHub Release (UpdateService). -->
+    <Version>1.0.0</Version>
   </PropertyGroup>
 
   <!-- The test and smoke projects live under this cone but build separately. -->

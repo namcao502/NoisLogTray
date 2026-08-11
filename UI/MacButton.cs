@@ -42,6 +42,11 @@ internal sealed class MacButton : Button
     protected override void OnMouseEnter(EventArgs e) { _hover = true; Invalidate(); base.OnMouseEnter(e); }
     protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
 
+    // Repaint on focus change so the keyboard-focus ring appears/disappears. Button
+    // already handles Space/Enter activation and tab order; this only adds the visual.
+    protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
+    protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
@@ -71,6 +76,16 @@ internal sealed class MacButton : Button
         using (var brush = new SolidBrush(fill)) g.FillPath(brush, path);
         TextRenderer.DrawText(g, Text, Font, rect, textColor,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+        // Keyboard-focus ring: a dotted inset outline, white on the blue primary fill,
+        // accent-coloured on the neutral secondary fill.
+        if (Focused && Enabled)
+        {
+            var focusRect = Rectangle.Inflate(rect, -3, -3);
+            using var focusPath = Rounded(focusRect, Math.Max(2, Radius - 2));
+            using var pen = new Pen(_secondary ? Theme.Accent : Color.White, 1.4f) { DashStyle = DashStyle.Dot };
+            g.DrawPath(pen, focusPath);
+        }
     }
 
     private static GraphicsPath Rounded(Rectangle r, int radius)

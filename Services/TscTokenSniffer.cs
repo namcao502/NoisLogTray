@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.RegularExpressions;
 using Microsoft.Playwright;
+using Microsoft.Win32;
 
 namespace NoisLogTray;
 
@@ -35,12 +36,64 @@ internal static class TscTokenSniffer
         ViewportSize = new ViewportSize { Width = 1280, Height = 800 },
     };
 
+    internal const string ChromeMissingMessage =
+        "Google Chrome is not installed. Install it from https://www.google.com/chrome, then retry " +
+        "(the TSC sign-in uses your system Chrome).";
+
+    // Chrome is launched via Channel = "chrome" (system Chrome, not Playwright's bundled
+    // Chromium), so a clear "install Chrome" check up front beats a cryptic launch error.
+    internal static bool ChromeInstalled() => FindChrome() != null;
+
+    private static string? FindChrome()
+    {
+        // App Paths is the authoritative install pointer (covers non-default locations).
+        foreach (var root in new[] { Registry.LocalMachine, Registry.CurrentUser })
+        {
+            using var key = root.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe");
+            if (key?.GetValue(null) is string path && File.Exists(path)) return path;
+        }
+        // Fallback to the common install locations.
+        foreach (var p in new[]
+                 {
+                     @"%ProgramFiles%\Google\Chrome\Application\chrome.exe",
+                     @"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe",
+                     @"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+                 })
+        {
+            var full = Environment.ExpandEnvironmentVariables(p);
+            if (File.Exists(full)) return full;
+        }
+        return null;
+    }
+
+    // Turn a raw Playwright/browser launch failure into a plain, actionable line.
+    private static string Explain(Exception e)
+    {
+        var m = e.Message;
+        if (m.Contains("chrome", StringComparison.OrdinalIgnoreCase)
+            && (m.Contains("not found", StringComparison.OrdinalIgnoreCase)
+                || m.Contains("distribution", StringComparison.OrdinalIgnoreCase)))
+            return ChromeMissingMessage;
+        if (m.Contains("Executable doesn't exist", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("playwright.ps1", StringComparison.OrdinalIgnoreCase)
+            || m.Contains("Driver not found", StringComparison.OrdinalIgnoreCase))
+            return "Playwright could not start - its driver folder (.playwright) is missing next to the exe. " +
+                   "Re-extract the full app zip. (Dev builds: run pwsh playwright.ps1 install chromium.)";
+        return e.Message;
+    }
+
     // Reuse the authenticated TSC session as a token source: office.com mints a
     // broad delegated token including Files.ReadWrite.All / Sites.ReadWrite.All.
     // Collect every distinct graph token + scopes, then prefer the broadest.
     internal static async Task<(string Token, string Scopes)?> SniffGraphTokenAsync(Action<string>? onLog = null)
     {
         void Emit(string line) => onLog?.Invoke(line);
+
+        if (!ChromeInstalled())
+        {
+            Emit($"[graph-sniff] {ChromeMissingMessage}");
+            return null;
+        }
 
         if (!BrowserLock.TryAcquire())
         {
@@ -93,7 +146,8 @@ internal static class TscTokenSniffer
 
             if (seen.IsEmpty)
             {
-                Emit("[graph-sniff] No graph.microsoft.com Bearer seen. If you are logged out, run Check TSC and re-authenticate.");
+                Emit("[graph-sniff] No graph.microsoft.com Bearer seen - the saved TSC session is likely logged out. "
+                     + "Use \"Re-authenticate TSC\" from the tray menu to sign in again; queued entries retry automatically.");
                 return null;
             }
 
@@ -107,13 +161,15 @@ internal static class TscTokenSniffer
             if (pick.Key is null)
                 pick = entries[0];
 
-            var suffix = HasAll(pick.Value) ? "" : "  (no .All -> shared files will 403)";
+            var suffix = HasAll(pick.Value)
+                ? ""
+                : "  (no .All scope -> shared files will 403; use \"Re-authenticate TSC\" to refresh the session)";
             Emit($"[graph-sniff] Using token scopes: {(string.IsNullOrEmpty(pick.Value) ? "(opaque/none)" : pick.Value)}{suffix}");
             return (pick.Key, pick.Value);
         }
         catch (Exception e)
         {
-            Emit($"[graph-sniff] Error: {e.Message}");
+            Emit($"[graph-sniff] {Explain(e)}");
             return null;
         }
         finally
@@ -124,6 +180,7 @@ internal static class TscTokenSniffer
 
     internal static async Task<(bool LoggedIn, string? Error)> CheckCredentialsAsync()
     {
+        if (!ChromeInstalled()) return (false, ChromeMissingMessage);
         if (!BrowserLock.TryAcquire()) return (false, BrowserLock.BusyMessage);
         try
         {
@@ -136,7 +193,7 @@ internal static class TscTokenSniffer
         }
         catch (Exception e)
         {
-            return (false, e.Message);
+            return (false, Explain(e));
         }
         finally
         {
@@ -149,6 +206,12 @@ internal static class TscTokenSniffer
     internal static async Task<(bool Success, string? Error)> ReauthenticateAsync(Action<string>? onLog = null)
     {
         void Emit(string line) => onLog?.Invoke(line);
+
+        if (!ChromeInstalled())
+        {
+            Emit($"[browser-tsc] {ChromeMissingMessage}");
+            return (false, ChromeMissingMessage);
+        }
 
         if (!BrowserLock.TryAcquire())
         {
@@ -191,8 +254,9 @@ internal static class TscTokenSniffer
         }
         catch (Exception e)
         {
-            Emit($"[browser-tsc] Error: {e.Message}");
-            return (false, e.Message);
+            var msg = Explain(e);
+            Emit($"[browser-tsc] {msg}");
+            return (false, msg);
         }
         finally
         {

@@ -109,22 +109,23 @@ internal sealed class LoggingService
     }
 
     internal Task<(bool Success, string? Error)> LogHrmAsync(
-        IReadOnlyList<string> tickets, DateOnly date, Action<string>? onLog = null,
-        Action<int, int>? onProgress = null, CancellationToken ct = default)
-        => HrmMcpClient.LogTicketsAsync(tickets, date, _config.HrmApiKey, _config.HrmProjectId, onLog, onProgress, ct);
+        IReadOnlyList<string> tickets, DateOnly date, IReadOnlyList<int>? minutes = null,
+        Action<string>? onLog = null, Action<int, int>? onProgress = null, CancellationToken ct = default)
+        => HrmMcpClient.LogTicketsAsync(tickets, date, _config.HrmApiKey, _config.HrmProjectId, minutes, onLog, onProgress, ct);
 
     // Log one date's tickets to both destinations in parallel (HRM uses no
     // browser, so it cannot contend with the TSC sniff).
     internal async Task<EntryLogResult> LogEntryAsync(
-        DateOnly date, IReadOnlyList<string> tickets, string? graphToken, Action<string>? onLog = null,
-        Action<int, int>? onTscProgress = null, Action<int, int>? onHrmProgress = null, CancellationToken ct = default)
+        DateOnly date, IReadOnlyList<string> tickets, string? graphToken, IReadOnlyList<int>? minutes = null,
+        Action<string>? onLog = null, Action<int, int>? onTscProgress = null, Action<int, int>? onHrmProgress = null,
+        CancellationToken ct = default)
     {
         var ticketString = string.Join(", ", tickets);
 
         Task<(bool Success, string Cell, string? Error)> tscTask = string.IsNullOrEmpty(graphToken)
             ? Task.FromResult((false, "", (string?)"No Graph token (session may be logged out)."))
             : GraphTscClient.WriteTicketAsync(ticketString, new[] { date }, graphToken, _config.Graph, onLog, onTscProgress, ct);
-        var hrmTask = HrmMcpClient.LogTicketsAsync(tickets, date, _config.HrmApiKey, _config.HrmProjectId, onLog, onHrmProgress, ct);
+        var hrmTask = HrmMcpClient.LogTicketsAsync(tickets, date, _config.HrmApiKey, _config.HrmProjectId, minutes, onLog, onHrmProgress, ct);
 
         await Task.WhenAll(tscTask, hrmTask);
         return new EntryLogResult(tscTask.Result.Success, tscTask.Result.Error, hrmTask.Result.Success, hrmTask.Result.Error);
@@ -176,34 +177,43 @@ internal sealed class LoggingService
         var token = await AcquireGraphTokenAsync(onLog);
 
         // Entries we are done with (logged, or a permanently-bad date). Removed from the
-        // CURRENT queue at the end so anything queued mid-drain survives.
+        // CURRENT queue in a finally so progress is preserved even if the drain is
+        // cancelled mid-way (e.g. it hit its timeout); anything queued mid-drain survives.
         var processed = new List<QueueEntry>();
         var logged = 0;
         var kept = 0;
-        foreach (var entry in entries)
+        try
         {
-            if (!DateOnly.TryParseExact(entry.Date, "yyyy-MM-dd", out var date))
+            foreach (var entry in entries)
             {
-                onLog?.Invoke($"[drain] Dropping entry with bad date '{entry.Date}'.");
-                processed.Add(entry);
-                continue;
-            }
+                ct.ThrowIfCancellationRequested();
 
-            onLog?.Invoke($"[drain] Logging {entry.Date}: {string.Join(", ", entry.Tickets)}");
-            var result = await LogEntryAsync(date, entry.Tickets, token, onLog, ct: ct);
-            if (result.AllSuccess)
-            {
-                logged++;
-                processed.Add(entry);
-            }
-            else
-            {
-                kept++;
-                onLog?.Invoke($"[drain] {entry.Date} kept for retry (tsc={(result.TscSuccess ? "ok" : result.TscError)}, hrm={(result.HrmSuccess ? "ok" : result.HrmError)}).");
+                if (!DateOnly.TryParseExact(entry.Date, "yyyy-MM-dd", out var date))
+                {
+                    onLog?.Invoke($"[drain] Dropping entry with bad date '{entry.Date}'.");
+                    processed.Add(entry);
+                    continue;
+                }
+
+                onLog?.Invoke($"[drain] Logging {entry.Date}: {string.Join(", ", entry.Tickets)}");
+                var result = await LogEntryAsync(date, entry.Tickets, token, entry.Minutes, onLog, ct: ct);
+                if (result.AllSuccess)
+                {
+                    logged++;
+                    processed.Add(entry);
+                }
+                else
+                {
+                    kept++;
+                    onLog?.Invoke($"[drain] {entry.Date} kept for retry (tsc={(result.TscSuccess ? "ok" : result.TscError)}, hrm={(result.HrmSuccess ? "ok" : result.HrmError)}).");
+                }
             }
         }
+        finally
+        {
+            TicketQueue.RemoveLogged(processed);
+        }
 
-        TicketQueue.RemoveLogged(processed);
         onLog?.Invoke($"[drain] Done. logged={logged}, kept={kept}.");
         return new DrainResult(entries.Count, logged, kept);
     }

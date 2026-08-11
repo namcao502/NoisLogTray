@@ -228,41 +228,50 @@ internal static class GraphTscClient
         }
 
         var shareUrl = string.IsNullOrEmpty(options.ShareUrl) ? TscCells.ExcelUrl : options.ShareUrl;
-        using var req = new HttpRequestMessage(HttpMethod.Get, $"{Graph}/shares/{EncodeShareId(shareUrl)}/driveItem");
-        AddAuth(req, token);
-        using var res = await Http.SendAsync(req, ct);
-        if (!res.IsSuccessStatusCode) throw await GraphErrorAsync(res, "shares/driveItem");
+        // Idempotent GET; retry transient transport failures.
+        return await Retry.OnTransientAsync(async c =>
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{Graph}/shares/{EncodeShareId(shareUrl)}/driveItem");
+            AddAuth(req, token);
+            using var res = await Http.SendAsync(req, c);
+            if (!res.IsSuccessStatusCode) throw await GraphErrorAsync(res, "shares/driveItem");
 
-        var json = await res.Content.ReadAsStringAsync(ct);
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-        var itemId = root.TryGetProperty("id", out var id) ? id.GetString() : null;
-        var driveId = root.TryGetProperty("parentReference", out var pr) && pr.TryGetProperty("driveId", out var dv)
-            ? dv.GetString()
-            : null;
-        if (string.IsNullOrEmpty(driveId) || string.IsNullOrEmpty(itemId))
-            throw new InvalidOperationException("shares/driveItem: response missing driveId/itemId");
-        return new DriveItemRef(driveId, itemId);
+            var json = await res.Content.ReadAsStringAsync(c);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var itemId = root.TryGetProperty("id", out var id) ? id.GetString() : null;
+            var driveId = root.TryGetProperty("parentReference", out var pr) && pr.TryGetProperty("driveId", out var dv)
+                ? dv.GetString()
+                : null;
+            if (string.IsNullOrEmpty(driveId) || string.IsNullOrEmpty(itemId))
+                throw new InvalidOperationException("shares/driveItem: response missing driveId/itemId");
+            return new DriveItemRef(driveId, itemId);
+        }, ct: ct);
     }
 
     // A persistent workbook session (persistChanges:true) so PATCHes commit to the
     // shared/co-authored file instead of a throwaway session that never flushes.
     private static async Task<string> CreateSessionAsync(string token, DriveItemRef reference, CancellationToken ct)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Post,
-            $"{Graph}/drives/{reference.DriveId}/items/{reference.ItemId}/workbook/createSession")
+        // A session is disposable (auto-expires ~5 min idle), so a retry that opens a
+        // second one is harmless; retry transient transport failures.
+        return await Retry.OnTransientAsync(async c =>
         {
-            Content = new StringContent("{\"persistChanges\":true}", Encoding.UTF8, "application/json"),
-        };
-        AddAuth(req, token);
-        using var res = await Http.SendAsync(req, ct);
-        if (!res.IsSuccessStatusCode) throw await GraphErrorAsync(res, "createSession");
+            using var req = new HttpRequestMessage(HttpMethod.Post,
+                $"{Graph}/drives/{reference.DriveId}/items/{reference.ItemId}/workbook/createSession")
+            {
+                Content = new StringContent("{\"persistChanges\":true}", Encoding.UTF8, "application/json"),
+            };
+            AddAuth(req, token);
+            using var res = await Http.SendAsync(req, c);
+            if (!res.IsSuccessStatusCode) throw await GraphErrorAsync(res, "createSession");
 
-        var json = await res.Content.ReadAsStringAsync(ct);
-        using var doc = JsonDocument.Parse(json);
-        var sessionId = doc.RootElement.TryGetProperty("id", out var id) ? id.GetString() : null;
-        if (string.IsNullOrEmpty(sessionId)) throw new InvalidOperationException("createSession: response missing session id");
-        return sessionId;
+            var json = await res.Content.ReadAsStringAsync(c);
+            using var doc = JsonDocument.Parse(json);
+            var sessionId = doc.RootElement.TryGetProperty("id", out var id) ? id.GetString() : null;
+            if (string.IsNullOrEmpty(sessionId)) throw new InvalidOperationException("createSession: response missing session id");
+            return sessionId;
+        }, ct: ct);
     }
 
     private static async Task CloseSessionAsync(string token, DriveItemRef reference, string sessionId)
@@ -284,30 +293,40 @@ internal static class GraphTscClient
 
     private static async Task<string> ReadCellAsync(string token, DriveItemRef reference, string worksheet, string address, string sessionId, CancellationToken ct)
     {
-        using var req = new HttpRequestMessage(HttpMethod.Get, RangeUrl(reference, worksheet, address));
-        AddAuth(req, token);
-        req.Headers.Add("workbook-session-id", sessionId);
-        using var res = await Http.SendAsync(req, ct);
-        if (!res.IsSuccessStatusCode) throw await GraphErrorAsync(res, $"read {address}");
+        // Idempotent read; retry transient transport failures.
+        return await Retry.OnTransientAsync(async c =>
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Get, RangeUrl(reference, worksheet, address));
+            AddAuth(req, token);
+            req.Headers.Add("workbook-session-id", sessionId);
+            using var res = await Http.SendAsync(req, c);
+            if (!res.IsSuccessStatusCode) throw await GraphErrorAsync(res, $"read {address}");
 
-        var json = await res.Content.ReadAsStringAsync(ct);
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-        var value = FirstCell(root, "text") ?? FirstCell(root, "values") ?? "";
-        return value.Trim();
+            var json = await res.Content.ReadAsStringAsync(c);
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+            var value = FirstCell(root, "text") ?? FirstCell(root, "values") ?? "";
+            return value.Trim();
+        }, ct: ct);
     }
 
     private static async Task WriteCellAsync(string token, DriveItemRef reference, string worksheet, string address, string value, string sessionId, CancellationToken ct)
     {
         var body = JsonSerializer.Serialize(new { values = new[] { new[] { value } } });
-        using var req = new HttpRequestMessage(HttpMethod.Patch, RangeUrl(reference, worksheet, address))
+        // PATCH writes the same value to the same cell, so re-sending is idempotent;
+        // retry transient transport failures.
+        await Retry.OnTransientAsync(async c =>
         {
-            Content = new StringContent(body, Encoding.UTF8, "application/json"),
-        };
-        AddAuth(req, token);
-        req.Headers.Add("workbook-session-id", sessionId);
-        using var res = await Http.SendAsync(req, ct);
-        if (!res.IsSuccessStatusCode) throw await GraphErrorAsync(res, $"write {address}");
+            using var req = new HttpRequestMessage(HttpMethod.Patch, RangeUrl(reference, worksheet, address))
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            };
+            AddAuth(req, token);
+            req.Headers.Add("workbook-session-id", sessionId);
+            using var res = await Http.SendAsync(req, c);
+            if (!res.IsSuccessStatusCode) throw await GraphErrorAsync(res, $"write {address}");
+            return true;
+        }, ct: ct);
     }
 
     private static string? FirstCell(JsonElement root, string prop)

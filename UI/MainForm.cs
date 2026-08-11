@@ -42,8 +42,33 @@ internal sealed class MainForm : Form
         Color.FromArgb(180, 83, 9),     // amber
     };
 
+    // Due-date "temperature" ramp for the My-tickets list: cool (far out / no due date)
+    // to hot (due today / overdue), tuned per theme so the key text stays readable.
+    private static readonly Color[] HeatDark =
+    {
+        Color.FromArgb(88, 166, 255),   // blue   - coolest
+        Color.FromArgb(57, 197, 207),   // teal
+        Color.FromArgb(63, 185, 80),    // green
+        Color.FromArgb(227, 179, 65),   // amber
+        Color.FromArgb(255, 157, 92),   // orange
+        Color.FromArgb(255, 105, 97),   // red    - hottest
+    };
+
+    private static readonly Color[] HeatLight =
+    {
+        Color.FromArgb(37, 99, 235),    // blue   - coolest
+        Color.FromArgb(14, 116, 144),   // teal
+        Color.FromArgb(21, 128, 61),    // green
+        Color.FromArgb(180, 83, 9),     // amber
+        Color.FromArgb(194, 65, 12),    // orange
+        Color.FromArgb(220, 38, 38),    // red    - hottest
+    };
+
+    private const int DueHeatMaxDays = 14; // due >= this many days out reads as coolest
+
     private const int CardW = 560;
     private const int InnerW = 528; // CardW - 2*16
+    private const int WillLogHostH = 140; // fixed; rows scroll internally beyond this
 
     private readonly LoggingService? _service;
 
@@ -73,10 +98,11 @@ internal sealed class MainForm : Form
     private readonly System.Windows.Forms.Timer _verifyTimer = new() { Interval = 500 };
     private readonly Dictionary<string, (VState State, string? Title)> _verify = new();
     private readonly MacButton _clearQueueBtn = MacButton.Secondary("Clear queue");
+    private readonly Label _hoursHint = new();
 
-    private Card? _willLogCard;
-    private RoundedHost? _willLogHost;
-    private Card? _actionsCard;
+    // Per typed-ticket HRM minutes while composing an entry. null = the default even
+    // split (see TimeSlots.EvenSplit); reset whenever the ticket text changes.
+    private List<int>? _typedMinutes;
 
     // The bottom activity block (scrolling console + TSC/HRM progress bars).
     private readonly ActivityLogPanel _activity = new();
@@ -114,7 +140,7 @@ internal sealed class MainForm : Form
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         BackColor = Theme.WindowBg;
-        ClientSize = new Size(600, 856); // body fits the cards snugly; activity log docks below
+        ClientSize = new Size(600, 958); // body fits the cards snugly; activity log docks below
         RestoreWindowPosition();
 
         BuildBody();
@@ -260,7 +286,7 @@ internal sealed class MainForm : Form
         _tickets.BackColor = Theme.InputBg;
         _tickets.ForeColor = Theme.TextPrimary;
         _tickets.PlaceholderText = "e.g. 1234, 5678  (MDP- optional)";
-        _tickets.TextChanged += (_, _) => { UpdateWillLog(); UpdateActionState(); _verifyTimer.Stop(); _verifyTimer.Start(); };
+        _tickets.TextChanged += (_, _) => { _typedMinutes = null; UpdateWillLog(); UpdateActionState(); _verifyTimer.Stop(); _verifyTimer.Start(); };
         _tickets.Leave += (_, _) => { _verifyTimer.Stop(); VerifyTicketsAsync(); };
         var ticketH = _tickets.PreferredHeight;
         _tickets.SetBounds(10, (ticketHost.Height - ticketH) / 2, ticketHost.Width - 20, ticketH);
@@ -279,8 +305,19 @@ internal sealed class MainForm : Form
 
     private Card BuildWillLogCard()
     {
-        var card = new Card { Size = new Size(CardW, 90) };
+        var card = new Card { Size = new Size(CardW, 38 + WillLogHostH + 12) };
         card.Controls.Add(SectionLabel("WILL LOG", 16, 14));
+
+        // Running total / validation hint, right-aligned in the header (typed view only).
+        _hoursHint.AutoSize = false;
+        _hoursHint.Size = new Size(170, 18);
+        _hoursHint.Location = new Point(16 + InnerW - 170, 13);
+        _hoursHint.TextAlign = ContentAlignment.MiddleRight;
+        _hoursHint.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
+        _hoursHint.ForeColor = Theme.TextSecondary;
+        _hoursHint.BackColor = Color.Transparent;
+        _hoursHint.Visible = false;
+        card.Controls.Add(_hoursHint);
 
         // Clears the persisted queue; only shown while the card is displaying the
         // queued fallback (input empty + something queued).
@@ -290,11 +327,13 @@ internal sealed class MainForm : Form
         _clearQueueBtn.Click += OnClearQueue;
         card.Controls.Add(_clearQueueBtn);
 
-        var host = new RoundedHost { Location = new Point(16, 38), Size = new Size(InnerW, 40) };
+        // Fixed-height list; rows scroll internally once they overflow so the Actions
+        // card below stays at a stable, visible position.
+        var host = new RoundedHost { Location = new Point(16, 38), Size = new Size(InnerW, WillLogHostH) };
         _willLogList.Dock = DockStyle.Fill;
         _willLogList.FlowDirection = FlowDirection.TopDown;
         _willLogList.WrapContents = false;
-        _willLogList.AutoScroll = false;
+        _willLogList.AutoScroll = true;
         _willLogList.BackColor = Theme.InputBg;
         _willLogList.Padding = new Padding(6, 4, 6, 4);
         host.Controls.Add(_willLogList);
@@ -302,8 +341,6 @@ internal sealed class MainForm : Form
         _verifyTimer.Tick += (_, _) => { _verifyTimer.Stop(); VerifyTicketsAsync(); };
 
         card.Controls.Add(host);
-        _willLogCard = card;
-        _willLogHost = host;
         return card;
     }
 
@@ -350,7 +387,6 @@ internal sealed class MainForm : Form
         card.Controls.Add(_logHrmBtn);
         card.Controls.Add(_checkBtn);
         card.Controls.Add(_reauthBtn);
-        _actionsCard = card;
         return card;
     }
 
@@ -442,6 +478,7 @@ internal sealed class MainForm : Form
             return;
         }
 
+        _verify.Clear(); // Refresh forces a fresh Jira check for every shown ticket
         _refreshBtn.Enabled = false;
         SetSuggestionStatus("Loading your tickets...");
         try
@@ -458,6 +495,7 @@ internal sealed class MainForm : Form
         {
             UpdateActionState();
             UpdateWillLog();
+            VerifyTicketsAsync(); // re-verify typed/queued tickets after the cache clear
         }
     }
 
@@ -497,19 +535,60 @@ internal sealed class MainForm : Form
         return Theme.Dark ? TicketDark[idx] : TicketLight[idx];
     }
 
+    // Temperature colour for a ticket's due date: hot when due today/overdue, cool when
+    // far out or unset. Because the My-tickets list is sorted by due date, this reads as
+    // a hot-at-top, cool-at-bottom gradient.
+    private static Color DueColor(string? dueDate)
+        => SampleRamp(Theme.Dark ? HeatDark : HeatLight, DueUrgency(dueDate));
+
+    // 0 = coolest (far out / no due date), 1 = hottest (due today or overdue).
+    private static double DueUrgency(string? dueDate)
+    {
+        if (string.IsNullOrWhiteSpace(dueDate)
+            || !DateTime.TryParse(dueDate, CultureInfo.InvariantCulture, DateTimeStyles.None, out var due))
+            return 0;
+
+        var days = (due.Date - DateTime.Today).TotalDays;
+        if (days <= 0) return 1;
+        if (days >= DueHeatMaxDays) return 0;
+        return 1 - days / DueHeatMaxDays;
+    }
+
+    // Linear RGB interpolation across an ordered colour ramp at t in [0,1].
+    private static Color SampleRamp(Color[] ramp, double t)
+    {
+        if (t <= 0) return ramp[0];
+        if (t >= 1) return ramp[^1];
+
+        var scaled = t * (ramp.Length - 1);
+        var i = (int)Math.Floor(scaled);
+        var f = scaled - i;
+        var a = ramp[i];
+        var b = ramp[i + 1];
+        return Color.FromArgb(
+            (int)Math.Round(a.R + (b.R - a.R) * f),
+            (int)Math.Round(a.G + (b.G - a.G) * f),
+            (int)Math.Round(a.B + (b.B - a.B) * f));
+    }
+
     // A clickable row: a per-ticket colour bar + coloured key, then the summary right
     // after it (measured, so name and description sit close), with a bottom separator.
     private Control CreateSuggestionRow(JiraSuggestion ticket, int width)
     {
-        var color = TicketColor(ticket.Key);
+        var color = DueColor(ticket.DueDate);
+        var dueLabel = FormatDue(ticket.DueDate);
+        var accessibleName = dueLabel.Length != 0
+            ? $"{ticket.Key}, {ticket.Summary}, due {dueLabel}"
+            : $"{ticket.Key}, {ticket.Summary}";
 
-        var row = new Panel
+        var row = new ClickableRow
         {
             Width = width,
             Height = 31,
             Margin = new Padding(0),
             BackColor = Theme.InputBg,
             Cursor = Cursors.Hand,
+            AccessibleName = accessibleName,
         };
 
         var bar = new Panel { Location = new Point(0, 0), Size = new Size(4, 30), BackColor = color };
@@ -529,7 +608,7 @@ internal sealed class MainForm : Form
         };
 
         // Due date sits right-aligned at the row's end; the summary shrinks to leave room.
-        var dueText = FormatDue(ticket.DueDate);
+        var dueText = dueLabel;
         var dueWidth = dueText.Length == 0 ? 0 : TextRenderer.MeasureText(dueText, SummaryFont).Width + 8;
 
         var summaryX = 12 + keyWidth + 8;
@@ -634,14 +713,16 @@ internal sealed class MainForm : Form
         _willLogList.SuspendLayout();
         ClearRows(_willLogList);
 
-        var rowWidth = Math.Max(140, _willLogList.ClientSize.Width - 8);
+        // Leave room for the vertical scrollbar so rows never trigger a horizontal one.
+        var rowWidth = Math.Max(140, _willLogList.ClientSize.Width - 24);
         var (typed, _) = TicketParser.Parse(_tickets.Text);
         var showingQueue = false;
 
         if (typed.Count != 0)
         {
+            var minutes = TypedMinutes(typed.Count);
             _willLogList.Controls.Add(WillLogText(_date.Value.ToString("dddd, MMMM d, yyyy"), rowWidth));
-            AddTicketRows(typed, rowWidth);
+            AddEditableTicketRows(typed, minutes, rowWidth);
         }
         else
         {
@@ -657,38 +738,96 @@ internal sealed class MainForm : Form
                 {
                     if (!DateOnly.TryParseExact(entry.Date, "yyyy-MM-dd", out var d)) continue;
                     _willLogList.Controls.Add(WillLogText(d.ToString("dddd, MMMM d, yyyy") + "   (queued for 6 PM)", rowWidth));
-                    AddTicketRows(entry.Tickets, rowWidth);
+                    AddTicketRows(entry.Tickets, entry.Minutes, rowWidth);
                 }
             }
         }
 
         _clearQueueBtn.Visible = showingQueue;
+        UpdateHoursHint(typedView: typed.Count != 0);
         _willLogList.ResumeLayout();
-        FitWillLogToContent();
     }
 
-    private void AddTicketRows(IReadOnlyList<string> tickets, int rowWidth)
+    // Concrete per-ticket minutes for the current typed set: the user's custom values
+    // when they line up with the ticket count, else the default even split.
+    private IReadOnlyList<int> TypedMinutes(int count)
+        => (_typedMinutes != null && _typedMinutes.Count == count)
+            ? _typedMinutes
+            : TimeSlots.EvenSplit(count);
+
+    // Editable rows (typed view): each ticket carries an inline hours field.
+    private void AddEditableTicketRows(IReadOnlyList<string> tickets, IReadOnlyList<int> minutes, int rowWidth)
     {
         for (var i = 0; i < tickets.Count; i++)
-            _willLogList.Controls.Add(CreateWillLogRow(tickets[i], TimeSlots.Get(tickets.Count, i), rowWidth));
+            _willLogList.Controls.Add(CreateWillLogEditRow(tickets[i], i, minutes[i], TimeSlots.Get(minutes, i), rowWidth));
     }
 
-    // Grow the "Will log" card to fit all rows (no inner scroll) and push the
-    // cards below it down so nothing overlaps.
-    private void FitWillLogToContent()
+    // Read-only rows (queued fallback): honor a stored custom split, else even.
+    private void AddTicketRows(IReadOnlyList<string> tickets, IReadOnlyList<int>? minutes, int rowWidth)
     {
-        if (_willLogHost is null || _willLogCard is null) return;
-
-        var content = _willLogList.Padding.Vertical;
-        foreach (Control c in _willLogList.Controls)
-            content += c.Height + c.Margin.Vertical;
-
-        var hostH = Math.Max(40, content + _willLogHost.Padding.Vertical);
-        _willLogHost.Height = hostH;
-        _willLogCard.Height = _willLogHost.Top + hostH + 12;
-
-        if (_actionsCard != null) _actionsCard.Top = _willLogCard.Bottom + 12;
+        var mins = minutes ?? TimeSlots.EvenSplit(tickets.Count);
+        for (var i = 0; i < tickets.Count; i++)
+            _willLogList.Controls.Add(CreateWillLogRow(tickets[i], TimeSlots.Get(mins, i), rowWidth));
     }
+
+    // Show the running total / validation state in the header while composing (typed view).
+    private void UpdateHoursHint(bool typedView)
+    {
+        if (!typedView) { _hoursHint.Visible = false; return; }
+
+        var (sum, allPositive) = TypedMinuteStats();
+        _hoursHint.Visible = true;
+        if (!allPositive)
+        {
+            _hoursHint.Text = "each ticket needs > 0h";
+            _hoursHint.ForeColor = Color.FromArgb(230, 76, 76);
+        }
+        else if (sum > TimeSlots.TotalWorkMinutes)
+        {
+            _hoursHint.Text = $"{sum / 60.0:0.#}h - over 8h, trim";
+            _hoursHint.ForeColor = Color.FromArgb(230, 76, 76);
+        }
+        else
+        {
+            _hoursHint.Text = $"{sum / 60.0:0.#}h / 8h";
+            _hoursHint.ForeColor = Theme.TextSecondary;
+        }
+    }
+
+    // Sum of the typed set's minutes and whether every ticket is > 0, for validation.
+    private (int Sum, bool AllPositive) TypedMinuteStats()
+    {
+        var (typed, _) = TicketParser.Parse(_tickets.Text);
+        if (typed.Count == 0) return (0, true);
+        var mins = TypedMinutes(typed.Count);
+        var sum = 0;
+        var allPositive = true;
+        foreach (var m in mins)
+        {
+            sum += m;
+            if (m <= 0) allPositive = false;
+        }
+        return (sum, allPositive);
+    }
+
+    // Apply an edited hours value to the typed set, then re-flow every row's slots.
+    // Focus has already left the field (commit is on blur/Enter), so a rebuild is safe.
+    private void OnHoursChanged(int index, double hours)
+    {
+        var (typed, _) = TicketParser.Parse(_tickets.Text);
+        if (index < 0 || index >= typed.Count) return;
+
+        if (_typedMinutes == null || _typedMinutes.Count != typed.Count)
+            _typedMinutes = TimeSlots.EvenSplit(typed.Count).ToList();
+        _typedMinutes[index] = (int)Math.Round(hours * 60);
+
+        UpdateWillLog();
+        UpdateActionState();
+    }
+
+    // The custom minutes for a to-be-logged set, or null to use the even split.
+    private IReadOnlyList<int>? TypedMinutesFor(IReadOnlyList<string> tickets)
+        => (_typedMinutes != null && _typedMinutes.Count == tickets.Count) ? _typedMinutes : null;
 
     private static Label WillLogText(string text, int width) => new()
     {
@@ -705,12 +844,39 @@ internal sealed class MainForm : Form
     };
 
     private Control CreateWillLogRow(string key, IReadOnlyList<TimeSlot> slots, int width)
-    {
-        var slotText = string.Join("  /  ", slots.Select(s => $"{s.Start}-{s.End}"));
+        => new WillLogRow
+        {
+            Width = width,
+            Key = key,
+            KeyColor = TicketColor(key),
+            Slots = SlotText(slots),
+            DotColor = DotColorFor(key),
+        };
 
+    private Control CreateWillLogEditRow(string key, int index, int minutes, IReadOnlyList<TimeSlot> slots, int width)
+    {
+        var row = new WillLogEditRow
+        {
+            Width = width,
+            Key = key,
+            KeyColor = TicketColor(key),
+            Slots = SlotText(slots),
+            DotColor = DotColorFor(key),
+            Index = index,
+            Hours = Math.Round(minutes / 60.0, 2),
+        };
+        row.HoursChanged += OnHoursChanged;
+        return row;
+    }
+
+    private static string SlotText(IReadOnlyList<TimeSlot> slots)
+        => string.Join("  /  ", slots.Select(s => $"{s.Start}-{s.End}"));
+
+    // The Jira verification color for a ticket's status dot (grey when unknown).
+    private Color DotColorFor(string key)
+    {
         var dotColor = Color.FromArgb(150, 150, 156);
         if (_verify.TryGetValue(key, out var v))
-        {
             dotColor = v.State switch
             {
                 VState.Valid => Color.FromArgb(46, 160, 80),
@@ -718,16 +884,7 @@ internal sealed class MainForm : Form
                 VState.Error => Color.FromArgb(217, 164, 0),
                 _ => dotColor,
             };
-        }
-
-        return new WillLogRow
-        {
-            Width = width,
-            Key = key,
-            KeyColor = TicketColor(key),
-            Slots = slotText,
-            DotColor = dotColor,
-        };
+        return dotColor;
     }
 
     // Verify each previewed ticket against Jira (debounced), showing valid+title or
@@ -771,19 +928,30 @@ internal sealed class MainForm : Form
             return;
         }
 
+        var (sum, allPositive) = TypedMinuteStats();
+        if (!allPositive || sum > TimeSlots.TotalWorkMinutes)
+        {
+            ShowStatus("Fix the hours first: each ticket needs > 0h and the day can't exceed 8h.", false);
+            return;
+        }
+
+        var newMinutes = TypedMinutesFor(tickets); // null when the user kept the even split
         var date = DateOnly.FromDateTime(_date.Value.Date).ToString("yyyy-MM-dd");
         var entries = TicketQueue.Read().ToList();
         var idx = entries.FindIndex(x => x.Date == date);
         if (idx >= 0)
         {
-            var merged = entries[idx].Tickets.ToList();
-            foreach (var t in tickets)
-                if (!merged.Contains(t)) merged.Add(t);
-            entries[idx] = new QueueEntry(date, merged);
+            var merged = TicketQueue.MergeInto(entries[idx], tickets, newMinutes);
+            if (TicketQueue.DayMinutes(merged) > TimeSlots.TotalWorkMinutes)
+            {
+                ShowStatus($"That would exceed 8h for {date}. Trim the hours before queueing.", false);
+                return;
+            }
+            entries[idx] = merged;
         }
         else
         {
-            entries.Add(new QueueEntry(date, tickets.ToList()));
+            entries.Add(new QueueEntry(date, tickets.ToList(), newMinutes));
         }
 
         TicketQueue.Write(entries.OrderBy(x => x.Date).ToList());
@@ -816,6 +984,21 @@ internal sealed class MainForm : Form
         VerifyTicketsAsync();
     }
 
+    // Focus the window on a specific date and put the cursor in the ticket box. Used by
+    // the Weekly check to jump straight to a day that needs logging. SetDate marks it a
+    // deliberate pick so OnActivated's today-sync will not override it; ValueChanged then
+    // refreshes the Will log preview.
+    internal void PrepareForDate(DateOnly date)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action<DateOnly>(PrepareForDate), date);
+            return;
+        }
+        _date.SetDate(date);
+        _tickets.Focus();
+    }
+
     private async void OnLogNow(object? sender, EventArgs e)
     {
         if (_service is null) { AppendLog("[error] Config not loaded; cannot log."); return; }
@@ -833,7 +1016,7 @@ internal sealed class MainForm : Form
         {
             AppendLog($"[log] Logging {date:yyyy-MM-dd}: {string.Join(", ", tickets)} ...");
             var token = await _service.AcquireGraphTokenAsync(AppendLog);
-            var result = await _service.LogEntryAsync(date, tickets, token, AppendLog, ReportTsc, ReportHrm);
+            var result = await _service.LogEntryAsync(date, tickets, token, TypedMinutesFor(tickets), AppendLog, ReportTsc, ReportHrm);
             AppendLog($"[log] TSC: {(result.TscSuccess ? "OK" : result.TscError)}");
             AppendLog($"[log] HRM: {(result.HrmSuccess ? "OK" : result.HrmError)}");
             ShowStatus(result.AllSuccess
@@ -886,7 +1069,7 @@ internal sealed class MainForm : Form
         ShowProgress(false, true);
         try
         {
-            var (ok, err) = await _service.LogHrmAsync(tickets, date, AppendLog, ReportHrm);
+            var (ok, err) = await _service.LogHrmAsync(tickets, date, TypedMinutesFor(tickets), AppendLog, ReportHrm);
             AppendLog($"[hrm] {(ok ? "OK" : err)}");
             ShowStatus(ok ? "HRM logged." : $"HRM failed: {err}", ok);
         }
@@ -953,15 +1136,19 @@ internal sealed class MainForm : Form
         UpdateActionState();
     }
 
-    // Enable the ticket-dependent actions only when there is at least one valid
-    // ticket and no operation is in flight; session actions just track busy.
+    // Enable the ticket-dependent actions only when there is at least one valid ticket
+    // and no operation is in flight. Queue / Log now / Log HRM additionally require valid
+    // hours (each > 0, day <= 8h); Log TSC ignores time, so it only needs a ticket.
     private void UpdateActionState()
     {
-        var canLog = !_busy && TicketParser.Parse(_tickets.Text).Tickets.Count != 0;
-        _queueBtn.Enabled = canLog;
-        _logNowBtn.Enabled = canLog;
-        _logTscBtn.Enabled = canLog;
-        _logHrmBtn.Enabled = canLog;
+        var hasTickets = TicketParser.Parse(_tickets.Text).Tickets.Count != 0;
+        var (sum, allPositive) = TypedMinuteStats();
+        var hoursOk = allPositive && sum <= TimeSlots.TotalWorkMinutes;
+
+        _queueBtn.Enabled = !_busy && hasTickets && hoursOk;
+        _logNowBtn.Enabled = !_busy && hasTickets && hoursOk;
+        _logTscBtn.Enabled = !_busy && hasTickets;
+        _logHrmBtn.Enabled = !_busy && hasTickets && hoursOk;
         _checkBtn.Enabled = !_busy;
         _reauthBtn.Enabled = !_busy;
         _refreshBtn.Enabled = !_busy;
@@ -972,6 +1159,7 @@ internal sealed class MainForm : Form
     protected override void OnActivated(EventArgs e)
     {
         base.OnActivated(e);
+        _date.SyncToTodayIfAuto();
         RefreshQueuedView();
     }
 
@@ -982,6 +1170,7 @@ internal sealed class MainForm : Form
         {
             e.Cancel = true;
             SaveWindowPosition();
+            _date.ForgetManualPick();
             Hide();
             return;
         }

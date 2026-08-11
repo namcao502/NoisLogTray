@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Globalization;
 
 namespace NoisLogTray;
 
@@ -154,7 +155,7 @@ internal sealed class ActivityLogPanel : Panel
 
         // Dim timestamp prefix, then the message in its own colour.
         _log.SelectionColor = Theme.TextSecondary;
-        _log.AppendText(line.Time.ToString("HH:mm:ss") + "  ");
+        _log.AppendText(line.Time.ToString("yyyy-MM-dd h:mm:ss tt", CultureInfo.InvariantCulture) + "  ");
         _log.SelectionColor = color;
         _log.AppendText(line.Text + Environment.NewLine);
 

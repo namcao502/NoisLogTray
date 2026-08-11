@@ -58,6 +58,15 @@ The csproj marks `.env` `CopyToPublishDirectory=Never`, so **no secrets ship**; 
 recipient fills the first-run dialog (writes `%AppData%\NoisLogTray\.env`). Google
 Chrome must be installed on the target PC (the TSC sniff/re-auth uses `channel=chrome`).
 
+**Releases + update check.** CI lives in `.github/workflows/`: `ci.yml` builds + tests
+the solution on every push/PR; `release.yml` fires on a `v*` git tag, runs the publish
+above with `-p:Version` derived from the tag, and attaches the zip to a GitHub Release.
+On startup the app calls `UpdateService.CheckAsync` (anonymous GitHub Releases API for the
+public `namcao502/NoisLogTray` repo) and, if the latest tag beats the running `<Version>`
+(csproj, default `1.0.0`), reveals a tray "Download update..." item + a balloon that opens
+the release page. Any failure/offline is silent. So a release = tag `vX.Y.Z` (numeric, so
+the tag parses to a `System.Version`); users get notified on their next launch.
+
 ### Smoke projects (manual, not part of the build)
 
 `smoke/SniffSmoke` and `smoke/HrmSmoke` are standalone `net10.0` console exes that
@@ -81,12 +90,13 @@ Folders follow the backend's WindowsApps convention (`Backend-DotNet/src/Windows
 and all share the flat `NoisLogTray` namespace (folder does not equal namespace):
 - `Services/` - service + external-client classes: `LoggingService`, `SixPmScheduler`,
   `StartupService`, `GraphTscClient`, `HrmMcpClient`, `JiraClient`, `TscTokenSniffer`,
-  `TicketQueue`.
+  `TicketQueue`, `UpdateService` (startup GitHub-Releases update check).
 - `Helpers/` - utilities: `TicketParser`, `TimeSlots`, `TscCells`, `Timesheet`, `Hcm`,
-  `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppSettings`, `AppIcon`.
+  `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppSettings`, `AppIcon`,
+  `Retry` (transient-transport-failure retry with backoff, used by the Jira/Graph/HRM clients).
 - `Models/` - record types (+ the `CredentialCheck` enum): `QueueEntry`,
   `JiraSuggestion`/`JiraVerifyResult`, `DrainResult`/`EntryLogResult`, `GraphTscOptions`,
-  `TimeSlot`, `ToolEnvelope`, `CredentialCheck`.
+  `TimeSlot`, `ToolEnvelope`, `CredentialCheck`, `UpdateInfo`.
 - `Interface/` - abstractions (`IJiraClient`, implemented by `JiraClient`).
 - `UI/` - WinForms. `Theme` is a central light/dark palette; controls read it at paint
   time and subscribe to `Theme.Changed` to repaint (the header's Dark/Light button calls
@@ -94,16 +104,23 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   and persists the choice through `AppSettings` (`Theme.Load` runs in `Program.Main`;
   `Theme.Toggle` does a read-modify-write so it keeps the window position). Also `TrayApp`,
   `MainForm`, `CredentialsForm` (the themed first-run / edit-credentials dialog),
-  `WeeklyCheckForm` (read-only weekly coverage: HRM hours + TSC ticket per weekday,
-  opened from the tray "Weekly check..." item), and
+  `WeeklyCheckForm` (weekly coverage: HRM hours + TSC ticket per weekday, opened from the
+  tray "Weekly check..." item; an under-logged past weekday is a clickable `ClickableRow`
+  that raises `LogDayRequested` -> `TrayApp` opens `MainForm` on that date via
+  `MainForm.PrepareForDate`), and
   owner-drawn controls: `MacButton`
   (rounded button), `Card` (rounded card surface), `RoundedHost` (rounded border
   around native controls like the list/textbox), `RoundedDatePicker` (rounded date
   field with a custom `ModernCalendar` popup in a rounded `CalendarPopupForm`, replacing
   the native `DateTimePicker`/`MonthCalendar`), `WillLogRow` (one owner-drawn Will Log
-  line), `MiniProgress` (thin rounded bar), and `ActivityLogPanel` (the bottom activity
+  line), `ClickableRow` (a focusable/keyboard-activatable `Panel` for clickable list rows -
+  My-tickets suggestions and actionable weekly days), `MiniProgress` (thin rounded bar), and
+  `ActivityLogPanel` (the bottom activity
   block - a self-theming control owning the scrolling console + TSC/HRM progress bars;
   `MainForm` just delegates `AppendLog`/`ShowStatus`/`ShowProgress` to it).
+  Owner-drawn interactive controls (`MacButton`, `RoundedDatePicker`, `ClickableRow`) paint
+  a keyboard-focus ring and set `AccessibleName`/`AccessibleRole` so the app is operable by
+  keyboard and screen reader.
 - `Program.cs` stays at the repo root.
 
 - **`Program.cs`** - entry point. Single-instance `Global\` mutex, global exception
@@ -126,15 +143,21 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   "My tickets" list from `LoggingService.GetMyTicketsAsync` - each row shows the key,
   summary, then a right-aligned due date - click a row to add it; an "Edit JQL" button
   opens `JqlForm` to customise the query driving that list (validated against Jira, then
-  persisted + re-fetched), + date/ticket), "Will log" (one `WillLogRow` per ticket - a
+  persisted + re-fetched), + date/ticket), "Will log" (one row per ticket - a
   status dot, the colored
   ticket key, and its time slots; the dot reflects Jira verification, green valid /
   red not found / amber error, via `VerifyTicketsAsync` debounced on typing and on
   blur, suggestions pre-marked valid. While typing it previews the typed tickets for
-  the selected date; with the input empty it falls back to the **whole persisted
-  queue** grouped by date (each headed "(queued for 6 PM)"), and shows a "Clear queue"
-  button - this is the single view of what's scheduled (there is no separate queue
-  card). The card grows to fit all rows via `FitWillLogToContent` - no inner scroll),
+  the selected date, using an **editable `WillLogEditRow`** with an inline hours field
+  per ticket: default is the even split (`TimeSlots.EvenSplit`), editing sets a custom
+  per-ticket duration (partial day allowed, day capped at 8h; over-8h disables Queue /
+  Log now / Log HRM with a header hint). Custom durations ride the queue as
+  `QueueEntry.Minutes` (null = even split) and drive the HRM slots; TSC ignores time.
+  With the input empty it falls back to the **whole persisted queue** grouped by date
+  (each headed "(queued for 6 PM)"), shown read-only via `WillLogRow`, and shows a
+  "Clear queue" button - this is the single view of what's scheduled (there is no
+  separate queue card). The card is **fixed height and scrolls internally**
+  (`WillLogHostH`) so the Actions card below stays visible with a long queue),
   and "Actions" (Queue / Log now / Log TSC /
   Log HRM / Check TSC / Re-auth). `RefreshQueuedView` (called on queue/clear, on window
   activate, and after a drain, including by `TrayApp`) just re-renders "Will log". At the

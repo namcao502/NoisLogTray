@@ -35,13 +35,16 @@ internal sealed class JiraClient : IJiraClient
     {
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/rest/api/3/myself");
-            AddHeaders(req);
-            using var res = await Http.SendAsync(req, ct);
-            if (res.StatusCode == HttpStatusCode.OK) return CredentialCheck.Valid;
-            if (res.StatusCode == HttpStatusCode.Unauthorized || res.StatusCode == HttpStatusCode.Forbidden)
-                return CredentialCheck.Rejected;
-            return CredentialCheck.Unreachable;
+            return await Retry.OnTransientAsync(async c =>
+            {
+                using var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/rest/api/3/myself");
+                AddHeaders(req);
+                using var res = await Http.SendAsync(req, c);
+                if (res.StatusCode == HttpStatusCode.OK) return CredentialCheck.Valid;
+                if (res.StatusCode == HttpStatusCode.Unauthorized || res.StatusCode == HttpStatusCode.Forbidden)
+                    return CredentialCheck.Rejected;
+                return CredentialCheck.Unreachable;
+            }, ct: ct);
         }
         catch
         {
@@ -49,40 +52,48 @@ internal sealed class JiraClient : IJiraClient
         }
     }
 
-    public async Task<JiraVerifyResult> VerifyTicketAsync(string ticketId, CancellationToken ct = default)
-    {
-        using var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/rest/api/3/issue/{ticketId}?fields=summary");
-        AddHeaders(req);
-        using var res = await Http.SendAsync(req, ct);
-
-        if (res.StatusCode == HttpStatusCode.OK)
+    // GET is idempotent, so a transient transport failure is safe to retry.
+    public Task<JiraVerifyResult> VerifyTicketAsync(string ticketId, CancellationToken ct = default)
+        => Retry.OnTransientAsync(async c =>
         {
-            var json = await res.Content.ReadAsStringAsync(ct);
-            using var doc = JsonDocument.Parse(json);
-            var summary = doc.RootElement.GetProperty("fields").GetProperty("summary").GetString();
-            return new JiraVerifyResult(true, summary);
-        }
-        if (res.StatusCode == HttpStatusCode.NotFound)
-            return new JiraVerifyResult(false, null);
+            using var req = new HttpRequestMessage(HttpMethod.Get, $"{_baseUrl}/rest/api/3/issue/{ticketId}?fields=summary");
+            AddHeaders(req);
+            using var res = await Http.SendAsync(req, c);
 
-        throw new InvalidOperationException($"Jira API error: {(int)res.StatusCode} {res.ReasonPhrase}");
-    }
+            if (res.StatusCode == HttpStatusCode.OK)
+            {
+                var json = await res.Content.ReadAsStringAsync(c);
+                using var doc = JsonDocument.Parse(json);
+                var summary = doc.RootElement.GetProperty("fields").GetProperty("summary").GetString();
+                return new JiraVerifyResult(true, summary);
+            }
+            if (res.StatusCode == HttpStatusCode.NotFound)
+                return new JiraVerifyResult(false, null);
+
+            throw new InvalidOperationException($"Jira API error: {(int)res.StatusCode} {res.ReasonPhrase}");
+        }, ct: ct);
 
     public async Task<IReadOnlyList<JiraSuggestion>> GetMyTicketsAsync(int limit = 5, string? jql = null, CancellationToken ct = default)
     {
         var effectiveJql = string.IsNullOrWhiteSpace(jql) ? DefaultMyTicketsJql : jql;
         var body = JsonSerializer.Serialize(new { jql = effectiveJql, maxResults = limit, fields = new[] { "summary", "duedate" } });
-        using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/rest/api/3/search/jql")
+
+        // A read-only search; retry transient transport failures.
+        var json = await Retry.OnTransientAsync(async c =>
         {
-            Content = new StringContent(body, Encoding.UTF8, "application/json"),
-        };
-        AddHeaders(req);
-        using var res = await Http.SendAsync(req, ct);
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/rest/api/3/search/jql")
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            };
+            AddHeaders(req);
+            using var res = await Http.SendAsync(req, c);
 
-        if (!res.IsSuccessStatusCode)
-            throw new InvalidOperationException($"Jira API error: {(int)res.StatusCode} {res.ReasonPhrase}");
+            if (!res.IsSuccessStatusCode)
+                throw new InvalidOperationException($"Jira API error: {(int)res.StatusCode} {res.ReasonPhrase}");
 
-        var json = await res.Content.ReadAsStringAsync(ct);
+            return await res.Content.ReadAsStringAsync(c);
+        }, ct: ct);
+
         using var doc = JsonDocument.Parse(json);
         var list = new List<JiraSuggestion>();
         if (doc.RootElement.TryGetProperty("issues", out var issues) && issues.ValueKind == JsonValueKind.Array)
@@ -112,17 +123,20 @@ internal sealed class JiraClient : IJiraClient
         try
         {
             var body = JsonSerializer.Serialize(new { jql, maxResults = 1, fields = new[] { "summary" } });
-            using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/rest/api/3/search/jql")
+            return await Retry.OnTransientAsync(async c =>
             {
-                Content = new StringContent(body, Encoding.UTF8, "application/json"),
-            };
-            AddHeaders(req);
-            using var res = await Http.SendAsync(req, ct);
-            if (res.IsSuccessStatusCode) return new JqlCheckResult(JqlCheck.Valid, null);
+                using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/rest/api/3/search/jql")
+                {
+                    Content = new StringContent(body, Encoding.UTF8, "application/json"),
+                };
+                AddHeaders(req);
+                using var res = await Http.SendAsync(req, c);
+                if (res.IsSuccessStatusCode) return new JqlCheckResult(JqlCheck.Valid, null);
 
-            var json = await res.Content.ReadAsStringAsync(ct);
-            var reason = TryExtractJiraError(json) ?? $"Jira rejected the query ({(int)res.StatusCode}).";
-            return new JqlCheckResult(JqlCheck.Invalid, reason);
+                var json = await res.Content.ReadAsStringAsync(c);
+                var reason = TryExtractJiraError(json) ?? $"Jira rejected the query ({(int)res.StatusCode}).";
+                return new JqlCheckResult(JqlCheck.Invalid, reason);
+            }, ct: ct);
         }
         catch
         {
