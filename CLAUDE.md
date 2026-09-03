@@ -90,13 +90,15 @@ Folders follow the backend's WindowsApps convention (`Backend-DotNet/src/Windows
 and all share the flat `NoisLogTray` namespace (folder does not equal namespace):
 - `Services/` - service + external-client classes: `LoggingService`, `SixPmScheduler`,
   `StartupService`, `GraphTscClient`, `HrmMcpClient`, `JiraClient`, `TscTokenSniffer`,
-  `TicketQueue`, `UpdateService` (startup GitHub-Releases update check).
-- `Helpers/` - utilities: `TicketParser`, `TimeSlots`, `TscCells`, `Timesheet`, `Hcm`,
-  `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppSettings`, `AppIcon`,
+  `TicketQueue`, `UpdateService` (startup GitHub-Releases update check),
+  `OffDaySync` (marks approved leave `OFF` in TSC; see "Days off" below).
+- `Helpers/` - utilities: `TicketParser`, `TimeSlots`, `TscCells`, `Timesheet`, `Leave`,
+  `Hcm`, `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppSettings`,
+  `AppIcon`, `OffDayStore`,
   `Retry` (transient-transport-failure retry with backoff, used by the Jira/Graph/HRM clients).
 - `Models/` - record types (+ the `CredentialCheck` enum): `QueueEntry`,
-  `JiraSuggestion`/`JiraVerifyResult`, `DrainResult`/`EntryLogResult`, `GraphTscOptions`,
-  `TimeSlot`, `ToolEnvelope`, `CredentialCheck`, `UpdateInfo`.
+  `JiraSuggestion`/`JiraVerifyResult`, `DrainResult`/`EntryLogResult`/`OffWriteResult`,
+  `GraphTscOptions`, `TimeSlot`, `ToolEnvelope`, `CredentialCheck`, `UpdateInfo`.
 - `Interface/` - abstractions (`IJiraClient`, implemented by `JiraClient`).
 - `UI/` - WinForms. `Theme` is a central light/dark palette; controls read it at paint
   time and subscribe to `Theme.Changed` to repaint (the header's Dark/Light button calls
@@ -107,7 +109,10 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `WeeklyCheckForm` (weekly coverage: HRM hours + TSC ticket per weekday, opened from the
   tray "Weekly check..." item; an under-logged past weekday is a clickable `ClickableRow`
   that raises `LogDayRequested` -> `TrayApp` opens `MainForm` on that date via
-  `MainForm.PrepareForDate`), and
+  `MainForm.PrepareForDate`. An approved day off (`DayCoverage.IsOff`) reads gray "off"
+  for HRM and is judged only on the TSC marker - green `OFF`, else amber "off - not
+  marked" and clickable, including when it is still in the future so planned leave can
+  be marked ahead), and
   owner-drawn controls: `MacButton`
   (rounded button), `Card` (rounded card surface), `RoundedHost` (rounded border
   around native controls like the list/textbox), `RoundedDatePicker` (rounded date
@@ -158,8 +163,11 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   "Clear queue" button - this is the single view of what's scheduled (there is no
   separate queue card). The card is **fixed height and scrolls internally**
   (`WillLogHostH`) so the Actions card below stays visible with a long queue),
-  and "Actions" (Queue / Log now / Log TSC /
-  Log HRM / Check TSC / Re-auth). `RefreshQueuedView` (called on queue/clear, on window
+  and "Actions" (Queue / Log now, then a 5-up row: Log TSC /
+  Log HRM / Log OFF / Check TSC / Re-auth). "Log OFF" needs no ticket and takes any date,
+  confirms, then writes the `OFF` marker for the selected day and drops that day's queued
+  entries; it is the only path that overwrites a cell holding real work.
+  `RefreshQueuedView` (called on queue/clear, on window
   activate, and after a drain, including by `TrayApp`) just re-renders "Will log". At the
   bottom of the window a docked "Activity" card holds a scrolling console log that
   streams every activity line live (`AppendLog` -> log file + console) and the green/red
@@ -182,8 +190,10 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   before its JWT `exp`, guarded by a `SemaphoreSlim`) so repeated TSC actions don't each
   relaunch Chrome; `InvalidateGraphToken` clears it and is called after a successful
   re-auth. `CheckWeekAsync` is the read-back path (weekly coverage): one Graph token,
-  then `GraphTscClient.ReadTicketsAsync` + `HrmMcpClient.GetDayHoursAsync` in parallel,
-  merged into `DayCoverage` per date (future dates skipped -> nulls).
+  then `GraphTscClient.ReadTicketsAsync` + `HrmMcpClient.GetDayHoursAsync` +
+  `GetOffDatesAsync` in parallel, merged into `DayCoverage` per date (future dates
+  skipped -> nulls, but leave is read for the whole week so a planned day off reads
+  "off", not "pending"). `LogOffAsync` writes the `OFF` marker (see "Days off").
 
 Bottom-layer clients:
 
@@ -194,21 +204,35 @@ Bottom-layer clients:
   **Fail-closed date safety**: reads column B for the row and aborts if it does not
   match the expected `M/D/YYYY`, to avoid ever logging the wrong day. `ReadTicketsAsync`
   reads back the ticket cell per date for the weekly check (same B sanity, read-only).
+  `WriteOffAsync` writes `TscCells.OffMarker` on `TscCells.OffFillColor`
+  (`PATCH .../format/fill`); with `overwrite:false` it leaves a cell holding real work
+  alone and reports it as skipped. Writing a real ticket over an `OFF` cell clears the
+  fill (`POST .../format/fill/clear`) so no stray yellow is left behind.
 - **`HrmMcpClient`** - calls the `log_timesheet` MCP tool (Bearer = `HRM_API_KEY`).
   A time slot straddling lunch becomes two calls (first creates the task, second
   appends); a hard-failing ticket is skipped so the rest still log (partial failure).
   `GetDayHoursAsync` reads back total hours per date via the `get_my_day_logs` tool
-  (parsed by `Timesheet.ParseDayHours`) for the weekly check.
+  (parsed by `Timesheet.ParseDayHours`) for the weekly check. `GetOffDatesAsync` reads
+  approved leave via `find_my_requests` (parsed by `Leave.ParseOffDates`).
 - **`TscTokenSniffer`** - Playwright-driven token source for Graph. Runs **headless**
-  to sniff a `Files.ReadWrite.All` Bearer off `office.com`/SharePoint from the saved
+  to sniff a `Files.ReadWrite.All` Bearer off the M365 shell/SharePoint from the saved
   session, and to check the session; **only re-auth opens a visible browser**. Uses a
   single on-disk Chrome profile at `~/.tsc-daily-log-browser`.
+  The broad `.All` token must come from the M365 shell (app `M365ChatClient`); the
+  OneDrive surfaces only ever mint own-file `Files.ReadWrite`, which 403s on the shared
+  workbook (it lives in another user's OneDrive). `www.office.com` now 301s to
+  `m365.cloud.microsoft`, whose **root is an anonymous marketing page** that renders a
+  "Sign in" link and never auto-SSOs - so the sniff targets
+  `m365.cloud.microsoft/login?ru=%2F` directly, which does the top-level auth redirect
+  and completes silently against the saved session. If a future migration breaks this
+  again the symptom is a narrow-scope token plus `shares/driveItem -> 403 accessDenied`,
+  and `smoke/SniffSmoke` reproduces it in isolation.
 - **`JiraClient`** - Jira Cloud REST (basic auth): verify a ticket, list "my tickets".
 
 Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timezone),
 `BrowserLock`, `AppLogger`, `StartupService` (Run-key logon registration),
-`SixPmScheduler`. Pure/tested helpers: `TscCells`, `TimeSlots`, `Timesheet`,
-`TicketParser`, `TicketQueue`.
+`SixPmScheduler`, `OffDaySync` (leave watcher). Pure/tested helpers: `TscCells`,
+`TimeSlots`, `Timesheet`, `Leave`, `TicketParser`, `TicketQueue`, `OffDayStore`.
 
 ## Cross-cutting rules to preserve
 
@@ -240,6 +264,31 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   successful TSC re-auth, so entries kept by a logged-out drain retry automatically.
   Note: the date picker is in local time; for a user outside Vietnam a near-midnight
   pick can differ from the HCM day (a tooltip on the date field flags this).
+- **Days off are marked eagerly, not at `LOG_TIME`.** The `OFF` cell is a signal to
+  teammates, so its value is in arriving early - and leave is approved days ahead.
+  `OffDaySync` therefore polls `find_my_requests` on startup and **every 2 hours**,
+  looking ahead **today .. +60 days** (never backwards; a past day is only markable via
+  the button). Only `status: Approved` **and** `periodType: AllDay` count - a half-day
+  request is still half a working day and needs a real ticket. Detection is one
+  browser-free MCP call but the TSC write needs a Graph token (= a headless Chrome
+  sniff), so the two are split: `OffDayStore` (the `markedOffDates` list in
+  `settings.json`) records what is already written, and Graph is only touched when a
+  date is genuinely unmarked - do not remove that gate, or every app start relaunches
+  Chrome. The automatic path passes `overwrite:false` and **never** replaces a real
+  ticket; only the window's "Log OFF" button overwrites, behind a confirm, and it also
+  drops that date's queued entries so the drain cannot undo it. A skipped date never
+  reaches `OffDayStore` (it is not marked), so `OffDaySync` also holds a **session-scoped**
+  skipped set - without it such a date stays pending forever and every poll reopens a
+  Graph session just to skip it again. Session-scoped so a restart re-checks once and
+  clearing the cell self-heals.
+  `TrayApp.OnScheduledFireAsync` consults the same sync before the reminder: an approved
+  day off suppresses the popup. A **failed** lookup returns empty and the reminder still
+  opens - nagging is the safe direction when a day off cannot be told from a missed one.
+  There is **no holiday source**: the HRM MCP server exposes no public-holiday calendar
+  (verified across all 29 tools), and in practice this team files leave requests for
+  company holidays too. An HRM key without leave scope gets `FORBIDDEN`, which must
+  degrade to "no off days" plus one log line - the app ships to users whose key is
+  timesheet-only.
 - **One browser at a time.** `LaunchPersistentContextAsync` locks the profile on
   disk, so every Playwright entry point goes through `BrowserLock.TryAcquire()` /
   `Release()` (reject-fast, not queued). HRM logging is browser-free and can run in
@@ -276,9 +325,10 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 ## Per-user data
 
 Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
-(the pending log queue), `settings.json` (theme, window position, **and** the `Config`
-key/value map of secrets/settings written by `CredentialsForm`, via `AppSettings`), and
-`logs/app.log`. A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
+(the pending log queue), `settings.json` (theme, window position, `markedOffDates` -
+the dates already marked `OFF` in TSC, via `OffDayStore`, pruned of past dates on every
+write - **and** the `Config` key/value map of secrets/settings written by
+`CredentialsForm`, via `AppSettings`), and `logs/app.log`. A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
 first load and removed. A missing or malformed `queue.json` yields an empty queue by
 design so the 18:00 runner never throws; `AppSettings` likewise falls back to defaults on
 a missing/bad `settings.json` (preserving the bad copy as `settings.json.bad`). `app.log`

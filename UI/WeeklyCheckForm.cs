@@ -173,7 +173,7 @@ internal sealed class WeeklyCheckForm : Form
         {
             var coverage = await _service.CheckWeekAsync(days, AppendLog);
             RenderRows(coverage);
-            SetStatus("Done. (Green = logged, amber = partial, red = missing, gray = pending/unknown.)");
+            SetStatus("Done. (Green = logged, amber = partial, red = missing, gray = pending/unknown/off.)");
         }
         catch (Exception ex)
         {
@@ -202,12 +202,17 @@ internal sealed class WeeklyCheckForm : Form
         var (hColor, hText) = HrmStatus(c, future);
         var (tColor, tText) = TscStatus(c, future);
 
-        // A past/today weekday that is not fully logged on both sides can be clicked to
-        // jump into logging it; fully-logged and future days stay inert.
-        var actionable = !future && (hColor != Green || tColor != Green);
+        // A clickable row jumps into logging its date. A day off ignores `future` so a
+        // planned leave can be marked ahead of time.
+        var actionable = c.IsOff ? tColor != Green : !future && (hColor != Green || tColor != Green);
 
         Panel row = actionable
-            ? new ClickableRow { AccessibleName = $"{c.Date:dddd, MMMM d}, needs logging - open to log" }
+            ? new ClickableRow
+            {
+                AccessibleName = c.IsOff
+                    ? $"{c.Date:dddd, MMMM d}, day off not marked - open to mark it"
+                    : $"{c.Date:dddd, MMMM d}, needs logging - open to log",
+            }
             : new Panel();
         row.Width = Inner - 36;
         row.Height = 42;
@@ -285,8 +290,10 @@ internal sealed class WeeklyCheckForm : Form
         UseMnemonic = false,
     };
 
+    // A day off has no hours to log, so zero is never a miss.
     private static (Color, string) HrmStatus(DayCoverage c, bool future)
     {
+        if (c.IsOff) return (Gray, "off");
         if (future) return (Gray, "pending");
         if (c.HrmHours is null) return (Gray, "unknown");
         var h = c.HrmHours.Value;
@@ -295,8 +302,15 @@ internal sealed class WeeklyCheckForm : Form
         return (Red, "0h");
     }
 
+    // A day off stays outstanding until the OFF marker reaches the workbook.
     private static (Color, string) TscStatus(DayCoverage c, bool future)
     {
+        if (c.IsOff)
+        {
+            return string.Equals(c.TscTicket?.Trim(), TscCells.OffMarker, StringComparison.OrdinalIgnoreCase)
+                ? (Green, TscCells.OffMarker)
+                : (Amber, "off - not marked");
+        }
         if (future) return (Gray, "pending");
         if (string.IsNullOrWhiteSpace(c.TscTicket)) return (Red, "none");
         return (Green, c.TscTicket!);

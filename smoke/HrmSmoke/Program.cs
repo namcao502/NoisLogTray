@@ -1,12 +1,17 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using ModelContextProtocol.Client;
 
 // HRM MCP smoke test: prove the C# SDK can connect to api-hrm.nois.vn/mcp over
 // Streamable HTTP with Authorization: Bearer HRM_API_KEY and enumerate tools.
-// Reads the key from the HRM_API_KEY environment variable, else the legacy project .env.
+// Key lookup mirrors AppConfig: env var, then the per-user settings.json Config map
+// (DPAPI-encrypted), then the legacy project .env.
 
 const string HrmMcpUrl = "https://api-hrm.nois.vn/mcp";
 const string EnvPath = @"C:\Project\NoisLogTray\.env";
+var settingsPath = Path.Combine(
+    Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "NoisLogTray", "settings.json");
 
 static string? ReadEnvValue(string path, string key)
 {
@@ -26,10 +31,38 @@ static string? ReadEnvValue(string path, string key)
     return null;
 }
 
-var apiKey = Environment.GetEnvironmentVariable("HRM_API_KEY") ?? ReadEnvValue(EnvPath, "HRM_API_KEY");
+static string? ReadSettingsValue(string path, string key)
+{
+    if (!File.Exists(path)) return null;
+    try
+    {
+        using var doc = JsonDocument.Parse(File.ReadAllText(path));
+        // AppSettings serializes camelCase, so the map is "config", not "Config".
+        var config = doc.RootElement.EnumerateObject()
+            .FirstOrDefault(p => string.Equals(p.Name, "config", StringComparison.OrdinalIgnoreCase));
+        if (config.Value.ValueKind != JsonValueKind.Object) return null;
+        if (!config.Value.TryGetProperty(key, out var node) || node.ValueKind != JsonValueKind.String) return null;
+        var stored = node.GetString() ?? "";
+        if (!stored.StartsWith("enc:", StringComparison.Ordinal)) return stored;
+        // DPAPI is Windows-only; this smoke exe only ever runs on Windows.
+#pragma warning disable CA1416
+        var bytes = ProtectedData.Unprotect(
+            Convert.FromBase64String(stored[4..]), null, DataProtectionScope.CurrentUser);
+#pragma warning restore CA1416
+        return Encoding.UTF8.GetString(bytes);
+    }
+    catch
+    {
+        return null;
+    }
+}
+
+var apiKey = Environment.GetEnvironmentVariable("HRM_API_KEY")
+    ?? ReadSettingsValue(settingsPath, "HRM_API_KEY")
+    ?? ReadEnvValue(EnvPath, "HRM_API_KEY");
 if (string.IsNullOrWhiteSpace(apiKey))
 {
-    Console.WriteLine($"FAIL: HRM_API_KEY not found in {EnvPath}");
+    Console.WriteLine($"FAIL: HRM_API_KEY not found in {settingsPath} or {EnvPath}");
     return 1;
 }
 Console.WriteLine($"Loaded HRM_API_KEY (len={apiKey.Length}, prefix={apiKey[..Math.Min(4, apiKey.Length)]}...)");
@@ -63,7 +96,7 @@ try
         return 2;
     }
 
-    foreach (var name in new[] { "log_timesheet", "get_my_day_logs", "get_my_timesheet_tasks" })
+    foreach (var name in new[] { "log_timesheet", "get_my_day_logs", "get_my_timesheet_tasks", "find_my_requests" })
     {
         var t = tools.FirstOrDefault(x => x.Name == name);
         if (t is null) { Console.WriteLine($"\n[{name}] NOT FOUND"); continue; }

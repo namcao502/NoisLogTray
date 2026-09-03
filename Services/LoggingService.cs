@@ -113,6 +113,25 @@ internal sealed class LoggingService
         Action<string>? onLog = null, Action<int, int>? onProgress = null, CancellationToken ct = default)
         => HrmMcpClient.LogTicketsAsync(tickets, date, _config.HrmApiKey, _config.HrmProjectId, minutes, onLog, onProgress, ct);
 
+    internal Task<IReadOnlyList<DateOnly>> GetOffDatesAsync(
+        DateOnly from, DateOnly to, Action<string>? onLog = null, CancellationToken ct = default)
+        => HrmMcpClient.GetOffDatesAsync(from, to, _config.HrmApiKey, onLog, ct);
+
+    // TSC only - an off day has no hours to log. overwrite is false for the automatic
+    // sync and true for the explicit Log OFF button.
+    internal async Task<OffWriteResult> LogOffAsync(
+        IReadOnlyList<DateOnly> dates, bool overwrite, Action<string>? onLog = null,
+        Action<int, int>? onProgress = null, CancellationToken ct = default)
+    {
+        var token = await AcquireGraphTokenAsync(onLog);
+        if (string.IsNullOrEmpty(token))
+        {
+            return new OffWriteResult(Array.Empty<DateOnly>(), Array.Empty<DateOnly>(),
+                "No Graph token (session may be logged out; run Check TSC / Re-authenticate).");
+        }
+        return await GraphTscClient.WriteOffAsync(dates, token, _config.Graph, overwrite, onLog, onProgress, ct);
+    }
+
     // Log one date's tickets to both destinations in parallel (HRM uses no
     // browser, so it cannot contend with the TSC sniff).
     internal async Task<EntryLogResult> LogEntryAsync(
@@ -147,15 +166,20 @@ internal sealed class LoggingService
             ? Task.FromResult((IReadOnlyDictionary<DateOnly, string?>)new Dictionary<DateOnly, string?>())
             : GraphTscClient.ReadTicketsAsync(readable, token, _config.Graph, onLog, ct);
         var hrmTask = HrmMcpClient.GetDayHoursAsync(readable, _config.HrmApiKey, onLog, ct);
+        // Full week, not just readable: a planned day off should read "off", not "pending".
+        var offTask = dates.Count == 0
+            ? Task.FromResult((IReadOnlyList<DateOnly>)Array.Empty<DateOnly>())
+            : GetOffDatesAsync(dates[0], dates[^1], onLog, ct);
 
-        await Task.WhenAll(tscTask, hrmTask);
+        await Task.WhenAll(tscTask, hrmTask, offTask);
+        var offDates = offTask.Result.ToHashSet();
 
         var result = new List<DayCoverage>();
         foreach (var d in dates)
         {
             tscTask.Result.TryGetValue(d, out var ticket);
             hrmTask.Result.TryGetValue(d, out var hours);
-            result.Add(new DayCoverage(d, hours, ticket));
+            result.Add(new DayCoverage(d, hours, ticket, offDates.Contains(d)));
         }
         return result;
     }

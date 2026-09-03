@@ -134,6 +134,9 @@ internal static class GraphTscClient
                         }
                         if (cur.Length != 0) Emit($"[graph-tsc] {cell} had \"{cur}\", overwriting");
                         await WriteCellAsync(token, reference, worksheet, cell, ticket, sessionId, ct);
+                        // Real work replacing an OFF marker must lose the yellow with it.
+                        if (cur == TscCells.OffMarker)
+                            await ClearFillAsync(token, reference, worksheet, cell, sessionId, ct);
                         Emit($"[graph-tsc] Wrote \"{ticket}\" to {cell}");
                         writtenCells.Add(cell);
                         doneCells++;
@@ -153,6 +156,99 @@ internal static class GraphTscClient
         {
             Emit($"[graph-tsc] Error: {e.Message}");
             return (false, "", e.Message);
+        }
+    }
+
+    // Mark each date OFF. Without overwrite a cell holding real work is left alone and
+    // reported as skipped, so the automatic sync can never destroy a ticket.
+    internal static async Task<OffWriteResult> WriteOffAsync(
+        IReadOnlyList<DateOnly> dates,
+        string token,
+        GraphTscOptions options,
+        bool overwrite,
+        Action<string>? onLog = null,
+        Action<int, int>? onProgress = null,
+        CancellationToken ct = default)
+    {
+        void Emit(string line) => onLog?.Invoke(line);
+        var marked = new List<DateOnly>();
+        var skipped = new List<DateOnly>();
+
+        if (string.IsNullOrWhiteSpace(token))
+            return new OffWriteResult(marked, skipped, "No Graph token (sniff failed and MS_GRAPH_TOKEN not set).");
+        if (dates.Count == 0) return new OffWriteResult(marked, skipped, null);
+
+        var columns = options.Columns != null && options.Columns.Count != 0
+            ? options.Columns
+            : TscCells.TargetColumns;
+        var totalCells = dates.Count * columns.Count;
+        var doneCells = 0;
+
+        try
+        {
+            var reference = await ResolveDriveItemAsync(token, options, Emit, ct);
+            var sessionId = await CreateSessionAsync(token, reference, ct);
+            Emit("[graph-off] Opened persistent workbook session (persistChanges)");
+
+            try
+            {
+                foreach (var date in dates)
+                {
+                    var worksheet = string.IsNullOrEmpty(options.Worksheet) ? TscCells.GetWorksheetForDate(date) : options.Worksheet;
+                    var row = TscCells.GetRowForDate(date);
+                    var expected = TscCells.GetExpectedDateLabel(date);
+
+                    // Date safety (fail-closed): same column B guard as WriteTicketAsync.
+                    var bVal = await ReadCellAsync(token, reference, worksheet, $"B{row}", sessionId, ct);
+                    if (!TscCells.DateLabelsMatch(bVal, expected))
+                    {
+                        var why = bVal.Length == 0
+                            ? $"Date check could not read B{row} (empty)."
+                            : $"Date safety check failed: B{row} shows \"{bVal}\", expected \"{expected}\".";
+                        return new OffWriteResult(marked, skipped, $"{why} Aborting to avoid wrong-day logging.");
+                    }
+
+                    var allCellsOff = true;
+                    foreach (var cell in TscCells.GetCellsForDate(date, columns))
+                    {
+                        var cur = await ReadCellAsync(token, reference, worksheet, cell, sessionId, ct);
+                        if (cur.Length != 0 && cur != TscCells.OffMarker && !overwrite)
+                        {
+                            Emit($"[graph-off] {cell} holds \"{cur}\"; leaving it (not overwriting real work)");
+                            allCellsOff = false;
+                            doneCells++;
+                            onProgress?.Invoke(doneCells, totalCells);
+                            continue;
+                        }
+
+                        if (cur != TscCells.OffMarker)
+                        {
+                            if (cur.Length != 0) Emit($"[graph-off] {cell} had \"{cur}\", overwriting");
+                            await WriteCellAsync(token, reference, worksheet, cell, TscCells.OffMarker, sessionId, ct);
+                        }
+                        // Outside the write guard on purpose: a hand-typed OFF gets coloured too.
+                        await SetFillAsync(token, reference, worksheet, cell, TscCells.OffFillColor, sessionId, ct);
+                        Emit($"[graph-off] {cell} = \"{TscCells.OffMarker}\" on {TscCells.OffFillColor}");
+                        doneCells++;
+                        onProgress?.Invoke(doneCells, totalCells);
+                    }
+
+                    if (allCellsOff) marked.Add(date);
+                    else skipped.Add(date);
+                }
+
+                return new OffWriteResult(marked, skipped, null);
+            }
+            finally
+            {
+                await CloseSessionAsync(token, reference, sessionId);
+                Emit("[graph-off] Closed workbook session");
+            }
+        }
+        catch (Exception e)
+        {
+            Emit($"[graph-off] Error: {e.Message}");
+            return new OffWriteResult(marked, skipped, e.Message);
         }
     }
 
@@ -327,6 +423,40 @@ internal static class GraphTscClient
             if (!res.IsSuccessStatusCode) throw await GraphErrorAsync(res, $"write {address}");
             return true;
         }, ct: ct);
+    }
+
+    private static async Task SetFillAsync(string token, DriveItemRef reference, string worksheet, string address, string color, string sessionId, CancellationToken ct)
+    {
+        var body = JsonSerializer.Serialize(new { color });
+        // PATCHing the same color to the same cell is idempotent; retry transient faults.
+        await Retry.OnTransientAsync(async c =>
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Patch, $"{RangeUrl(reference, worksheet, address)}/format/fill")
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            };
+            AddAuth(req, token);
+            req.Headers.Add("workbook-session-id", sessionId);
+            using var res = await Http.SendAsync(req, c);
+            if (!res.IsSuccessStatusCode) throw await GraphErrorAsync(res, $"fill {address}");
+            return true;
+        }, ct: ct);
+    }
+
+    private static async Task ClearFillAsync(string token, DriveItemRef reference, string worksheet, string address, string sessionId, CancellationToken ct)
+    {
+        // Best-effort: a leftover fill is cosmetic, so it must not fail the write itself.
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"{RangeUrl(reference, worksheet, address)}/format/fill/clear");
+            AddAuth(req, token);
+            req.Headers.Add("workbook-session-id", sessionId);
+            using var _ = await Http.SendAsync(req, ct);
+        }
+        catch
+        {
+            // ignore
+        }
     }
 
     private static string? FirstCell(JsonElement root, string prop)

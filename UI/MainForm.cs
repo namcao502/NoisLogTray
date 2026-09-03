@@ -87,6 +87,7 @@ internal sealed class MainForm : Form
     private readonly MacButton _logNowBtn = MacButton.Secondary("Log now (TSC + HRM)");
     private readonly MacButton _logTscBtn = MacButton.Secondary("Log TSC");
     private readonly MacButton _logHrmBtn = MacButton.Secondary("Log HRM");
+    private readonly MacButton _logOffBtn = MacButton.Secondary("Log OFF");
     private readonly MacButton _checkBtn = MacButton.Secondary("Check TSC");
     private readonly MacButton _reauthBtn = MacButton.Secondary("Re-auth");
     private readonly MacButton _refreshBtn = MacButton.Secondary("Refresh");
@@ -361,12 +362,11 @@ internal sealed class MainForm : Form
         var card = new Card { Size = new Size(CardW, 132) };
         card.Controls.Add(SectionLabel("ACTIONS", 16, 14));
 
-        // Two rows on a shared column grid (12px gutter). The 2-up top row and the
-        // 4-up bottom row line up: each top button spans exactly two bottom columns,
-        // so the left/center/right edges match across both rows.
+        // 2-up primary row over a 5-up secondary row, 12px gutter. The rows deliberately
+        // no longer share column edges - 5 does not divide into 2.
         const int gap = 12;
         const int half = (InnerW - gap) / 2;      // 258: top-row button width
-        const int quarter = (InnerW - 3 * gap) / 4; // 123: bottom-row button width
+        const int fifth = (InnerW - 4 * gap) / 5; // 96: bottom-row button width
         var col2 = 16 + half + gap;               // 286: start of the right column
 
         _queueBtn.Size = new Size(half, 40);
@@ -377,28 +377,24 @@ internal sealed class MainForm : Form
         _logNowBtn.Location = new Point(col2, 36);
         _logNowBtn.Click += OnLogNow;
 
-        _logTscBtn.Size = new Size(quarter, 32);
-        _logTscBtn.Location = new Point(16, 84);
+        var bottomRow = new[] { _logTscBtn, _logHrmBtn, _logOffBtn, _checkBtn, _reauthBtn };
+        for (var i = 0; i < bottomRow.Length; i++)
+        {
+            bottomRow[i].Size = new Size(fifth, 32);
+            bottomRow[i].Location = new Point(16 + i * (fifth + gap), 84);
+        }
         _logTscBtn.Click += OnLogTsc;
-
-        _logHrmBtn.Size = new Size(quarter, 32);
-        _logHrmBtn.Location = new Point(16 + quarter + gap, 84);
         _logHrmBtn.Click += OnLogHrm;
-
-        _checkBtn.Size = new Size(quarter, 32);
-        _checkBtn.Location = new Point(col2, 84);
+        _logOffBtn.Click += OnLogOff;
         _checkBtn.Click += OnCheckTsc;
-
-        _reauthBtn.Size = new Size(quarter, 32);
-        _reauthBtn.Location = new Point(col2 + quarter + gap, 84);
         _reauthBtn.Click += OnReauth;
+
+        _tips.SetToolTip(_logOffBtn,
+            $"Write \"{TscCells.OffMarker}\" on a yellow background to TSC for the selected date (no HRM hours).");
 
         card.Controls.Add(_queueBtn);
         card.Controls.Add(_logNowBtn);
-        card.Controls.Add(_logTscBtn);
-        card.Controls.Add(_logHrmBtn);
-        card.Controls.Add(_checkBtn);
-        card.Controls.Add(_reauthBtn);
+        foreach (var button in bottomRow) card.Controls.Add(button);
         return card;
     }
 
@@ -1151,6 +1147,51 @@ internal sealed class MainForm : Form
         finally { SetBusy(false); HideProgress(); }
     }
 
+    // The only path that overwrites, hence the confirm: one click, no other input, on a
+    // workbook everyone reads.
+    private async void OnLogOff(object? sender, EventArgs e)
+    {
+        if (_service is null) { AppendLog("[error] Config not loaded; cannot log."); return; }
+
+        var date = DateOnly.FromDateTime(_date.Value.Date);
+        var answer = MessageBox.Show(this,
+            $"Write \"{TscCells.OffMarker}\" to TSC for {date:dddd, MMMM d, yyyy}?\n\n"
+                + "Anything already in that day's cells will be replaced, and any queued tickets for it dropped.",
+            "Mark the day off", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (answer != DialogResult.Yes) return;
+
+        SetBusy(true);
+        ShowProgress(true, false);
+        try
+        {
+            var result = await _service.LogOffAsync(new[] { date }, overwrite: true, AppendLog, ReportTsc);
+            if (result.Success && result.Marked.Count != 0)
+            {
+                // Drop the day's queued tickets so the scheduled drain cannot overwrite OFF.
+                var queued = TicketQueue.Read().Where(q => q.Date == date.ToString("yyyy-MM-dd")).ToList();
+                if (queued.Count != 0)
+                {
+                    TicketQueue.RemoveLogged(queued);
+                    AppendLog($"[off] Removed {queued.Count} queued entr{(queued.Count == 1 ? "y" : "ies")} for {date:yyyy-MM-dd}.");
+                }
+                OffDayStore.Add(result.Marked);
+                RefreshQueuedView();
+            }
+
+            AppendLog($"[off] {(result.Success ? "OK" : result.Error)}");
+            ShowStatus(result.Success
+                ? $"TSC marked {TscCells.OffMarker} for {date:yyyy-MM-dd}."
+                : $"Log OFF failed: {result.Error}",
+                result.Success);
+        }
+        catch (Exception ex)
+        {
+            AppendLog($"[off] Error: {ex.Message}");
+            ShowStatus($"Log OFF failed: {ex.Message}", false);
+        }
+        finally { SetBusy(false); HideProgress(); }
+    }
+
     private async void OnCheckTsc(object? sender, EventArgs e)
     {
         SetBusy(true);
@@ -1220,6 +1261,7 @@ internal sealed class MainForm : Form
         _logNowBtn.Enabled = !_busy && hasTickets && hoursOk;
         _logTscBtn.Enabled = !_busy && hasTickets;
         _logHrmBtn.Enabled = !_busy && hasTickets && hoursOk;
+        _logOffBtn.Enabled = !_busy; // no ticket needed, and a future leave day is fair game
         _checkBtn.Enabled = !_busy;
         _reauthBtn.Enabled = !_busy;
         _logAllBtn.Enabled = !_busy; // batch drain must not fight an in-flight browser/log op

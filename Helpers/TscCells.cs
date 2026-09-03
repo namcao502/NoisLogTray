@@ -11,6 +11,10 @@ internal static class TscCells
     // The same ticket value is written to every column here (M primary, J mirror).
     internal static readonly string[] TargetColumns = { "M", "J" };
 
+    // What an approved full-day leave writes into the target cells, and its fill.
+    internal const string OffMarker = "OFF";
+    internal const string OffFillColor = "#FFFF00";
+
     internal const string ExcelUrl =
         "https://tscmiami0-my.sharepoint.com/:x:/r/personal/dave_markert_tscmiami_com/_layouts/15/doc2.aspx?sourcedoc=%7B1AE62FA5-2E6F-47E6-B6B6-BFF724E1A08C%7D&file=TSC%20Development%20WIP.xlsx&action=default&mobileredirect=true";
 

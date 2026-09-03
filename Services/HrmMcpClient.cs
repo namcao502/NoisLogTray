@@ -11,6 +11,10 @@ internal static class HrmMcpClient
     private const string HrmMcpUrl = "https://api-hrm.nois.vn/mcp";
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
 
+    // 50 is the schema's max; the page cap bounds a bogus totalPages from the server.
+    private const int LeavePageSize = 50;
+    private const int MaxLeavePages = 5;
+
     // Verify the API key by opening an MCP session and listing tools. Success =
     // valid; an auth-looking failure (401/403) = rejected; any other failure =
     // unreachable. Best-effort: if the server does not enforce auth on connect it
@@ -205,5 +209,67 @@ internal static class HrmMcpClient
             Emit($"[hrm-check] connect failed: {e.Message}");
         }
         return result;
+    }
+
+    // Approved full-day leave in [from, to], expanded to individual dates. Empty on any
+    // failure - notably the FORBIDDEN a timesheet-scoped key gets, which must degrade to
+    // "no off days" rather than break off-day detection for that user.
+    internal static async Task<IReadOnlyList<DateOnly>> GetOffDatesAsync(
+        DateOnly from,
+        DateOnly to,
+        string apiKey,
+        Action<string>? onLog = null,
+        CancellationToken ct = default)
+    {
+        void Emit(string line) => onLog?.Invoke(line);
+
+        if (string.IsNullOrWhiteSpace(apiKey) || to < from) return Array.Empty<DateOnly>();
+
+        try
+        {
+            var transport = new HttpClientTransport(new HttpClientTransportOptions
+            {
+                Endpoint = new Uri(HrmMcpUrl),
+                TransportMode = HttpTransportMode.StreamableHttp,
+                ConnectionTimeout = TimeSpan.FromSeconds(30),
+                AdditionalHeaders = new Dictionary<string, string> { ["Authorization"] = $"Bearer {apiKey}" },
+            });
+
+            // Connecting opens a session (no side effects); retry transient transport faults.
+            await using var client = await Retry.OnTransientAsync(
+                c => McpClient.CreateAsync(transport, cancellationToken: c), onLog, ct: ct);
+
+            var dates = new SortedSet<DateOnly>();
+            for (var page = 1; page <= MaxLeavePages; page++)
+            {
+                using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                cts.CancelAfter(RequestTimeout);
+                // Every key is required by the schema, like log_timesheet.
+                var res = await client.CallToolAsync("find_my_requests",
+                    new Dictionary<string, object?>
+                    {
+                        ["kind"] = "leave",
+                        ["status"] = "Approved",
+                        ["fromDate"] = from.ToDateTime(TimeOnly.MinValue).ToString("yyyy-MM-ddTHH:mm:ss"),
+                        ["toDate"] = to.ToDateTime(new TimeOnly(23, 59, 59)).ToString("yyyy-MM-ddTHH:mm:ss"),
+                        ["page"] = page,
+                        ["pageSize"] = LeavePageSize,
+                    },
+                    cancellationToken: cts.Token);
+
+                var text = res.Content.OfType<TextContentBlock>().FirstOrDefault()?.Text;
+                foreach (var date in Leave.ParseOffDates(res.IsError is true, text)) dates.Add(date);
+                if (page >= Leave.ParseTotalPages(text)) break;
+            }
+
+            Emit($"[hrm-off] {from:yyyy-MM-dd}..{to:yyyy-MM-dd}: "
+                + (dates.Count == 0 ? "no approved full-day leave" : string.Join(", ", dates)));
+            return dates.ToList();
+        }
+        catch (Exception e)
+        {
+            Emit($"[hrm-off] lookup failed: {e.Message}");
+            return Array.Empty<DateOnly>();
+        }
     }
 }
