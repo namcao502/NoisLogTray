@@ -6,8 +6,8 @@ using Microsoft.Playwright;
 
 // Sniff smoke test: prove Playwright for .NET can launch the system Chrome
 // (channel=chrome) against the existing ~/.tsc-daily-log-browser profile and
-// sniff a Microsoft Graph Bearer token off office.com. Mirrors the mechanism in
-// lib/browser-tsc.ts sniffGraphToken. No writes; read-only verification.
+// sniff a broad (.All) Microsoft Graph Bearer token off the M365 shell. Mirrors
+// the URL list and wait budget in TscTokenSniffer. No writes; read-only.
 
 const string GraphHost = "https://graph.microsoft.com/";
 var profileDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".tsc-daily-log-browser");
@@ -61,6 +61,7 @@ try
     var page = context.Pages.Count > 0 ? context.Pages[0] : await context.NewPageAsync();
     var urls = new[]
     {
+        "https://m365.cloud.microsoft/login?ru=%2F",
         "https://www.office.com/",
         "https://tscmiami0-my.sharepoint.com/_layouts/15/onedrive.aspx?view=7",
     };
@@ -71,7 +72,7 @@ try
         try { await page.GotoAsync(url, new PageGotoOptions { WaitUntil = WaitUntilState.DOMContentLoaded, Timeout = 60000 }); }
         catch (Exception e) { Console.WriteLine($"  goto failed: {e.Message}"); continue; }
 
-        var deadline = DateTime.UtcNow.AddSeconds(12);
+        var deadline = DateTime.UtcNow.AddSeconds(30);
         while (DateTime.UtcNow < deadline && !seen.Values.Any(HasAll))
             await page.WaitForTimeoutAsync(500);
         if (seen.Values.Any(HasAll)) break;

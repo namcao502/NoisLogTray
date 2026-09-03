@@ -21,6 +21,10 @@ internal static class TscTokenSniffer
     // config/app.json reauthPollMs (270000): how long re-auth waits for the login.
     private const int ReauthPollTimeoutMs = 270_000;
 
+    // Per-URL wait for a broad (.All) token. The M365 sign-in path redirects then does an
+    // MSAL acquire before its first Graph call, which does not fit the old 12s.
+    private const int SniffWaitSeconds = 30;
+
     private static bool IsTscLoggedIn(string url) =>
         url.Contains("sharepoint.com") && !url.Contains("login") && !url.Contains("microsoftonline");
 
@@ -117,10 +121,12 @@ internal static class TscTokenSniffer
                 seen.TryAdd(token, GraphTscClient.DecodeJwtScopes(token));
             };
 
-            // office.com mints the broad (.All) token first; the OneDrive surfaces
-            // only yield own-file scope, so they are fallback.
+            // The M365 shell mints the broad (.All) token; OneDrive only yields own-file
+            // scope, so it is fallback. /login is deliberate: the m365.cloud.microsoft root
+            // is an anonymous marketing page that never auto-SSOs, so it mints nothing.
             var urls = new[]
             {
+                "https://m365.cloud.microsoft/login?ru=%2F",
                 "https://www.office.com/",
                 "https://tscmiami0-my.sharepoint.com/_layouts/15/onedrive.aspx?view=7",
                 "https://tscmiami0-my.sharepoint.com/_layouts/15/onedrive.aspx",
@@ -138,7 +144,7 @@ internal static class TscTokenSniffer
                     Emit($"[graph-sniff] goto failed: {e.Message}");
                     continue;
                 }
-                var deadline = DateTime.UtcNow.AddSeconds(12);
+                var deadline = DateTime.UtcNow.AddSeconds(SniffWaitSeconds);
                 while (DateTime.UtcNow < deadline && !seen.Values.Any(HasAll))
                     await page.WaitForTimeoutAsync(500);
                 if (seen.Values.Any(HasAll)) break;
