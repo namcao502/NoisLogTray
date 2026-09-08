@@ -159,24 +159,22 @@ internal static class GraphTscClient
         }
     }
 
-    // Mark each date OFF. Without overwrite a cell holding real work is left alone and
-    // reported as skipped, so the automatic sync can never destroy a ticket.
+    // Mark each date OFF. Called only from the confirmed "Log OFF" button, so it always
+    // overwrites whatever the cell held.
     internal static async Task<OffWriteResult> WriteOffAsync(
         IReadOnlyList<DateOnly> dates,
         string token,
         GraphTscOptions options,
-        bool overwrite,
         Action<string>? onLog = null,
         Action<int, int>? onProgress = null,
         CancellationToken ct = default)
     {
         void Emit(string line) => onLog?.Invoke(line);
         var marked = new List<DateOnly>();
-        var skipped = new List<DateOnly>();
 
         if (string.IsNullOrWhiteSpace(token))
-            return new OffWriteResult(marked, skipped, "No Graph token (sniff failed and MS_GRAPH_TOKEN not set).");
-        if (dates.Count == 0) return new OffWriteResult(marked, skipped, null);
+            return new OffWriteResult(marked, "No Graph token (sniff failed and MS_GRAPH_TOKEN not set).");
+        if (dates.Count == 0) return new OffWriteResult(marked, null);
 
         var columns = options.Columns != null && options.Columns.Count != 0
             ? options.Columns
@@ -205,22 +203,12 @@ internal static class GraphTscClient
                         var why = bVal.Length == 0
                             ? $"Date check could not read B{row} (empty)."
                             : $"Date safety check failed: B{row} shows \"{bVal}\", expected \"{expected}\".";
-                        return new OffWriteResult(marked, skipped, $"{why} Aborting to avoid wrong-day logging.");
+                        return new OffWriteResult(marked, $"{why} Aborting to avoid wrong-day logging.");
                     }
 
-                    var allCellsOff = true;
                     foreach (var cell in TscCells.GetCellsForDate(date, columns))
                     {
                         var cur = await ReadCellAsync(token, reference, worksheet, cell, sessionId, ct);
-                        if (cur.Length != 0 && cur != TscCells.OffMarker && !overwrite)
-                        {
-                            Emit($"[graph-off] {cell} holds \"{cur}\"; leaving it (not overwriting real work)");
-                            allCellsOff = false;
-                            doneCells++;
-                            onProgress?.Invoke(doneCells, totalCells);
-                            continue;
-                        }
-
                         if (cur != TscCells.OffMarker)
                         {
                             if (cur.Length != 0) Emit($"[graph-off] {cell} had \"{cur}\", overwriting");
@@ -233,11 +221,10 @@ internal static class GraphTscClient
                         onProgress?.Invoke(doneCells, totalCells);
                     }
 
-                    if (allCellsOff) marked.Add(date);
-                    else skipped.Add(date);
+                    marked.Add(date);
                 }
 
-                return new OffWriteResult(marked, skipped, null);
+                return new OffWriteResult(marked, null);
             }
             finally
             {
@@ -248,7 +235,7 @@ internal static class GraphTscClient
         catch (Exception e)
         {
             Emit($"[graph-off] Error: {e.Message}");
-            return new OffWriteResult(marked, skipped, e.Message);
+            return new OffWriteResult(marked, e.Message);
         }
     }
 

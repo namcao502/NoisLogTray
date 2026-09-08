@@ -1164,7 +1164,7 @@ internal sealed class MainForm : Form
         ShowProgress(true, false);
         try
         {
-            var result = await _service.LogOffAsync(new[] { date }, overwrite: true, AppendLog, ReportTsc);
+            var result = await _service.LogOffAsync(new[] { date }, AppendLog, ReportTsc);
             if (result.Success && result.Marked.Count != 0)
             {
                 // Drop the day's queued tickets so the scheduled drain cannot overwrite OFF.
@@ -1174,7 +1174,6 @@ internal sealed class MainForm : Form
                     TicketQueue.RemoveLogged(queued);
                     AppendLog($"[off] Removed {queued.Count} queued entr{(queued.Count == 1 ? "y" : "ies")} for {date:yyyy-MM-dd}.");
                 }
-                OffDayStore.Add(result.Marked);
                 RefreshQueuedView();
             }
 

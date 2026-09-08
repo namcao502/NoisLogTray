@@ -15,9 +15,6 @@ internal sealed class AppSettings
     public int? WindowY { get; set; }
     public Dictionary<string, string> Config { get; set; } = new();
 
-    // yyyy-MM-dd dates already marked OFF in TSC; written through OffDayStore.
-    public List<string> MarkedOffDates { get; set; } = new();
-
     private static readonly JsonSerializerOptions Options = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -42,7 +39,6 @@ internal sealed class AppSettings
             if (parsed != null)
             {
                 parsed.Config ??= new();
-                parsed.MarkedOffDates ??= new();
                 return parsed;
             }
         }

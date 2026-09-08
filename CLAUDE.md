@@ -90,11 +90,10 @@ Folders follow the backend's WindowsApps convention (`Backend-DotNet/src/Windows
 and all share the flat `NoisLogTray` namespace (folder does not equal namespace):
 - `Services/` - service + external-client classes: `LoggingService`, `SixPmScheduler`,
   `StartupService`, `GraphTscClient`, `HrmMcpClient`, `JiraClient`, `TscTokenSniffer`,
-  `TicketQueue`, `UpdateService` (startup GitHub-Releases update check),
-  `OffDaySync` (marks approved leave `OFF` in TSC; see "Days off" below).
+  `TicketQueue`, `UpdateService` (startup GitHub-Releases update check).
 - `Helpers/` - utilities: `TicketParser`, `TimeSlots`, `TscCells`, `Timesheet`, `Leave`,
   `Hcm`, `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppSettings`,
-  `AppIcon`, `OffDayStore`,
+  `AppIcon`,
   `Retry` (transient-transport-failure retry with backoff, used by the Jira/Graph/HRM clients).
 - `Models/` - record types (+ the `CredentialCheck` enum): `QueueEntry`,
   `JiraSuggestion`/`JiraVerifyResult`, `DrainResult`/`EntryLogResult`/`OffWriteResult`,
@@ -231,8 +230,8 @@ Bottom-layer clients:
 
 Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timezone),
 `BrowserLock`, `AppLogger`, `StartupService` (Run-key logon registration),
-`SixPmScheduler`, `OffDaySync` (leave watcher). Pure/tested helpers: `TscCells`,
-`TimeSlots`, `Timesheet`, `Leave`, `TicketParser`, `TicketQueue`, `OffDayStore`.
+`SixPmScheduler`. Pure/tested helpers: `TscCells`,
+`TimeSlots`, `Timesheet`, `Leave`, `TicketParser`, `TicketQueue`.
 
 ## Cross-cutting rules to preserve
 
@@ -264,31 +263,24 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   successful TSC re-auth, so entries kept by a logged-out drain retry automatically.
   Note: the date picker is in local time; for a user outside Vietnam a near-midnight
   pick can differ from the HCM day (a tooltip on the date field flags this).
-- **Days off are marked eagerly, not at `LOG_TIME`.** The `OFF` cell is a signal to
-  teammates, so its value is in arriving early - and leave is approved days ahead.
-  `OffDaySync` therefore polls `find_my_requests` on startup and **every 2 hours**,
-  looking ahead **today .. +60 days** (never backwards; a past day is only markable via
-  the button). Only `status: Approved` **and** `periodType: AllDay` count - a half-day
-  request is still half a working day and needs a real ticket. Detection is one
-  browser-free MCP call but the TSC write needs a Graph token (= a headless Chrome
-  sniff), so the two are split: `OffDayStore` (the `markedOffDates` list in
-  `settings.json`) records what is already written, and Graph is only touched when a
-  date is genuinely unmarked - do not remove that gate, or every app start relaunches
-  Chrome. The automatic path passes `overwrite:false` and **never** replaces a real
-  ticket; only the window's "Log OFF" button overwrites, behind a confirm, and it also
-  drops that date's queued entries so the drain cannot undo it. A skipped date never
-  reaches `OffDayStore` (it is not marked), so `OffDaySync` also holds a **session-scoped**
-  skipped set - without it such a date stays pending forever and every poll reopens a
-  Graph session just to skip it again. Session-scoped so a restart re-checks once and
-  clearing the cell self-heals.
-  `TrayApp.OnScheduledFireAsync` consults the same sync before the reminder: an approved
-  day off suppresses the popup. A **failed** lookup returns empty and the reminder still
-  opens - nagging is the safe direction when a day off cannot be told from a missed one.
-  There is **no holiday source**: the HRM MCP server exposes no public-holiday calendar
-  (verified across all 29 tools), and in practice this team files leave requests for
-  company holidays too. An HRM key without leave scope gets `FORBIDDEN`, which must
-  degrade to "no off days" plus one log line - the app ships to users whose key is
-  timesheet-only.
+- **Days off are marked manually, via the window's "Log OFF" button only.** There is no
+  background poll - leave isn't marked often enough to justify one, and periodic
+  headless Chrome sniffs to check were overkill. The button needs no ticket, takes any
+  date, confirms first (it's the only path that overwrites a cell holding real work),
+  writes the `OFF` marker, and drops that date's queued entries so the drain cannot
+  undo it.
+  `TrayApp.OnScheduledFireAsync` still makes one **read-only** HRM lookup
+  (`LoggingService.GetOffDatesAsync`, no Graph token, no Chrome) before the 18:00
+  reminder, so an approved day off doesn't nag - it just doesn't write anything. Only
+  `status: Approved` **and** `periodType: AllDay` count - a half-day request is still
+  half a working day and needs a real ticket. A **failed** lookup returns empty and the
+  reminder still opens - nagging is the safe direction when a day off cannot be told
+  from a missed one. The same read backs the weekly check's "off" display
+  (`LoggingService.CheckWeekAsync`). There is **no holiday source**: the HRM MCP server
+  exposes no public-holiday calendar (verified across all 29 tools), and in practice
+  this team files leave requests for company holidays too. An HRM key without leave
+  scope gets `FORBIDDEN`, which must degrade to "no off days" plus one log line - the
+  app ships to users whose key is timesheet-only.
 - **One browser at a time.** `LaunchPersistentContextAsync` locks the profile on
   disk, so every Playwright entry point goes through `BrowserLock.TryAcquire()` /
   `Release()` (reject-fast, not queued). HRM logging is browser-free and can run in
@@ -325,10 +317,9 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 ## Per-user data
 
 Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
-(the pending log queue), `settings.json` (theme, window position, `markedOffDates` -
-the dates already marked `OFF` in TSC, via `OffDayStore`, pruned of past dates on every
-write - **and** the `Config` key/value map of secrets/settings written by
-`CredentialsForm`, via `AppSettings`), and `logs/app.log`. A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
+(the pending log queue), `settings.json` (theme, window position, **and** the `Config`
+key/value map of secrets/settings written by `CredentialsForm`, via `AppSettings`), and
+`logs/app.log`. A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
 first load and removed. A missing or malformed `queue.json` yields an empty queue by
 design so the 18:00 runner never throws; `AppSettings` likewise falls back to defaults on
 a missing/bad `settings.json` (preserving the bad copy as `settings.json.bad`). `app.log`

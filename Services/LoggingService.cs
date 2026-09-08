@@ -117,19 +117,19 @@ internal sealed class LoggingService
         DateOnly from, DateOnly to, Action<string>? onLog = null, CancellationToken ct = default)
         => HrmMcpClient.GetOffDatesAsync(from, to, _config.HrmApiKey, onLog, ct);
 
-    // TSC only - an off day has no hours to log. overwrite is false for the automatic
-    // sync and true for the explicit Log OFF button.
+    // TSC only - an off day has no hours to log. Only the confirmed "Log OFF" button
+    // calls this, so it always overwrites whatever the cell held.
     internal async Task<OffWriteResult> LogOffAsync(
-        IReadOnlyList<DateOnly> dates, bool overwrite, Action<string>? onLog = null,
+        IReadOnlyList<DateOnly> dates, Action<string>? onLog = null,
         Action<int, int>? onProgress = null, CancellationToken ct = default)
     {
         var token = await AcquireGraphTokenAsync(onLog);
         if (string.IsNullOrEmpty(token))
         {
-            return new OffWriteResult(Array.Empty<DateOnly>(), Array.Empty<DateOnly>(),
+            return new OffWriteResult(Array.Empty<DateOnly>(),
                 "No Graph token (session may be logged out; run Check TSC / Re-authenticate).");
         }
-        return await GraphTscClient.WriteOffAsync(dates, token, _config.Graph, overwrite, onLog, onProgress, ct);
+        return await GraphTscClient.WriteOffAsync(dates, token, _config.Graph, onLog, onProgress, ct);
     }
 
     // Log one date's tickets to both destinations in parallel (HRM uses no

@@ -14,7 +14,6 @@ internal sealed class TrayApp : ApplicationContext
     private LoggingService? _service;
     private string? _configError;
     private readonly SixPmScheduler _scheduler;
-    private OffDaySync? _offDaySync;
     private readonly ToolStripMenuItem _startupItem;
     private readonly ToolStripMenuItem _updateItem;
     private readonly ToolStripSeparator _updateSeparator;
@@ -73,7 +72,6 @@ internal sealed class TrayApp : ApplicationContext
 
         _scheduler = new SixPmScheduler(config?.LogTime ?? AppConfig.DefaultLogTime, OnScheduledFireAsync, Log);
         _scheduler.Start();
-        StartOffDaySync();
         CatchUpIfDue();
         _ = CheckForUpdateAsync(); // fire-and-forget; silent on any failure
 
@@ -116,7 +114,6 @@ internal sealed class TrayApp : ApplicationContext
         _configError = error;
         _service = config != null ? new LoggingService(config) : null;
         _scheduler.SetFireTime(config?.LogTime ?? AppConfig.DefaultLogTime);
-        StartOffDaySync();
 
         if (_form != null && !_form.IsDisposed)
         {
@@ -125,17 +122,6 @@ internal sealed class TrayApp : ApplicationContext
         }
         if (_service != null) ShowForm();
         UpdateTooltip();
-    }
-
-    // Binds a LoggingService, so it must be rebuilt whenever credentials change.
-    private void StartOffDaySync()
-    {
-        _offDaySync?.Dispose();
-        _offDaySync = null;
-        if (_service == null) return;
-
-        _offDaySync = new OffDaySync(_service, Log, message => Notify(message, ToolTipIcon.Info));
-        _offDaySync.Start();
     }
 
     // If the app was not running at 18:00 (asleep, off, or launched later), a queue
@@ -248,12 +234,12 @@ internal sealed class TrayApp : ApplicationContext
             return;
         }
 
-        // A failed lookup returns empty and the reminder still opens: nagging is the safe
+        // Read-only HRM lookup, no TSC write. GetOffDatesAsync never throws - a failed
+        // call returns empty and the reminder still opens, since nagging is the safe
         // direction when a day off cannot be told from a missed working day.
-        var offDates = _offDaySync != null
-            ? await _offDaySync.SyncAsync()
-            : (IReadOnlyList<DateOnly>)Array.Empty<DateOnly>();
-        if (offDates.Contains(Hcm.Today()))
+        var today = Hcm.Today();
+        var offDates = await _service.GetOffDatesAsync(today, today, Log);
+        if (offDates.Contains(today))
         {
             Log("[scheduler] Today is an approved day off; no reminder.");
             return;
@@ -391,7 +377,6 @@ internal sealed class TrayApp : ApplicationContext
     private void Quit()
     {
         _scheduler.Dispose();
-        _offDaySync?.Dispose();
         ExitThread();
     }
 
@@ -416,7 +401,6 @@ internal sealed class TrayApp : ApplicationContext
         if (disposing)
         {
             _scheduler.Dispose();
-            _offDaySync?.Dispose();
             _tray.Visible = false;
             _tray.Dispose();
             _form?.Dispose();
