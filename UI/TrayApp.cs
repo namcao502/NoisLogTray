@@ -66,7 +66,12 @@ internal sealed class TrayApp : ApplicationContext
             Text = "NOIS Daily Log",
             ContextMenuStrip = menu,
         };
-        _tray.DoubleClick += (_, _) => ShowForm();
+        // MouseClick (not the bare Click event) so a right-click to open the
+        // ContextMenuStrip doesn't also open the window -- only a left click does.
+        _tray.MouseClick += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Left) ShowForm();
+        };
 
         UpdateTooltip();
 

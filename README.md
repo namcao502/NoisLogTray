@@ -52,7 +52,7 @@ After saving, use the tray menu "Re-authenticate TSC" once to sign in to Microso
 
 ## Daily use
 
-Open the window from the tray (double-click or "Open"). It has:
+Open the window from the tray (click the icon or "Open"). It has:
 
 - **Log entries** - your open Jira tickets (click to add), plus date and ticket inputs.
 - **Will log** - a preview of what will be logged; with the input empty it shows the
