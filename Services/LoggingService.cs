@@ -40,11 +40,13 @@ internal sealed class LoggingService
     internal Task<JqlCheckResult> ValidateMyTicketsJqlAsync(string jql, CancellationToken ct = default)
         => _jira.ValidateJqlAsync(jql, ct);
 
+    internal TimeOnly LogTime => _config.LogTime;
+
     internal Task<JiraVerifyResult> VerifyAsync(string ticketId, CancellationToken ct = default)
         => _jira.VerifyTicketAsync(ticketId, ct);
 
-    internal Task<IReadOnlyList<JiraSuggestion>> GetMyTicketsAsync(int limit = 5, CancellationToken ct = default)
-        => _jira.GetMyTicketsAsync(limit, _myTicketsJql, ct);
+    internal Task<IReadOnlyList<JiraSuggestion>> GetMyTicketsAsync(CancellationToken ct = default)
+        => _jira.GetMyTicketsAsync(_myTicketsJql, ct);
 
     // Prefer MS_GRAPH_TOKEN override; otherwise return a cached sniffed token while
     // it is still valid, and only sniff a fresh one (launches headless Chrome once,
@@ -100,18 +102,18 @@ internal sealed class LoggingService
 
     internal async Task<(bool Success, string Cell, string? Error)> LogTscAsync(
         string ticketString, IReadOnlyList<DateOnly> dates, Action<string>? onLog = null,
-        Action<int, int>? onProgress = null, CancellationToken ct = default)
+        CancellationToken ct = default)
     {
         var token = await AcquireGraphTokenAsync(onLog);
         if (string.IsNullOrEmpty(token))
             return (false, "", "No Graph token (session may be logged out; run Check TSC / Re-authenticate).");
-        return await GraphTscClient.WriteTicketAsync(ticketString, dates, token, _config.Graph, onLog, onProgress, ct);
+        return await GraphTscClient.WriteTicketAsync(ticketString, dates, token, _config.Graph, onLog, ct);
     }
 
     internal Task<(bool Success, string? Error)> LogHrmAsync(
         IReadOnlyList<string> tickets, DateOnly date, IReadOnlyList<int>? minutes = null,
-        Action<string>? onLog = null, Action<int, int>? onProgress = null, CancellationToken ct = default)
-        => HrmMcpClient.LogTicketsAsync(tickets, date, _config.HrmApiKey, _config.HrmProjectId, minutes, onLog, onProgress, ct);
+        Action<string>? onLog = null, CancellationToken ct = default)
+        => HrmMcpClient.LogTicketsAsync(tickets, date, _config.HrmApiKey, _config.HrmProjectId, minutes, onLog, ct);
 
     internal Task<IReadOnlyList<DateOnly>> GetOffDatesAsync(
         DateOnly from, DateOnly to, Action<string>? onLog = null, CancellationToken ct = default)
@@ -120,8 +122,7 @@ internal sealed class LoggingService
     // TSC only - an off day has no hours to log. Only the confirmed "Log OFF" button
     // calls this, so it always overwrites whatever the cell held.
     internal async Task<OffWriteResult> LogOffAsync(
-        IReadOnlyList<DateOnly> dates, Action<string>? onLog = null,
-        Action<int, int>? onProgress = null, CancellationToken ct = default)
+        IReadOnlyList<DateOnly> dates, Action<string>? onLog = null, CancellationToken ct = default)
     {
         var token = await AcquireGraphTokenAsync(onLog);
         if (string.IsNullOrEmpty(token))
@@ -129,22 +130,21 @@ internal sealed class LoggingService
             return new OffWriteResult(Array.Empty<DateOnly>(),
                 "No Graph token (session may be logged out; run Check TSC / Re-authenticate).");
         }
-        return await GraphTscClient.WriteOffAsync(dates, token, _config.Graph, onLog, onProgress, ct);
+        return await GraphTscClient.WriteOffAsync(dates, token, _config.Graph, onLog, ct);
     }
 
     // Log one date's tickets to both destinations in parallel (HRM uses no
     // browser, so it cannot contend with the TSC sniff).
     internal async Task<EntryLogResult> LogEntryAsync(
         DateOnly date, IReadOnlyList<string> tickets, string? graphToken, IReadOnlyList<int>? minutes = null,
-        Action<string>? onLog = null, Action<int, int>? onTscProgress = null, Action<int, int>? onHrmProgress = null,
-        CancellationToken ct = default)
+        Action<string>? onLog = null, CancellationToken ct = default)
     {
         var ticketString = string.Join(", ", tickets);
 
         Task<(bool Success, string Cell, string? Error)> tscTask = string.IsNullOrEmpty(graphToken)
             ? Task.FromResult((false, "", (string?)"No Graph token (session may be logged out)."))
-            : GraphTscClient.WriteTicketAsync(ticketString, new[] { date }, graphToken, _config.Graph, onLog, onTscProgress, ct);
-        var hrmTask = HrmMcpClient.LogTicketsAsync(tickets, date, _config.HrmApiKey, _config.HrmProjectId, minutes, onLog, onHrmProgress, ct);
+            : GraphTscClient.WriteTicketAsync(ticketString, new[] { date }, graphToken, _config.Graph, onLog, ct);
+        var hrmTask = HrmMcpClient.LogTicketsAsync(tickets, date, _config.HrmApiKey, _config.HrmProjectId, minutes, onLog, ct);
 
         await Task.WhenAll(tscTask, hrmTask);
         return new EntryLogResult(tscTask.Result.Success, tscTask.Result.Error, hrmTask.Result.Success, hrmTask.Result.Error);

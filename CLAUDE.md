@@ -95,7 +95,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `Hcm`, `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppSettings`,
   `AppIcon`,
   `Retry` (transient-transport-failure retry with backoff, used by the Jira/Graph/HRM clients).
-- `Models/` - record types (+ the `CredentialCheck` enum): `QueueEntry`,
+- `Models/` - record types (+ the `CredentialCheck` and `NoticeKind` enums): `QueueEntry`,
   `JiraSuggestion`/`JiraVerifyResult`, `DrainResult`/`EntryLogResult`/`OffWriteResult`,
   `GraphTscOptions`, `TimeSlot`, `ToolEnvelope`, `CredentialCheck`, `UpdateInfo`.
 - `Interface/` - abstractions (`IJiraClient`, implemented by `JiraClient`).
@@ -112,16 +112,14 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   for HRM and is judged only on the TSC marker - green `OFF`, else amber "off - not
   marked" and clickable, including when it is still in the future so planned leave can
   be marked ahead), and
-  owner-drawn controls: `MacButton`
+  owner-drawn controls: `NotificationBell` + `NoticeToast` (see "Notices" under `MainForm`),
+  `ThemedMenuRenderer` (themed `ContextMenuStrip`s), `MacButton`
   (rounded button), `Card` (rounded card surface), `RoundedHost` (rounded border
   around native controls like the list/textbox), `RoundedDatePicker` (rounded date
   field with a custom `ModernCalendar` popup in a rounded `CalendarPopupForm`, replacing
   the native `DateTimePicker`/`MonthCalendar`), `WillLogRow` (one owner-drawn Will Log
   line), `ClickableRow` (a focusable/keyboard-activatable `Panel` for clickable list rows -
-  My-tickets suggestions and actionable weekly days), `MiniProgress` (thin rounded bar), and
-  `ActivityLogPanel` (the bottom activity
-  block - a self-theming control owning the scrolling console + TSC/HRM progress bars;
-  `MainForm` just delegates `AppendLog`/`ShowStatus`/`ShowProgress` to it).
+  My-tickets suggestions and actionable weekly days).
   Owner-drawn interactive controls (`MacButton`, `RoundedDatePicker`, `ClickableRow`) paint
   a keyboard-focus ring and set `AccessibleName`/`AccessibleRole` so the app is operable by
   keyboard and screen reader.
@@ -143,41 +141,48 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   blocked. A successful TSC re-auth (tray or window, via the `ReauthSucceeded` event)
   calls `CatchUpIfDue` to retry any queue entries that were waiting on sign-in.
 - **`MainForm`** - the capture window: a standard-chrome window structured like the
-  old web app - a header (title + date), then stacked `Card`s: "Log entries" (a
-  "My tickets" list from `LoggingService.GetMyTicketsAsync` - each row shows the key,
+  old web app - a header (title + date), then stacked `Card`s, input first: "New entry"
+  (date + ticket, then one action row: the primary "Add to queue", a "Log now" dropdown
+  with TSC + HRM / TSC only / HRM only, and a "more" dropdown with Log OFF... / Check TSC
+  session / Re-authenticate TSC; the dropdowns are `ContextMenuStrip`s painted by
+  `ThemedMenuRenderer`), "Will log" (described below), and last "My tickets" (a
+  "My tickets" list from `LoggingService.GetMyTicketsAsync` - every match, paged via
+  `nextPageToken` (capped at 500), in a fixed-height list that scrolls - each row shows the key,
   summary, then a right-aligned due date - click a row to add it; an "Edit JQL" button
   opens `JqlForm` to customise the query driving that list (validated against Jira, then
-  persisted + re-fetched), + date/ticket), "Will log" (one row per ticket - a
+  persisted + re-fetched)). "Will log" has one row per ticket - a
   status dot, the colored
   ticket key, and its time slots; the dot reflects Jira verification, green valid /
   red not found / amber error, via `VerifyTicketsAsync` debounced on typing and on
   blur, suggestions pre-marked valid. While typing it previews the typed tickets for
   the selected date, using an **editable `WillLogEditRow`** with an inline hours field
   per ticket: default is the even split (`TimeSlots.EvenSplit`), editing sets a custom
-  per-ticket duration (partial day allowed, day capped at 8h; over-8h disables Queue /
-  Log now / Log HRM with a header hint). Custom durations ride the queue as
+  per-ticket duration (partial day allowed, day capped at 8h; over-8h disables Add to queue
+  and the TSC + HRM / HRM only log items, with a header hint). Custom durations ride the queue as
   `QueueEntry.Minutes` (null = even split) and drive the HRM slots; TSC ignores time.
   With the input empty it falls back to the **whole persisted queue** grouped by date
-  (each headed "(queued for 6 PM)"), shown read-only via `WillLogRow`, and shows a
+  (each headed "(queued for <LOG_TIME>)"), shown read-only via `WillLogRow`, and shows a
   "Clear queue" button - this is the single view of what's scheduled (there is no
   separate queue card). The card is **fixed height and scrolls internally**
-  (`WillLogHostH`) so the Actions card below stays visible with a long queue),
-  and "Actions" (Queue / Log now, then a 5-up row: Log TSC /
-  Log HRM / Log OFF / Check TSC / Re-auth). "Log OFF" needs no ticket and takes any date,
+  (`WillLogHostH`, sized for a date header + 3 ticket rows) so the window height stays
+  stable with a long queue. "Log OFF" needs no ticket and takes any date,
   confirms, then writes the `OFF` marker for the selected day and drops that day's queued
   entries; it is the only path that overwrites a cell holding real work.
   `RefreshQueuedView` (called on queue/clear, on window
-  activate, and after a drain, including by `TrayApp`) just re-renders "Will log". At the
-  bottom of the window a docked "Activity" card holds a scrolling console log that
-  streams every activity line live (`AppendLog` -> log file + console) and the green/red
-  result of each action (`ShowStatus`); it is persistent (no auto-clear) and capped to
-  the last `ActivityCap` lines, re-rendered on a theme switch so old lines re-color. A
-  log run shows TSC/HRM progress bars inside that same card (the console shrinks to make
-  room) - `LoggingService` forwards `onProgress(done,total)` callbacks to
-  `GraphTscClient` / `HrmMcpClient`. Ticket-dependent buttons are gated on valid input
-  via `UpdateActionState`.
+  activate, and after a drain, including by `TrayApp`) just re-renders "Will log". There
+  is no in-window activity console: detailed progress (`AppendLog`) goes to the log file
+  only. **Notices:** every user-facing message goes through `TrayApp.Notify`, which records
+  it in the window's bell history (`MainForm.PostNotice`, last 20, session-only; the
+  header bell shows a red dot until opened) and shows it as an in-window `NoticeToast`
+  under the bell while the window is on screen (3s, errors 6s), else as a Windows
+  balloon. A window action's result (`ShowStatus`) reaches it via `StatusRaised`. While
+  an action runs, `SetBusy` shows a sticky toast naming it ("Logging to TSC + HRM...")
+  and the Log now button reads "Working...". Ticket-dependent buttons are gated on
+  valid input via `UpdateActionState`.
   `MacButton`, `Card`, and `RoundedHost` are owner-drawn
-  (no third-party UI library). Closing (X) **hides to tray**; `TrayApp` owns exit.
+  (no third-party UI library). Closing (X) or Esc **hides to tray**; `TrayApp` owns exit.
+  Keyboard fast path: showing the window and picking a suggestion both focus the ticket
+  box, and Enter is the `AcceptButton` ("Add to queue").
   Icons come from the embedded `app.ico` via `AppIcon.Load(size)`. The window position
   is persisted via `AppSettings` (saved on move/close, restored on open only if it
   still lands on a connected monitor, else centered).
@@ -247,8 +252,8 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   if the tz lookup fails). Worksheet year, day-of-year row, and HRM `workDate` all
   derive from it. Consequence: HRM rejects future stop times, so **today's** queue
   only succeeds from 18:00 on; past dates work anytime. `MainForm.HrmClosedForToday`
-  blocks Log now / Log HRM for today before 18:00 with an explanatory status (Queue
-  instead), rather than letting HRM fail confusingly. `SixPmScheduler` fires the
+  blocks the TSC + HRM / HRM only log items for today before 18:00 with an explanatory
+  status (Add to queue instead), rather than letting HRM fail confusingly. `SixPmScheduler` fires the
   daily run in-process at a **configurable** time (`LOG_TIME`, default 18:00 HCM;
   replacing the old external Task Scheduler job). Setting `LOG_TIME` earlier than 18:00
   makes today's HRM entries fail until 18:00 (the future-stop-time rule still applies).
@@ -263,7 +268,7 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   successful TSC re-auth, so entries kept by a logged-out drain retry automatically.
   Note: the date picker is in local time; for a user outside Vietnam a near-midnight
   pick can differ from the HCM day (a tooltip on the date field flags this).
-- **Days off are marked manually, via the window's "Log OFF" button only.** There is no
+- **Days off are marked manually, via the window's "Log OFF..." menu item only.** There is no
   background poll - leave isn't marked often enough to justify one, and periodic
   headless Chrome sniffs to check were overkill. The button needs no ticket, takes any
   date, confirms first (it's the only path that overwrites a cell holding real work),
@@ -319,10 +324,11 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
 (the pending log queue), `settings.json` (theme, window position, **and** the `Config`
 key/value map of secrets/settings written by `CredentialsForm`, via `AppSettings`), and
-`logs/app.log`. A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
+`logs/app-yyyy-MM-dd.log` (one file per day). A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
 first load and removed. A missing or malformed `queue.json` yields an empty queue by
 design so the 18:00 runner never throws; `AppSettings` likewise falls back to defaults on
-a missing/bad `settings.json` (preserving the bad copy as `settings.json.bad`). `app.log`
-is size-capped and rolls to `app.log.1` (`AppLogger`). The TSC Chrome profile (the saved
+a missing/bad `settings.json` (preserving the bad copy as `settings.json.bad`). `AppLogger`
+deletes log files older than 30 days (`RetentionDays`) on the first write of each day;
+the tray's "Open log folder" item opens the folder. The TSC Chrome profile (the saved
 Microsoft session) lives separately at
 `%UserProfile%\.tsc-daily-log-browser` (`TscTokenSniffer.ProfileDir`).

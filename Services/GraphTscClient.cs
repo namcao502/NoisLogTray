@@ -75,7 +75,6 @@ internal static class GraphTscClient
         string token,
         GraphTscOptions options,
         Action<string>? onLog = null,
-        Action<int, int>? onProgress = null,
         CancellationToken ct = default)
     {
         void Emit(string line) => onLog?.Invoke(line);
@@ -87,8 +86,6 @@ internal static class GraphTscClient
             ? options.Columns
             : TscCells.TargetColumns;
         var effectiveDates = dates.Count > 0 ? dates : new[] { Hcm.Today() };
-        var totalCells = effectiveDates.Count * columns.Count;
-        var doneCells = 0;
 
         try
         {
@@ -128,8 +125,6 @@ internal static class GraphTscClient
                         {
                             Emit($"[graph-tsc] {cell} already \"{ticket}\", skipping");
                             writtenCells.Add(cell);
-                            doneCells++;
-                            onProgress?.Invoke(doneCells, totalCells);
                             continue;
                         }
                         if (cur.Length != 0) Emit($"[graph-tsc] {cell} had \"{cur}\", overwriting");
@@ -139,8 +134,6 @@ internal static class GraphTscClient
                             await ClearFillAsync(token, reference, worksheet, cell, sessionId, ct);
                         Emit($"[graph-tsc] Wrote \"{ticket}\" to {cell}");
                         writtenCells.Add(cell);
-                        doneCells++;
-                        onProgress?.Invoke(doneCells, totalCells);
                     }
                 }
 
@@ -166,7 +159,6 @@ internal static class GraphTscClient
         string token,
         GraphTscOptions options,
         Action<string>? onLog = null,
-        Action<int, int>? onProgress = null,
         CancellationToken ct = default)
     {
         void Emit(string line) => onLog?.Invoke(line);
@@ -179,8 +171,6 @@ internal static class GraphTscClient
         var columns = options.Columns != null && options.Columns.Count != 0
             ? options.Columns
             : TscCells.TargetColumns;
-        var totalCells = dates.Count * columns.Count;
-        var doneCells = 0;
 
         try
         {
@@ -217,8 +207,6 @@ internal static class GraphTscClient
                         // Outside the write guard on purpose: a hand-typed OFF gets coloured too.
                         await SetFillAsync(token, reference, worksheet, cell, TscCells.OffFillColor, sessionId, ct);
                         Emit($"[graph-off] {cell} = \"{TscCells.OffMarker}\" on {TscCells.OffFillColor}");
-                        doneCells++;
-                        onProgress?.Invoke(doneCells, totalCells);
                     }
 
                     marked.Add(date);

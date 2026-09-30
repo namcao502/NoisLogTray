@@ -49,6 +49,7 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add("Check TSC session", null, async (_, _) => await CheckTscAsync());
         menu.Items.Add("Re-authenticate TSC", null, async (_, _) => await ReauthAsync());
         menu.Items.Add("Edit credentials...", null, (_, _) => EditCredentials());
+        menu.Items.Add("Open log folder", null, (_, _) => OpenLogFolder());
         menu.Items.Add(new ToolStripSeparator());
         _startupItem = new ToolStripMenuItem("Start with Windows", null, (_, _) => ToggleStartup())
         {
@@ -159,6 +160,8 @@ internal sealed class TrayApp : ApplicationContext
             _form.QueueChanged += UpdateTooltip;
             _form.ReauthSucceeded += CatchUpIfDue; // retry due entries once TSC is signed in
             _form.DrainRequested += () => _ = DrainAsync(fromUser: true); // "Log all now"
+            _form.StatusRaised += (message, kind) =>
+                Notify(message, kind == NoticeKind.Error ? ToolTipIcon.Warning : ToolTipIcon.Info, kind);
         }
         _form.Show();
         _form.WindowState = FormWindowState.Normal;
@@ -254,7 +257,7 @@ internal sealed class TrayApp : ApplicationContext
         RunOnUi(() =>
         {
             ShowForm();
-            _form?.AppendLog("Reminder: nothing is queued for today - log your work before you leave.");
+            Notify("Reminder: nothing is queued for today - log your work before you leave.", ToolTipIcon.Info);
         });
     }
 
@@ -385,14 +388,24 @@ internal sealed class TrayApp : ApplicationContext
         ExitThread();
     }
 
-    private void Log(string line)
+    private static void Log(string line) => AppLogger.Info(line);
+
+    private static void OpenLogFolder()
     {
-        AppLogger.Info(line); // log to file once here...
-        RunOnUi(() => { if (_form != null && !_form.IsDisposed) _form.ShowActivityLine(line); }); // ...display only
+        Directory.CreateDirectory(AppPaths.LogDirectory);
+        Process.Start(new ProcessStartInfo(AppPaths.LogDirectory) { UseShellExecute = true });
     }
 
-    private void Notify(string message, ToolTipIcon icon) =>
-        RunOnUi(() => _tray.ShowBalloonTip(5000, "NOIS Daily Log", message, icon));
+    // Every notice lands in the window's bell history. It shows in-window while the window
+    // is on screen, and as a Windows balloon otherwise.
+    private void Notify(string message, ToolTipIcon icon, NoticeKind? kind = null) =>
+        RunOnUi(() =>
+        {
+            var noticeKind = kind ?? (icon == ToolTipIcon.Info ? NoticeKind.Info : NoticeKind.Error);
+            var form = _form != null && !_form.IsDisposed ? _form : null;
+            form?.PostNotice(message, noticeKind);
+            if (form == null || !form.IsOnScreen) _tray.ShowBalloonTip(5000, "NOIS Daily Log", message, icon);
+        });
 
     private void RunOnUi(Action action)
     {

@@ -3,13 +3,10 @@ using System.Globalization;
 
 namespace NoisLogTray;
 
-// The capture window, structured like the old web app: a header (with a light/dark
-// toggle), then stacked cards -- "Log entries" (My tickets + date/ticket), "Will
-// log" (preview), and "Actions". A scrolling "activity" log at the bottom of the
-// window streams every activity line and the coloured result; TSC/HRM progress bars
-// show inside that block during a log run.
+// The capture window: a header (with a light/dark toggle), then stacked cards -- "New
+// entry" (date/ticket + actions), "Will log" (preview + queue), and "My tickets".
 // Closing (X) hides to the tray; TrayApp owns the process lifetime.
-internal sealed class MainForm : Form
+internal sealed class MainForm : Form, IMessageFilter
 {
     private static readonly Font KeyFont = new("Segoe UI", 9F, FontStyle.Bold);
     private static readonly Font SummaryFont = new("Segoe UI", 9F);
@@ -67,8 +64,19 @@ internal sealed class MainForm : Form
     private const int DueHeatMaxDays = 14; // due >= this many days out reads as coolest
 
     private const int CardW = 560;
+
+    // One height for every button and input; widths vary by role (the primary button is
+    // widest, card-header toolbar buttons share ToolbarBtnW). Neighbours sit 8px apart.
+    private const int BtnH = 30;
+    private const int ToolbarBtnW = 96;
+    private const int BtnGap = 8;
+    private const int ToolbarY = 7;   // card-header toolbar, centred on the section title
+    private const int CardBodyY = 44; // first content row under a card header
     private const int InnerW = 528; // CardW - 2*16
-    private const int WillLogHostH = 140; // fixed; rows scroll internally beyond this
+    // Fixed height: a date header + 3 (editable, tallest) ticket rows + list padding;
+    // longer lists scroll internally.
+    private const int WillLogHostH = 20 + 3 * 26 + 8;
+    private const int SuggestionRowPitch = 31; // suggestion row height (zero margin)
 
     private readonly LoggingService? _service;
 
@@ -77,19 +85,34 @@ internal sealed class MainForm : Form
     private readonly Label _headerTitle = new();
     private readonly Label _headerSubtitle = new();
     private readonly ThemeToggleButton _themeBtn = new();
+    private readonly NotificationBell _bell = new();
+    private readonly ContextMenuStrip _bellMenu = ThemedMenuRenderer.CreateMenu();
+    private readonly NoticeToast _toast = new();
+
+    // Recent notices for the bell's history, newest last; session-only, capped.
+    private const int NoticeHistoryCap = 20;
+    private readonly List<(DateTime Time, string Message, NoticeKind Kind)> _notices = new();
     private readonly List<Label> _sectionLabels = new();
     private readonly List<Panel> _dividers = new();
 
     private readonly RoundedDatePicker _date = new();
     private readonly ToolTip _tips = new();
     private readonly TextBox _tickets = new();
-    private readonly MacButton _queueBtn = MacButton.Primary("Add to list");
-    private readonly MacButton _logNowBtn = MacButton.Secondary("Log now (TSC + HRM)");
-    private readonly MacButton _logTscBtn = MacButton.Secondary("Log TSC");
-    private readonly MacButton _logHrmBtn = MacButton.Secondary("Log HRM");
-    private readonly MacButton _logOffBtn = MacButton.Secondary("Log OFF");
-    private readonly MacButton _checkBtn = MacButton.Secondary("Check TSC");
-    private readonly MacButton _reauthBtn = MacButton.Secondary("Re-auth");
+    private readonly TextBox _ticketSearch = new();
+    private readonly MacButton _queueBtn = MacButton.Primary("Add to queue");
+    private const string LogNowText = "Log now  ▾";
+    private readonly MacButton _logNowBtn = MacButton.Secondary(LogNowText);
+    private readonly MacButton _moreBtn = MacButton.Secondary("⋯");
+
+    // Rarely used actions live in dropdowns so "Add to queue" stays the one obvious button.
+    private readonly ContextMenuStrip _logNowMenu = ThemedMenuRenderer.CreateMenu();
+    private readonly ToolStripMenuItem _logBothItem = new("TSC + HRM");
+    private readonly ToolStripMenuItem _logTscItem = new("TSC only");
+    private readonly ToolStripMenuItem _logHrmItem = new("HRM only");
+    private readonly ContextMenuStrip _moreMenu = ThemedMenuRenderer.CreateMenu();
+    private readonly ToolStripMenuItem _logOffItem = new("Log OFF...");
+    private readonly ToolStripMenuItem _checkItem = new("Check TSC session");
+    private readonly ToolStripMenuItem _reauthItem = new("Re-authenticate TSC");
     private readonly MacButton _refreshBtn = MacButton.Secondary("Refresh");
     private readonly MacButton _jqlBtn = MacButton.Secondary("Edit JQL");
     private readonly MacButton _clearBtn = MacButton.Secondary("Clear");
@@ -106,11 +129,9 @@ internal sealed class MainForm : Form
     // split (see TimeSlots.EvenSplit); reset whenever the ticket text changes.
     private List<int>? _typedMinutes;
 
-    // The bottom activity block (scrolling console + TSC/HRM progress bars).
-    private readonly ActivityLogPanel _activity = new();
-
     private IReadOnlyList<JiraSuggestion> _lastSuggestions = Array.Empty<JiraSuggestion>();
     private bool _busy;
+    private bool _loadingSuggestions;
 
     private enum VState { Verifying, Valid, NotFound, Error }
 
@@ -122,11 +143,15 @@ internal sealed class MainForm : Form
     // Raised by "Log all now" so the tray drains the whole queue through its guarded path.
     internal event Action? DrainRequested;
 
+    // Raised with each action's result so the tray shows it as a popup (ok = success).
+    internal event Action<string, NoticeKind>? StatusRaised;
+
     internal MainForm(LoggingService? service, string? configError)
     {
         _service = service;
         BuildLayout();
         Theme.Changed += ApplyTheme;
+        Application.AddMessageFilter(this);
         RefreshQueuedView(); // also renders the Will log (falls back to the queue)
         if (configError != null) AppendLog($"[config] {configError}");
         LoadMyTicketsAsync();
@@ -134,8 +159,26 @@ internal sealed class MainForm : Form
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) Theme.Changed -= ApplyTheme;
+        if (disposing)
+        {
+            Theme.Changed -= ApplyTheme;
+            Application.RemoveMessageFilter(this);
+            _bellMenu.Dispose();
+            _logNowMenu.Dispose();
+            _moreMenu.Dispose();
+        }
         base.Dispose(disposing);
+    }
+
+    private const int WmLButtonDown = 0x0201;
+
+    // Drop focus from the search box on a click anywhere else. Labels and rows do not take
+    // focus themselves, so without this the caret would stay in the search box.
+    public bool PreFilterMessage(ref Message m)
+    {
+        if (m.Msg == WmLButtonDown && _ticketSearch.Focused && m.HWnd != _ticketSearch.Handle)
+            ActiveControl = null;
+        return false; // never swallow the click
     }
 
     private void BuildLayout()
@@ -145,11 +188,9 @@ internal sealed class MainForm : Form
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         BackColor = Theme.WindowBg;
-        ClientSize = new Size(600, 958); // body fits the cards snugly; activity log docks below
         RestoreWindowPosition();
 
         BuildBody();
-        Controls.Add(_activity);
     }
 
     // Restore the last window position if it still lands on a connected monitor;
@@ -189,7 +230,7 @@ internal sealed class MainForm : Form
     {
         _body.Dock = DockStyle.Fill;
         _body.BackColor = Theme.WindowBg;
-        _body.AutoScroll = false; // main window never scrolls; only the activity log does
+        _body.AutoScroll = false; // main window never scrolls
 
         var y = 14;
         var header = BuildHeader();
@@ -197,19 +238,25 @@ internal sealed class MainForm : Form
         _body.Controls.Add(header);
         y += header.Height + 8;
 
-        var entries = BuildEntriesCard();
-        entries.Location = new Point(20, y);
-        _body.Controls.Add(entries);
-        y += entries.Height + 12;
+        // Input + primary action first (where focus lands), the queue next, the picker last.
+        var newEntry = BuildNewEntryCard();
+        newEntry.Location = new Point(20, y);
+        _body.Controls.Add(newEntry);
+        y += newEntry.Height + 12;
 
         var willLog = BuildWillLogCard();
         willLog.Location = new Point(20, y);
         _body.Controls.Add(willLog);
         y += willLog.Height + 12;
 
-        var actions = BuildActionsCard();
-        actions.Location = new Point(20, y);
-        _body.Controls.Add(actions);
+        var myTickets = BuildMyTicketsCard();
+        myTickets.Location = new Point(20, y);
+        _body.Controls.Add(myTickets);
+        ClientSize = new Size(600, myTickets.Bottom + 20); // fit the cards snugly
+
+        _toast.Width = 320;
+        _toast.Location = new Point(20 + CardW - _toast.Width, 14 + 12 + 30 + 6);
+        _body.Controls.Add(_toast);
 
         AcceptButton = _queueBtn;
         Controls.Add(_body);
@@ -234,36 +281,66 @@ internal sealed class MainForm : Form
         _headerSubtitle.ForeColor = Theme.TextSecondary;
 
         _themeBtn.OnWindow = true;
-        _themeBtn.Size = new Size(34, 30);
-        _themeBtn.Location = new Point(CardW - 34, 12);
+        _themeBtn.Size = new Size(BtnH, BtnH);
+        _themeBtn.Location = new Point(CardW - BtnH, 12);
+
+        _bell.Size = new Size(BtnH, BtnH);
+        _bell.Location = new Point(CardW - 2 * BtnH - BtnGap, 12);
+        _bell.Click += (_, _) => OpenNoticeHistory();
+        _tips.SetToolTip(_bell, "Notifications");
 
         _header.Controls.Add(_headerTitle);
         _header.Controls.Add(_headerSubtitle);
         _header.Controls.Add(_themeBtn);
+        _header.Controls.Add(_bell);
         return _header;
     }
 
-    private Card BuildEntriesCard()
+    private Card BuildMyTicketsCard()
     {
-        var card = new Card { Size = new Size(CardW, 342) };
-        card.Controls.Add(SectionLabel("LOG ENTRIES", 16, 14));
-        card.Controls.Add(SectionLabel("MY TICKETS  (click to add)", 16, 42));
+        var card = new Card { Size = new Size(CardW, CardBodyY + 204 + 16) };
+        var myTicketsLabel = SectionLabel("MY TICKETS", 16, 14);
+        card.Controls.Add(myTicketsLabel);
 
-        _jqlBtn.Size = new Size(90, 26);
-        _jqlBtn.Location = new Point(16 + InnerW - 188, 38);
+        // Quick filter over the loaded list, between the section label and the buttons.
+        var searchX = 16 + myTicketsLabel.PreferredWidth + 8;
+        var searchHost = new RoundedHost { Location = new Point(searchX, ToolbarY), Size = new Size(16 + InnerW - 2 * (ToolbarBtnW + BtnGap) - searchX, BtnH) };
+        _ticketSearch.BorderStyle = BorderStyle.None;
+        _ticketSearch.Font = new Font("Segoe UI", 9F);
+        _ticketSearch.BackColor = Theme.InputBg;
+        _ticketSearch.ForeColor = Theme.TextPrimary;
+        _ticketSearch.PlaceholderText = "Search, then click a row to add";
+        _ticketSearch.AccessibleName = "Search my tickets";
+        _ticketSearch.TextChanged += (_, _) =>
+        {
+            if (!_loadingSuggestions) RenderSuggestions(_lastSuggestions); // keep "Loading..." visible
+        };
+        _ticketSearch.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode != Keys.Escape) return;
+            _ticketSearch.Text = string.Empty;
+            e.SuppressKeyPress = true;
+        };
+        var searchH = _ticketSearch.PreferredHeight;
+        _ticketSearch.SetBounds(8, (searchHost.Height - searchH) / 2, searchHost.Width - 16, searchH);
+        searchHost.Controls.Add(_ticketSearch);
+        card.Controls.Add(searchHost);
+
+        _jqlBtn.Size = new Size(ToolbarBtnW, BtnH);
+        _jqlBtn.Location = new Point(16 + InnerW - 2 * ToolbarBtnW - BtnGap, ToolbarY);
         _jqlBtn.Click += (_, _) => EditJql();
         card.Controls.Add(_jqlBtn);
 
-        _refreshBtn.Size = new Size(90, 26);
-        _refreshBtn.Location = new Point(16 + InnerW - 90, 38);
+        _refreshBtn.Size = new Size(ToolbarBtnW, BtnH);
+        _refreshBtn.Location = new Point(16 + InnerW - ToolbarBtnW, ToolbarY);
         _refreshBtn.Click += (_, _) => LoadMyTicketsAsync();
         card.Controls.Add(_refreshBtn);
 
-        var sugHost = new RoundedHost { Location = new Point(16, 68), Size = new Size(InnerW, 204) };
+        var sugHost = new RoundedHost { Location = new Point(16, CardBodyY), Size = new Size(InnerW, 204) };
         _suggestions.Dock = DockStyle.Fill;
         _suggestions.FlowDirection = FlowDirection.TopDown;
         _suggestions.WrapContents = false;
-        _suggestions.AutoScroll = false;
+        _suggestions.AutoScroll = true; // fixed height; scroll through the full list
         _suggestions.BorderStyle = BorderStyle.None;
         _suggestions.BackColor = Theme.InputBg;
         sugHost.Controls.Add(_suggestions);
@@ -277,46 +354,19 @@ internal sealed class MainForm : Form
         sugHost.Controls.Add(_suggestionStatus);
         _suggestionStatus.BringToFront();
 
-        card.Controls.Add(SectionLabel("DATE", 16, 282));
-        card.Controls.Add(SectionLabel("TICKET", 214, 282));
-
-        _date.Location = new Point(16, 300);
-        _date.Size = new Size(190, 30);
-        _date.ValueChanged += (_, _) => { UpdateWillLog(); VerifyTicketsAsync(); };
-        _tips.SetToolTip(_date, "Dates and the 6 PM auto-log use Vietnam time (Asia/Ho_Chi_Minh, UTC+7).");
-
-        var ticketHost = new RoundedHost { Location = new Point(214, 300), Size = new Size(262, 30) };
-        _tickets.BorderStyle = BorderStyle.None;
-        _tickets.Font = new Font("Segoe UI", 9.5F);
-        _tickets.BackColor = Theme.InputBg;
-        _tickets.ForeColor = Theme.TextPrimary;
-        _tickets.PlaceholderText = "e.g. 1234, 5678  (MDP- optional)";
-        _tickets.TextChanged += (_, _) => { _typedMinutes = null; UpdateWillLog(); UpdateActionState(); _verifyTimer.Stop(); _verifyTimer.Start(); };
-        _tickets.Leave += (_, _) => { _verifyTimer.Stop(); VerifyTicketsAsync(); };
-        var ticketH = _tickets.PreferredHeight;
-        _tickets.SetBounds(10, (ticketHost.Height - ticketH) / 2, ticketHost.Width - 20, ticketH);
-        ticketHost.Controls.Add(_tickets);
-
-        _clearBtn.Size = new Size(64, 30); // match the date/ticket input height
-        _clearBtn.Location = new Point(480, 300);
-        _clearBtn.Click += (_, _) => _tickets.Text = string.Empty;
-
         card.Controls.Add(sugHost);
-        card.Controls.Add(_date);
-        card.Controls.Add(ticketHost);
-        card.Controls.Add(_clearBtn);
         return card;
     }
 
     private Card BuildWillLogCard()
     {
-        var card = new Card { Size = new Size(CardW, 38 + WillLogHostH + 12) };
+        var card = new Card { Size = new Size(CardW, CardBodyY + WillLogHostH + 12) };
         card.Controls.Add(SectionLabel("WILL LOG", 16, 14));
 
         // Running total / validation hint, right-aligned in the header (typed view only).
         _hoursHint.AutoSize = false;
         _hoursHint.Size = new Size(170, 18);
-        _hoursHint.Location = new Point(16 + InnerW - 170, 13);
+        _hoursHint.Location = new Point(16 + InnerW - 170, ToolbarY + (BtnH - 18) / 2);
         _hoursHint.TextAlign = ContentAlignment.MiddleRight;
         _hoursHint.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
         _hoursHint.ForeColor = Theme.TextSecondary;
@@ -326,23 +376,23 @@ internal sealed class MainForm : Form
 
         // Clears the persisted queue; only shown while the card is displaying the
         // queued fallback (input empty + something queued).
-        _clearQueueBtn.Size = new Size(90, 24);
-        _clearQueueBtn.Location = new Point(16 + InnerW - 90, 10);
+        _clearQueueBtn.Size = new Size(ToolbarBtnW, BtnH);
+        _clearQueueBtn.Location = new Point(16 + InnerW - ToolbarBtnW, ToolbarY);
         _clearQueueBtn.Visible = false;
         _clearQueueBtn.Click += OnClearQueue;
         card.Controls.Add(_clearQueueBtn);
 
         // Logs the whole queued list now (same guarded drain as the tray "Log queue now");
         // shown beside Clear queue, only in the queued fallback view.
-        _logAllBtn.Size = new Size(96, 24);
-        _logAllBtn.Location = new Point(16 + InnerW - 90 - 96 - 8, 10);
+        _logAllBtn.Size = new Size(ToolbarBtnW, BtnH);
+        _logAllBtn.Location = new Point(16 + InnerW - 2 * ToolbarBtnW - BtnGap, ToolbarY);
         _logAllBtn.Visible = false;
         _logAllBtn.Click += OnLogAllNow;
         card.Controls.Add(_logAllBtn);
 
         // Fixed-height list; rows scroll internally once they overflow so the Actions
         // card below stays at a stable, visible position.
-        var host = new RoundedHost { Location = new Point(16, 38), Size = new Size(InnerW, WillLogHostH) };
+        var host = new RoundedHost { Location = new Point(16, CardBodyY), Size = new Size(InnerW, WillLogHostH) };
         _willLogList.Dock = DockStyle.Fill;
         _willLogList.FlowDirection = FlowDirection.TopDown;
         _willLogList.WrapContents = false;
@@ -357,44 +407,75 @@ internal sealed class MainForm : Form
         return card;
     }
 
-    private Card BuildActionsCard()
+    private Card BuildNewEntryCard()
     {
-        var card = new Card { Size = new Size(CardW, 132) };
-        card.Controls.Add(SectionLabel("ACTIONS", 16, 14));
+        var card = new Card { Size = new Size(CardW, 96 + BtnH + 16) };
+        card.Controls.Add(SectionLabel("NEW ENTRY", 16, 14));
 
-        // 2-up primary row over a 5-up secondary row, 12px gutter. The rows deliberately
-        // no longer share column edges - 5 does not divide into 2.
-        const int gap = 12;
-        const int half = (InnerW - gap) / 2;      // 258: top-row button width
-        const int fifth = (InnerW - 4 * gap) / 5; // 96: bottom-row button width
-        var col2 = 16 + half + gap;               // 286: start of the right column
+        card.Controls.Add(SectionLabel("DATE", 16, 40));
+        card.Controls.Add(SectionLabel("TICKET", 214, 40));
 
-        _queueBtn.Size = new Size(half, 40);
-        _queueBtn.Location = new Point(16, 36);
+        _date.Location = new Point(16, 58);
+        _date.Size = new Size(190, BtnH);
+        _date.ValueChanged += (_, _) => { UpdateWillLog(); VerifyTicketsAsync(); };
+        _tips.SetToolTip(_date, "Dates and the daily auto-log use Vietnam time (Asia/Ho_Chi_Minh, UTC+7).");
+
+        var ticketHost = new RoundedHost { Location = new Point(214, 58), Size = new Size(262, BtnH) };
+        _tickets.BorderStyle = BorderStyle.None;
+        _tickets.Font = new Font("Segoe UI", 9.5F);
+        _tickets.BackColor = Theme.InputBg;
+        _tickets.ForeColor = Theme.TextPrimary;
+        _tickets.PlaceholderText = "e.g. 1234, 5678  (MDP- optional)";
+        _tickets.TextChanged += (_, _) => { _typedMinutes = null; UpdateWillLog(); UpdateActionState(); _verifyTimer.Stop(); _verifyTimer.Start(); };
+        _tickets.Leave += (_, _) => { _verifyTimer.Stop(); VerifyTicketsAsync(); };
+        var ticketH = _tickets.PreferredHeight;
+        _tickets.SetBounds(10, (ticketHost.Height - ticketH) / 2, ticketHost.Width - 20, ticketH);
+        ticketHost.Controls.Add(_tickets);
+
+        _clearBtn.Size = new Size(16 + InnerW - (476 + BtnGap), BtnH); // fills to the card edge
+        _clearBtn.Location = new Point(476 + BtnGap, 58);
+        _clearBtn.Click += (_, _) => _tickets.Text = string.Empty;
+
+        card.Controls.Add(_date);
+        card.Controls.Add(ticketHost);
+        card.Controls.Add(_clearBtn);
+
+        // One row: the primary "Add to queue", then the "Log now" and "more" dropdowns.
+        const int logNowW = 140;
+        const int moreW = 52;
+        const int queueW = InnerW - logNowW - moreW - 2 * BtnGap;
+
+        _queueBtn.Size = new Size(queueW, BtnH);
+        _queueBtn.Location = new Point(16, 96);
         _queueBtn.Click += OnQueue;
 
-        _logNowBtn.Size = new Size(half, 40);
-        _logNowBtn.Location = new Point(col2, 36);
-        _logNowBtn.Click += OnLogNow;
+        _logNowBtn.Size = new Size(logNowW, BtnH);
+        _logNowBtn.Location = new Point(16 + queueW + BtnGap, 96);
+        _logNowBtn.AccessibleName = "Log now menu";
+        _logNowBtn.Click += (_, _) => ThemedMenuRenderer.ShowBelow(_logNowMenu, _logNowBtn);
+        _tips.SetToolTip(_logNowBtn, "Log the typed tickets right away instead of waiting for the scheduled run.");
 
-        var bottomRow = new[] { _logTscBtn, _logHrmBtn, _logOffBtn, _checkBtn, _reauthBtn };
-        for (var i = 0; i < bottomRow.Length; i++)
-        {
-            bottomRow[i].Size = new Size(fifth, 32);
-            bottomRow[i].Location = new Point(16 + i * (fifth + gap), 84);
-        }
-        _logTscBtn.Click += OnLogTsc;
-        _logHrmBtn.Click += OnLogHrm;
-        _logOffBtn.Click += OnLogOff;
-        _checkBtn.Click += OnCheckTsc;
-        _reauthBtn.Click += OnReauth;
+        _moreBtn.Size = new Size(moreW, BtnH);
+        _moreBtn.Location = new Point(16 + InnerW - moreW, 96);
+        _moreBtn.AccessibleName = "More actions";
+        _moreBtn.Click += (_, _) => ThemedMenuRenderer.ShowBelow(_moreMenu, _moreBtn);
+        _tips.SetToolTip(_moreBtn, "More actions: Log OFF, TSC session");
 
-        _tips.SetToolTip(_logOffBtn,
-            $"Write \"{TscCells.OffMarker}\" on a yellow background to TSC for the selected date (no HRM hours).");
+        _logBothItem.Click += OnLogNow;
+        _logTscItem.Click += OnLogTsc;
+        _logHrmItem.Click += OnLogHrm;
+        _logNowMenu.Items.AddRange(new ToolStripItem[] { _logBothItem, _logTscItem, _logHrmItem });
+
+        _logOffItem.Click += OnLogOff;
+        _logOffItem.ToolTipText =
+            $"Write \"{TscCells.OffMarker}\" on a yellow background to TSC for the selected date (no HRM hours).";
+        _checkItem.Click += OnCheckTsc;
+        _reauthItem.Click += OnReauth;
+        _moreMenu.Items.AddRange(new ToolStripItem[] { _logOffItem, new ToolStripSeparator(), _checkItem, _reauthItem });
 
         card.Controls.Add(_queueBtn);
         card.Controls.Add(_logNowBtn);
-        foreach (var button in bottomRow) card.Controls.Add(button);
+        card.Controls.Add(_moreBtn);
         return card;
     }
 
@@ -428,6 +509,8 @@ internal sealed class MainForm : Form
 
         _tickets.BackColor = Theme.InputBg;
         _tickets.ForeColor = Theme.TextPrimary;
+        _ticketSearch.BackColor = Theme.InputBg;
+        _ticketSearch.ForeColor = Theme.TextPrimary;
         _suggestions.BackColor = Theme.InputBg;
         _suggestionStatus.BackColor = Theme.InputBg;
         _suggestionStatus.ForeColor = Theme.TextSecondary;
@@ -438,25 +521,71 @@ internal sealed class MainForm : Form
         Invalidate(true);
     }
 
-    // Every activity line goes to the log file AND the activity console. Safe to call
-    // from a background thread (the console marshals to the UI thread internally).
-    internal void AppendLog(string line)
+    // Detailed activity goes to the log file only. Safe from any thread.
+    private static void AppendLog(string line) => AppLogger.Info(line);
+
+    // An action's result: logged, then raised so the tray routes it (in-window notice
+    // while this window is shown, Windows balloon otherwise).
+    private void ShowStatus(string message, bool ok)
     {
-        AppLogger.Info(line);
-        _activity.Append(line, isResult: false, ok: false);
+        AppLogger.Write(ok ? "INFO" : "ERROR", message);
+        StatusRaised?.Invoke(message, ok ? NoticeKind.Success : NoticeKind.Error);
     }
 
-    // Show a line in the console WITHOUT writing it to the log file - the caller has
-    // already logged it. Used by TrayApp so a line is not written to app.log twice.
-    internal void ShowActivityLine(string line) => _activity.Append(line, isResult: false, ok: false);
+    // Record a notice in the bell history and, when the window is on screen, show the toast.
+    // With the history menu open the menu itself is refreshed instead. Safe from any thread.
+    internal void PostNotice(string message, NoticeKind kind)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(new Action<string, NoticeKind>(PostNotice), message, kind);
+            return;
+        }
 
-    // Append a coloured result line (green on success, red on failure) to the console.
-    private void ShowStatus(string message, bool ok) => _activity.Append(message, isResult: true, ok: ok);
+        _notices.Add((DateTime.Now, message, kind));
+        if (_notices.Count > NoticeHistoryCap) _notices.RemoveAt(0);
 
-    private void ShowProgress(bool tsc, bool hrm) => _activity.ShowProgress(tsc, hrm);
-    private void HideProgress() => _activity.HideProgress();
-    private void ReportTsc(int done, int total) => _activity.ReportTsc(done, total);
-    private void ReportHrm(int done, int total) => _activity.ReportHrm(done, total);
+        if (_bellMenu.Visible)
+        {
+            RenderNoticeHistory();
+            return;
+        }
+        _bell.HasUnread = true;
+        if (IsOnScreen) _toast.ShowNotice(message, kind);
+    }
+
+    internal bool IsOnScreen => Visible && WindowState != FormWindowState.Minimized;
+
+    private void OpenNoticeHistory()
+    {
+        _toast.HideNotice();
+        _bell.HasUnread = false;
+        RenderNoticeHistory();
+        ThemedMenuRenderer.ShowBelow(_bellMenu, _bell);
+    }
+
+    // Newest first; long messages are cut in the menu and shown whole in the item tooltip.
+    private void RenderNoticeHistory()
+    {
+        _bellMenu.Items.Clear();
+        if (_notices.Count == 0)
+        {
+            _bellMenu.Items.Add(new ToolStripMenuItem("No notifications yet") { Enabled = false });
+            return;
+        }
+        for (var index = _notices.Count - 1; index >= 0; index--)
+        {
+            var (time, message, kind) = _notices[index];
+            var mark = kind == NoticeKind.Success ? "✓" : kind == NoticeKind.Error ? "✕" : "•";
+            var shortText = message.Length > NoticeMenuMaxChars ? message[..(NoticeMenuMaxChars - 3)] + "..." : message;
+            _bellMenu.Items.Add(new ToolStripMenuItem($"{time:HH:mm}   {mark}  {shortText}")
+            {
+                ToolTipText = message.Length > NoticeMenuMaxChars ? message : null,
+            });
+        }
+    }
+
+    private const int NoticeMenuMaxChars = 80;
 
     // Open the JQL editor for the "My tickets" query; on save, apply it to the live
     // service, persist it, and re-fetch the list with the new query.
@@ -488,10 +617,12 @@ internal sealed class MainForm : Form
 
         _verify.Clear(); // Refresh forces a fresh Jira check for every shown ticket
         _refreshBtn.Enabled = false;
+        _loadingSuggestions = true;
         SetSuggestionStatus("Loading your tickets...");
         try
         {
-            var tickets = await _service.GetMyTicketsAsync(6);
+            var tickets = await _service.GetMyTicketsAsync();
+            _loadingSuggestions = false;
             RenderSuggestions(tickets);
         }
         catch (Exception ex)
@@ -501,6 +632,7 @@ internal sealed class MainForm : Form
         }
         finally
         {
+            _loadingSuggestions = false;
             UpdateActionState();
             UpdateWillLog();
             VerifyTicketsAsync(); // re-verify typed/queued tickets after the cache clear
@@ -518,12 +650,33 @@ internal sealed class MainForm : Form
             return;
         }
 
+        var shown = FilterSuggestions(tickets, _ticketSearch.Text);
+        if (shown.Count == 0)
+        {
+            SetSuggestionStatus("No tickets match the search.");
+            return;
+        }
+
         _suggestionStatus.Text = "";
         var rowWidth = _suggestions.ClientSize.Width - 8;
         if (rowWidth < 100) rowWidth = _suggestions.Width - 12;
+        // Leave room for the vertical scrollbar once the rows overflow the fixed height.
+        if (shown.Count * SuggestionRowPitch > _suggestions.ClientSize.Height)
+            rowWidth -= SystemInformation.VerticalScrollBarWidth;
 
-        foreach (var t in tickets)
+        foreach (var t in shown)
             _suggestions.Controls.Add(CreateSuggestionRow(t, rowWidth));
+    }
+
+    // Case-insensitive match on key or summary; a blank query keeps every ticket.
+    internal static IReadOnlyList<JiraSuggestion> FilterSuggestions(IReadOnlyList<JiraSuggestion> tickets, string query)
+    {
+        var q = query.Trim();
+        if (q.Length == 0) return tickets;
+        return tickets
+            .Where(t => t.Key.Contains(q, StringComparison.OrdinalIgnoreCase)
+                || t.Summary.Contains(q, StringComparison.OrdinalIgnoreCase))
+            .ToList();
     }
 
     // Remove and dispose a container's child rows (Controls.Clear alone would leak
@@ -592,7 +745,7 @@ internal sealed class MainForm : Form
         var row = new ClickableRow
         {
             Width = width,
-            Height = 31,
+            Height = SuggestionRowPitch,
             Margin = new Padding(0),
             BackColor = Theme.InputBg,
             Cursor = Cursors.Hand,
@@ -688,11 +841,18 @@ internal sealed class MainForm : Form
             : due;
     }
 
+    // Picking a suggestion hands focus back to the ticket box, so Enter queues right away.
     private void AddTicketToInput(string key)
     {
         var (existing, _) = TicketParser.Parse(_tickets.Text);
-        if (existing.Contains(key)) return;
-        _tickets.Text = string.Join(", ", existing.Append(key));
+        if (!existing.Contains(key)) _tickets.Text = string.Join(", ", existing.Append(key));
+        FocusTicketInput();
+    }
+
+    private void FocusTicketInput()
+    {
+        _tickets.Focus();
+        _tickets.SelectionStart = _tickets.TextLength;
     }
 
     private void SetSuggestionStatus(string message)
@@ -711,7 +871,7 @@ internal sealed class MainForm : Form
     }
 
     // Render "Will log". It always lists the whole persisted queue (grouped by date, each
-    // headed "(queued for 6 PM)") so the accumulating list stays visible. While typing, the
+    // headed "(queued for <LOG_TIME>)") so the accumulating list stays visible. While typing, the
     // current date's tickets are previewed on top (editable, headed "(not added yet)") so you
     // see what you are about to add without the already-queued rows disappearing. Each row
     // shows a Jira status dot and its time slots; queued rows carry a per-ticket remove [X].
@@ -741,7 +901,7 @@ internal sealed class MainForm : Form
             foreach (var entry in entries)
             {
                 if (!DateOnly.TryParseExact(entry.Date, "yyyy-MM-dd", out var d)) continue;
-                _willLogList.Controls.Add(WillLogText(d.ToString("dddd, MMMM d, yyyy") + "   (queued for 6 PM)", rowWidth));
+                _willLogList.Controls.Add(WillLogText(d.ToString("dddd, MMMM d, yyyy") + $"   (queued for {LogTimeText})", rowWidth));
                 AddTicketRows(entry.Date, entry.Tickets, entry.Minutes, rowWidth);
             }
         }
@@ -965,7 +1125,7 @@ internal sealed class MainForm : Form
         if (invalid.Count > 0) AppendLog($"[queue] Ignored invalid: {string.Join(", ", invalid)}");
         if (tickets.Count == 0)
         {
-            AppendLog("[queue] No valid tickets to queue.");
+            ShowStatus("No valid tickets to queue.", false);
             return;
         }
 
@@ -998,7 +1158,7 @@ internal sealed class MainForm : Form
         TicketQueue.Write(entries.OrderBy(x => x.Date).ToList());
         AppendLog($"[queue] Added {date}: {string.Join(", ", tickets)}");
         _tickets.Text = string.Empty; // clear so "Will log" flips to the list and shows the new row
-        ShowStatus($"Added {tickets.Count} ticket{(tickets.Count == 1 ? "" : "s")} to the list for {date} (auto-logs at 6 PM).", true);
+        ShowStatus($"Added {tickets.Count} ticket{(tickets.Count == 1 ? "" : "s")} to the queue for {date} (auto-logs at {LogTimeText}).", true);
         RefreshQueuedView();
         QueueChanged?.Invoke();
     }
@@ -1021,10 +1181,10 @@ internal sealed class MainForm : Form
     }
 
     // Log the whole queued list now via the tray's guarded drain (DrainRequested). The
-    // drain itself streams progress to the activity console and re-renders on completion.
+    // drain logs its progress to file, pops up the result, and re-renders on completion.
     private void OnLogAllNow(object? sender, EventArgs e)
     {
-        if (_service is null) { AppendLog("[error] Config not loaded; cannot log."); return; }
+        if (_service is null) { ShowStatus("Config not loaded; cannot log.", false); return; }
         if (TicketQueue.Read().Count == 0)
         {
             ShowStatus("Nothing queued to log.", false);
@@ -1035,7 +1195,7 @@ internal sealed class MainForm : Form
         DrainRequested?.Invoke();
     }
 
-    // Read the persisted 6 PM queue and show it (read-only) so it stays visible after
+    // Read the persisted queue and show it (read-only) so it stays visible after
     // a relaunch. The persisted queue is shown by "Will log" itself (it falls back to
     // the queue when the input is empty), so this just re-renders it. Called on
     // queue/clear, when the window activates, and after a drain.
@@ -1062,27 +1222,26 @@ internal sealed class MainForm : Form
             return;
         }
         _date.SetDate(date);
-        _tickets.Focus();
+        FocusTicketInput();
     }
 
     private async void OnLogNow(object? sender, EventArgs e)
     {
-        if (_service is null) { AppendLog("[error] Config not loaded; cannot log."); return; }
+        if (_service is null) { ShowStatus("Config not loaded; cannot log.", false); return; }
         var (tickets, date) = ParseEntry("log");
         if (tickets is null) return;
         if (HrmClosedForToday(date))
         {
-            ShowStatus("HRM can't log today's hours before 6 PM (it rejects future times). Queue it for 6 PM, or use Log TSC.", false);
+            ShowStatus("HRM can't log today's hours before 6 PM (it rejects future times). Add it to the queue instead, or use Log now > TSC only.", false);
             return;
         }
 
-        SetBusy(true);
-        ShowProgress(true, true);
+        SetBusy(true, "Logging to TSC + HRM...");
         try
         {
             AppendLog($"[log] Logging {date:yyyy-MM-dd}: {string.Join(", ", tickets)} ...");
             var token = await _service.AcquireGraphTokenAsync(AppendLog);
-            var result = await _service.LogEntryAsync(date, tickets, token, TypedMinutesFor(tickets), AppendLog, ReportTsc, ReportHrm);
+            var result = await _service.LogEntryAsync(date, tickets, token, TypedMinutesFor(tickets), AppendLog);
             AppendLog($"[log] TSC: {(result.TscSuccess ? "OK" : result.TscError)}");
             AppendLog($"[log] HRM: {(result.HrmSuccess ? "OK" : result.HrmError)}");
             ShowStatus(result.AllSuccess
@@ -1095,20 +1254,19 @@ internal sealed class MainForm : Form
             AppendLog($"[log] Error: {ex.Message}");
             ShowStatus($"Log failed: {ex.Message}", false);
         }
-        finally { SetBusy(false); HideProgress(); }
+        finally { SetBusy(false); }
     }
 
     private async void OnLogTsc(object? sender, EventArgs e)
     {
-        if (_service is null) { AppendLog("[error] Config not loaded; cannot log."); return; }
+        if (_service is null) { ShowStatus("Config not loaded; cannot log.", false); return; }
         var (tickets, date) = ParseEntry("tsc");
         if (tickets is null) return;
 
-        SetBusy(true);
-        ShowProgress(true, false);
+        SetBusy(true, "Logging to TSC...");
         try
         {
-            var (ok, cell, err) = await _service.LogTscAsync(string.Join(", ", tickets), new[] { date }, AppendLog, ReportTsc);
+            var (ok, cell, err) = await _service.LogTscAsync(string.Join(", ", tickets), new[] { date }, AppendLog);
             AppendLog($"[tsc] {(ok ? $"OK ({cell})" : err)}");
             ShowStatus(ok ? $"TSC logged ({cell})." : $"TSC failed: {err}", ok);
         }
@@ -1117,25 +1275,24 @@ internal sealed class MainForm : Form
             AppendLog($"[tsc] Error: {ex.Message}");
             ShowStatus($"TSC failed: {ex.Message}", false);
         }
-        finally { SetBusy(false); HideProgress(); }
+        finally { SetBusy(false); }
     }
 
     private async void OnLogHrm(object? sender, EventArgs e)
     {
-        if (_service is null) { AppendLog("[error] Config not loaded; cannot log."); return; }
+        if (_service is null) { ShowStatus("Config not loaded; cannot log.", false); return; }
         var (tickets, date) = ParseEntry("hrm");
         if (tickets is null) return;
         if (HrmClosedForToday(date))
         {
-            ShowStatus("HRM can't log today's hours before 6 PM (it rejects future times). Queue it for 6 PM instead.", false);
+            ShowStatus("HRM can't log today's hours before 6 PM (it rejects future times). Add it to the queue instead.", false);
             return;
         }
 
-        SetBusy(true);
-        ShowProgress(false, true);
+        SetBusy(true, "Logging to HRM...");
         try
         {
-            var (ok, err) = await _service.LogHrmAsync(tickets, date, TypedMinutesFor(tickets), AppendLog, ReportHrm);
+            var (ok, err) = await _service.LogHrmAsync(tickets, date, TypedMinutesFor(tickets), AppendLog);
             AppendLog($"[hrm] {(ok ? "OK" : err)}");
             ShowStatus(ok ? "HRM logged." : $"HRM failed: {err}", ok);
         }
@@ -1144,14 +1301,14 @@ internal sealed class MainForm : Form
             AppendLog($"[hrm] Error: {ex.Message}");
             ShowStatus($"HRM failed: {ex.Message}", false);
         }
-        finally { SetBusy(false); HideProgress(); }
+        finally { SetBusy(false); }
     }
 
     // The only path that overwrites, hence the confirm: one click, no other input, on a
     // workbook everyone reads.
     private async void OnLogOff(object? sender, EventArgs e)
     {
-        if (_service is null) { AppendLog("[error] Config not loaded; cannot log."); return; }
+        if (_service is null) { ShowStatus("Config not loaded; cannot log.", false); return; }
 
         var date = DateOnly.FromDateTime(_date.Value.Date);
         var answer = MessageBox.Show(this,
@@ -1160,11 +1317,10 @@ internal sealed class MainForm : Form
             "Mark the day off", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         if (answer != DialogResult.Yes) return;
 
-        SetBusy(true);
-        ShowProgress(true, false);
+        SetBusy(true, "Marking the day OFF in TSC...");
         try
         {
-            var result = await _service.LogOffAsync(new[] { date }, AppendLog, ReportTsc);
+            var result = await _service.LogOffAsync(new[] { date }, AppendLog);
             if (result.Success && result.Marked.Count != 0)
             {
                 // Drop the day's queued tickets so the scheduled drain cannot overwrite OFF.
@@ -1188,12 +1344,12 @@ internal sealed class MainForm : Form
             AppendLog($"[off] Error: {ex.Message}");
             ShowStatus($"Log OFF failed: {ex.Message}", false);
         }
-        finally { SetBusy(false); HideProgress(); }
+        finally { SetBusy(false); }
     }
 
     private async void OnCheckTsc(object? sender, EventArgs e)
     {
-        SetBusy(true);
+        SetBusy(true, "Checking TSC session...");
         AppendLog("[tsc] Checking session...");
         try
         {
@@ -1209,7 +1365,7 @@ internal sealed class MainForm : Form
 
     private async void OnReauth(object? sender, EventArgs e)
     {
-        SetBusy(true);
+        SetBusy(true, "Waiting for TSC sign-in in the browser...");
         AppendLog("[tsc] Opening a browser for sign-in...");
         try
         {
@@ -1230,26 +1386,34 @@ internal sealed class MainForm : Form
         if (invalid.Count > 0) AppendLog($"[{tag}] Ignored invalid: {string.Join(", ", invalid)}");
         if (tickets.Count == 0)
         {
-            AppendLog($"[{tag}] No valid tickets.");
+            ShowStatus("No valid tickets.", false);
             return (null, default);
         }
         return (tickets, DateOnly.FromDateTime(_date.Value.Date));
     }
 
+    // The configured daily auto-log time (LOG_TIME), e.g. "6:00 PM".
+    private string LogTimeText =>
+        (_service?.LogTime ?? AppConfig.DefaultLogTime).ToString("h:mm tt", CultureInfo.InvariantCulture);
+
     // HRM rejects future stop times, so today's hours cannot be logged before 18:00 HCM.
     private static bool HrmClosedForToday(DateOnly date) => date == Hcm.Today() && Hcm.Now().Hour < 18;
 
-    private void SetBusy(bool busy)
+    // While busy, a sticky notice says what is running; the result notice replaces it,
+    // and anything still sticky (e.g. the window was hidden meanwhile) is cleared at the end.
+    private void SetBusy(bool busy, string? busyNotice = null)
     {
         _busy = busy;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
+        _logNowBtn.Text = busy ? "Working..." : LogNowText;
+        if (busy && busyNotice != null) _toast.ShowNotice(busyNotice, NoticeKind.Info, sticky: true);
+        if (!busy && _toast.IsSticky) _toast.HideNotice();
         UpdateActionState();
     }
 
     // Enable the ticket-dependent actions only when there is at least one valid ticket
-    // and no operation is in flight. Queue / Log now / Log HRM additionally require valid
-    // hours: each ticket > 0 and the selected day (already-queued + typed) <= 8h; Log TSC
-    // ignores time, so it only needs a ticket.
+    // and no operation is in flight. Add to queue and the TSC + HRM / HRM only log items also
+    // need valid hours (each ticket > 0, the selected day <= 8h); TSC only ignores time.
     private void UpdateActionState()
     {
         var hasTickets = TicketParser.Parse(_tickets.Text).Tickets.Count != 0;
@@ -1257,23 +1421,41 @@ internal sealed class MainForm : Form
         var hoursOk = allPositive && sum <= TimeSlots.TotalWorkMinutes;
 
         _queueBtn.Enabled = !_busy && hasTickets && hoursOk;
-        _logNowBtn.Enabled = !_busy && hasTickets && hoursOk;
-        _logTscBtn.Enabled = !_busy && hasTickets;
-        _logHrmBtn.Enabled = !_busy && hasTickets && hoursOk;
-        _logOffBtn.Enabled = !_busy; // no ticket needed, and a future leave day is fair game
-        _checkBtn.Enabled = !_busy;
-        _reauthBtn.Enabled = !_busy;
+        _logNowBtn.Enabled = !_busy && hasTickets; // TSC only still works when hours are off
+        _logBothItem.Enabled = !_busy && hasTickets && hoursOk;
+        _logTscItem.Enabled = !_busy && hasTickets;
+        _logHrmItem.Enabled = !_busy && hasTickets && hoursOk;
+        _moreBtn.Enabled = !_busy; // Log OFF needs no ticket, and a future leave day is fair game
         _logAllBtn.Enabled = !_busy; // batch drain must not fight an in-flight browser/log op
         _refreshBtn.Enabled = !_busy;
     }
 
     // Re-read the persisted queue each time the window is focused (e.g. reopened from
-    // the tray, or after a 6 PM drain happened while it was hidden).
+    // the tray, or after a scheduled drain happened while it was hidden).
     protected override void OnActivated(EventArgs e)
     {
         base.OnActivated(e);
         _date.SyncToTodayIfAuto();
         RefreshQueuedView();
+    }
+
+    // Every time the window is shown, start in the ticket box so you can type right away.
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible) BeginInvoke(FocusTicketInput);
+    }
+
+    // Esc hides the window to the tray, except while it is clearing a non-empty search.
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        var clearingSearch = _ticketSearch.Focused && _ticketSearch.TextLength != 0;
+        if (keyData == Keys.Escape && !clearingSearch)
+        {
+            Close(); // OnFormClosing turns a user close into hide-to-tray
+            return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
     }
 
     // Hide to tray on the user's X click instead of exiting the process.

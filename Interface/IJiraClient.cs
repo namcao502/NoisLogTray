@@ -5,6 +5,6 @@ namespace NoisLogTray;
 internal interface IJiraClient
 {
     Task<JiraVerifyResult> VerifyTicketAsync(string ticketId, CancellationToken ct = default);
-    Task<IReadOnlyList<JiraSuggestion>> GetMyTicketsAsync(int limit = 5, string? jql = null, CancellationToken ct = default);
+    Task<IReadOnlyList<JiraSuggestion>> GetMyTicketsAsync(string? jql = null, CancellationToken ct = default);
     Task<JqlCheckResult> ValidateJqlAsync(string jql, CancellationToken ct = default);
 }

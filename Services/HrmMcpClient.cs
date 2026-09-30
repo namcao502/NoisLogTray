@@ -61,7 +61,6 @@ internal static class HrmMcpClient
         string projectId,
         IReadOnlyList<int>? minutes = null,
         Action<string>? onLog = null,
-        Action<int, int>? onProgress = null,
         CancellationToken ct = default)
     {
         var isoDate = Hcm.ApiDate(date);
@@ -74,11 +73,6 @@ internal static class HrmMcpClient
         // Custom per-ticket durations when supplied, else the even split.
         IReadOnlyList<TimeSlot> SlotsFor(int index) =>
             minutes is null ? TimeSlots.Get(tickets.Count, index) : TimeSlots.Get(minutes, index);
-
-        // Total sub-units = every ticket's time slots (a lunch-straddling slot splits in two).
-        var total = 0;
-        for (var i = 0; i < tickets.Count; i++) total += SlotsFor(i).Count;
-        var done = 0;
 
         try
         {
@@ -122,8 +116,6 @@ internal static class HrmMcpClient
                         if (env.Code == "LOGTIME_OVERLAP")
                         {
                             Emit($"[hrm-mcp] {ticket} {args["startTime"]}-{args["stopTime"]} already logged (overlap), skipping");
-                            done++;
-                            onProgress?.Invoke(done, total);
                             continue;
                         }
                         // Hard error: record it and move on to the next ticket (skip this
@@ -135,8 +127,6 @@ internal static class HrmMcpClient
                     }
 
                     Emit($"[hrm-mcp] {ticket} {args["startTime"]}-{args["stopTime"]} logged");
-                    done++;
-                    onProgress?.Invoke(done, total);
                 }
             }
 

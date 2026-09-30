@@ -16,5 +16,5 @@ internal static class AppPaths
     // AppConfig.MigrateLegacyEnv folds any leftover .env into it and deletes this file.
     internal static string EnvPath => Path.Combine(DataDirectory, ".env");
 
-    internal static string LogPath => Path.Combine(DataDirectory, "logs", "app.log");
+    internal static string LogDirectory => Path.Combine(DataDirectory, "logs");
 }
