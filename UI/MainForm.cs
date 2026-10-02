@@ -1,5 +1,7 @@
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.Runtime.InteropServices;
 
 namespace NoisLogTray;
 
@@ -84,6 +86,9 @@ internal sealed class MainForm : Form, IMessageFilter
     private readonly Panel _header = new();
     private readonly Label _headerTitle = new();
     private readonly ThemeToggleButton _themeBtn = new();
+    private readonly LanguageToggleButton _langBtn = new();
+    private readonly SettingsButton _settingsBtn = new();
+    private readonly CloseButton _closeBtn = new() { Surface = () => Theme.WindowBg };
     private readonly NotificationBell _bell = new();
     private readonly ContextMenuStrip _bellMenu = ThemedMenuRenderer.CreateMenu();
     private readonly NoticeToast _toast = new();
@@ -98,30 +103,29 @@ internal sealed class MainForm : Form, IMessageFilter
     private readonly ToolTip _tips = new();
     private readonly TextBox _tickets = new();
     private readonly TextBox _ticketSearch = new();
-    private readonly MacButton _queueBtn = MacButton.Primary("Add to queue");
-    private const string LogNowText = "Log now  ▾";
-    private readonly MacButton _logNowBtn = MacButton.Secondary(LogNowText);
+    private readonly MacButton _queueBtn = MacButton.Primary("");
+    private readonly MacButton _logNowBtn = MacButton.Secondary("");
     private readonly MacButton _moreBtn = MacButton.Secondary("⋯");
 
     // Rarely used actions live in dropdowns so "Add to queue" stays the one obvious button.
     private readonly ContextMenuStrip _logNowMenu = ThemedMenuRenderer.CreateMenu();
-    private readonly ToolStripMenuItem _logBothItem = new("TSC + HRM");
-    private readonly ToolStripMenuItem _logTscItem = new("TSC only");
-    private readonly ToolStripMenuItem _logHrmItem = new("HRM only");
+    private readonly ToolStripMenuItem _logBothItem = new();
+    private readonly ToolStripMenuItem _logTscItem = new();
+    private readonly ToolStripMenuItem _logHrmItem = new();
     private readonly ContextMenuStrip _moreMenu = ThemedMenuRenderer.CreateMenu();
-    private readonly ToolStripMenuItem _logOffItem = new("Log OFF...");
-    private readonly ToolStripMenuItem _checkItem = new("Check TSC session");
-    private readonly ToolStripMenuItem _reauthItem = new("Re-authenticate TSC");
-    private readonly MacButton _refreshBtn = MacButton.Secondary("Refresh");
-    private readonly MacButton _jqlBtn = MacButton.Secondary("Edit JQL");
-    private readonly MacButton _clearBtn = MacButton.Secondary("Clear");
+    private readonly ToolStripMenuItem _logOffItem = new();
+    private readonly ToolStripMenuItem _checkItem = new();
+    private readonly ToolStripMenuItem _reauthItem = new();
+    private readonly MacButton _refreshBtn = MacButton.Secondary("");
+    private readonly MacButton _jqlBtn = MacButton.Secondary("");
+    private readonly MacButton _clearBtn = MacButton.Secondary("");
     private readonly FlowLayoutPanel _suggestions = new();
     private readonly Label _suggestionStatus = new();
     private readonly FlowLayoutPanel _willLogList = new();
     private readonly System.Windows.Forms.Timer _verifyTimer = new() { Interval = 500 };
     private readonly Dictionary<string, (VState State, string? Title)> _verify = new();
-    private readonly MacButton _clearQueueBtn = MacButton.Secondary("Clear queue");
-    private readonly MacButton _logAllBtn = MacButton.Secondary("Log queue now");
+    private readonly MacButton _clearQueueBtn = MacButton.Secondary("");
+    private readonly MacButton _logAllBtn = MacButton.Secondary("");
     private readonly Label _hoursHint = new();
 
     // Per typed-ticket HRM minutes while composing an entry. null = the default even
@@ -131,6 +135,12 @@ internal sealed class MainForm : Form, IMessageFilter
     private IReadOnlyList<JiraSuggestion> _lastSuggestions = Array.Empty<JiraSuggestion>();
     private bool _busy;
     private bool _loadingSuggestions;
+
+    // The text behind the suggestion-list status line, re-read on a language switch.
+    private Func<string>? _suggestionStatusText;
+
+    // Section labels with both texts, so ApplyLanguage can re-label them.
+    private readonly List<(Label Label, string English, string Vietnamese)> _sectionLabelTexts = new();
 
     private enum VState { Verifying, Valid, NotFound, Error }
 
@@ -142,6 +152,9 @@ internal sealed class MainForm : Form, IMessageFilter
     // Raised by "Log queue now" so the tray drains the whole queue through its guarded path.
     internal event Action? DrainRequested;
 
+    // Raised by the header gear; the tray owns the Settings dialog (saving rebuilds this window).
+    internal event Action? SettingsRequested;
+
     // Raised with each action's result so the tray shows it as a popup (ok = success).
     internal event Action<string, NoticeKind>? StatusRaised;
 
@@ -149,7 +162,9 @@ internal sealed class MainForm : Form, IMessageFilter
     {
         _service = service;
         BuildLayout();
+        ApplyLanguage();
         Theme.Changed += ApplyTheme;
+        Lang.Changed += ApplyLanguage;
         Application.AddMessageFilter(this);
         RefreshQueuedView(); // also renders the Will log (falls back to the queue)
         if (configError != null) AppendLog($"[config] {configError}");
@@ -161,6 +176,7 @@ internal sealed class MainForm : Form, IMessageFilter
         if (disposing)
         {
             Theme.Changed -= ApplyTheme;
+            Lang.Changed -= ApplyLanguage;
             Application.RemoveMessageFilter(this);
             _bellMenu.Dispose();
             _logNowMenu.Dispose();
@@ -184,8 +200,9 @@ internal sealed class MainForm : Form, IMessageFilter
     {
         Text = "NOIS Daily Log";
         Icon = AppIcon.Load(32);
-        FormBorderStyle = FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
+        // Borderless rounded window drawn by the app (like the Settings card) instead of the
+        // square Windows 10 frame; the header doubles as the title bar.
+        FormBorderStyle = FormBorderStyle.None;
         BackColor = Theme.WindowBg;
         RestoreWindowPosition();
 
@@ -219,6 +236,63 @@ internal sealed class MainForm : Form, IMessageFilter
         AppSettings.Save(settings);
     }
 
+    // ---- Borderless rounded chrome: shadow, taskbar minimize, rounded corners, border, drag.
+
+    private const int WindowRadius = 12;
+
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var cp = base.CreateParams;
+            cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW
+            cp.Style |= 0x00020000;      // WS_MINIMIZEBOX: the taskbar button still minimizes/restores
+            return cp;
+        }
+    }
+
+    protected override void OnSizeChanged(EventArgs e)
+    {
+        base.OnSizeChanged(e);
+        if (ClientSize.Width == 0 || ClientSize.Height == 0) return;
+        using var path = RoundedPath(new Rectangle(0, 0, ClientSize.Width, ClientSize.Height), WindowRadius);
+        Region = new Region(path);
+    }
+
+    private void PaintWindowBorder(object? sender, PaintEventArgs e)
+    {
+        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        using var path = RoundedPath(new Rectangle(0, 0, _body.Width - 1, _body.Height - 1), WindowRadius);
+        using var pen = new Pen(Theme.CardBorder, 1f);
+        e.Graphics.DrawPath(pen, path);
+    }
+
+    [DllImport("user32.dll")]
+    private static extern bool ReleaseCapture();
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+    // Hand the drag to Windows as a title-bar drag; ResizeEnd then saves the new position.
+    private void DragWindow(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        ReleaseCapture();
+        SendMessage(Handle, 0xA1 /* WM_NCLBUTTONDOWN */, (IntPtr)2 /* HTCAPTION */, IntPtr.Zero);
+    }
+
+    private static GraphicsPath RoundedPath(Rectangle r, int radius)
+    {
+        var d = radius * 2;
+        var path = new GraphicsPath();
+        path.AddArc(r.X, r.Y, d, d, 180, 90);
+        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
+
     protected override void OnResizeEnd(EventArgs e)
     {
         base.OnResizeEnd(e);
@@ -229,6 +303,8 @@ internal sealed class MainForm : Form, IMessageFilter
     {
         _body.Dock = DockStyle.Fill;
         _body.BackColor = Theme.WindowBg;
+        _body.Paint += PaintWindowBorder;
+        _body.MouseDown += DragWindow;
         _body.AutoScroll = false; // main window never scrolls
 
         var y = 14;
@@ -275,15 +351,34 @@ internal sealed class MainForm : Form, IMessageFilter
 
         _themeBtn.OnWindow = true;
         _themeBtn.Size = new Size(BtnH, BtnH);
-        _themeBtn.Location = new Point(CardW - BtnH, 9);
+        // Right to left: close (hide to tray), then a wider gap, settings, language, theme, bell.
+        _closeBtn.Size = new Size(BtnH, BtnH);
+        _closeBtn.Location = new Point(CardW - BtnH, 9);
+        _closeBtn.Click += (_, _) => Close(); // OnFormClosing turns this into hide-to-tray
+
+        const int toolsRight = CardW - BtnH - 12;
+        _settingsBtn.Size = new Size(BtnH, BtnH);
+        _settingsBtn.Location = new Point(toolsRight - BtnH, 9);
+        _settingsBtn.Click += (_, _) => SettingsRequested?.Invoke();
+
+        _langBtn.Size = new Size(BtnH, BtnH);
+        _langBtn.Location = new Point(toolsRight - 2 * BtnH - BtnGap, 9);
+
+        _themeBtn.Location = new Point(toolsRight - 3 * BtnH - 2 * BtnGap, 9);
 
         _bell.Size = new Size(BtnH, BtnH);
-        _bell.Location = new Point(CardW - 2 * BtnH - BtnGap, 9);
+        _bell.Location = new Point(toolsRight - 4 * BtnH - 3 * BtnGap, 9);
         _bell.Click += (_, _) => OpenNoticeHistory();
-        _tips.SetToolTip(_bell, "Notifications");
+
+        // There is no title bar, so the header (and its title) drags the window.
+        _header.MouseDown += DragWindow;
+        _headerTitle.MouseDown += DragWindow;
 
         _header.Controls.Add(_headerTitle);
         _header.Controls.Add(_themeBtn);
+        _header.Controls.Add(_langBtn);
+        _header.Controls.Add(_settingsBtn);
+        _header.Controls.Add(_closeBtn);
         _header.Controls.Add(_bell);
         return _header;
     }
@@ -291,18 +386,18 @@ internal sealed class MainForm : Form, IMessageFilter
     private Card BuildMyTicketsCard()
     {
         var card = new Card { Size = new Size(CardW, CardBodyY + 204 + 16) };
-        var myTicketsLabel = SectionLabel("MY TICKETS", 16, 14);
-        card.Controls.Add(myTicketsLabel);
+        card.Controls.Add(SectionLabel("MY TICKETS", "TICKET CỦA TÔI", 16, 14));
 
-        // Quick filter over the loaded list, between the section label and the buttons.
-        var searchX = 16 + myTicketsLabel.PreferredWidth + 8;
+        // Quick filter over the loaded list, between the section label and the buttons; it
+        // starts after the wider of the two label texts so a language switch never overlaps.
+        var labelWidth = Math.Max(TextRenderer.MeasureText("MY TICKETS", SectionFont).Width,
+            TextRenderer.MeasureText("TICKET CỦA TÔI", SectionFont).Width);
+        var searchX = 16 + labelWidth + 8;
         var searchHost = new RoundedHost { Location = new Point(searchX, ToolbarY), Size = new Size(16 + InnerW - 2 * (ToolbarBtnW + BtnGap) - searchX, BtnH) };
         _ticketSearch.BorderStyle = BorderStyle.None;
         _ticketSearch.Font = new Font("Segoe UI", 9F);
         _ticketSearch.BackColor = Theme.InputBg;
         _ticketSearch.ForeColor = Theme.TextPrimary;
-        _ticketSearch.PlaceholderText = "Search, then click a row to add";
-        _ticketSearch.AccessibleName = "Search my tickets";
         _ticketSearch.TextChanged += (_, _) =>
         {
             if (!_loadingSuggestions) RenderSuggestions(_lastSuggestions); // keep "Loading..." visible
@@ -353,7 +448,7 @@ internal sealed class MainForm : Form, IMessageFilter
     private Card BuildWillLogCard()
     {
         var card = new Card { Size = new Size(CardW, CardBodyY + WillLogHostH + 12) };
-        card.Controls.Add(SectionLabel("QUEUE", 16, 14));
+        card.Controls.Add(SectionLabel("QUEUE", "HÀNG ĐỢI", 16, 14));
 
         // Running total / validation hint, right-aligned in the header (typed view only).
         _hoursHint.AutoSize = false;
@@ -402,22 +497,20 @@ internal sealed class MainForm : Form, IMessageFilter
     private Card BuildNewEntryCard()
     {
         var card = new Card { Size = new Size(CardW, 96 + BtnH + 16) };
-        card.Controls.Add(SectionLabel("NEW ENTRY", 16, 14));
+        card.Controls.Add(SectionLabel("NEW ENTRY", "NHẬP MỚI", 16, 14));
 
-        card.Controls.Add(SectionLabel("DATE", 16, 40));
-        card.Controls.Add(SectionLabel("TICKET", 214, 40));
+        card.Controls.Add(SectionLabel("DATE", "NGÀY", 16, 40));
+        card.Controls.Add(SectionLabel("TICKET", "TICKET", 214, 40));
 
         _date.Location = new Point(16, 58);
         _date.Size = new Size(190, BtnH);
         _date.ValueChanged += (_, _) => { UpdateWillLog(); VerifyTicketsAsync(); };
-        _tips.SetToolTip(_date, "Dates and the daily auto-log use Vietnam time (Asia/Ho_Chi_Minh, UTC+7).");
 
         var ticketHost = new RoundedHost { Location = new Point(214, 58), Size = new Size(262, BtnH) };
         _tickets.BorderStyle = BorderStyle.None;
         _tickets.Font = new Font("Segoe UI", 9.5F);
         _tickets.BackColor = Theme.InputBg;
         _tickets.ForeColor = Theme.TextPrimary;
-        _tickets.PlaceholderText = "e.g. 1234, 5678  (MDP- optional)";
         _tickets.TextChanged += (_, _) => { _typedMinutes = null; UpdateWillLog(); UpdateActionState(); _verifyTimer.Stop(); _verifyTimer.Start(); };
         _tickets.Leave += (_, _) => { _verifyTimer.Stop(); VerifyTicketsAsync(); };
         var ticketH = _tickets.PreferredHeight;
@@ -443,15 +536,11 @@ internal sealed class MainForm : Form, IMessageFilter
 
         _logNowBtn.Size = new Size(logNowW, BtnH);
         _logNowBtn.Location = new Point(16 + queueW + BtnGap, 96);
-        _logNowBtn.AccessibleName = "Log now menu";
         _logNowBtn.Click += (_, _) => ThemedMenuRenderer.ShowBelow(_logNowMenu, _logNowBtn);
-        _tips.SetToolTip(_logNowBtn, "Log the typed tickets right away instead of waiting for the scheduled run.");
 
         _moreBtn.Size = new Size(moreW, BtnH);
         _moreBtn.Location = new Point(16 + InnerW - moreW, 96);
-        _moreBtn.AccessibleName = "More actions";
         _moreBtn.Click += (_, _) => ThemedMenuRenderer.ShowBelow(_moreMenu, _moreBtn);
-        _tips.SetToolTip(_moreBtn, "More actions: Log OFF, TSC session");
 
         _logBothItem.Click += OnLogNow;
         _logTscItem.Click += OnLogTsc;
@@ -460,8 +549,6 @@ internal sealed class MainForm : Form, IMessageFilter
         _logNowMenu.Opening += (_, _) => UpdateLogNowMenu();
 
         _logOffItem.Click += OnLogOff;
-        _logOffItem.ToolTipText =
-            $"Write \"{TscCells.OffMarker}\" on a yellow background to TSC for the selected date (no HRM hours).";
         _checkItem.Click += OnCheckTsc;
         _reauthItem.Click += OnReauth;
         _moreMenu.Items.AddRange(new ToolStripItem[] { _logOffItem, new ToolStripSeparator(), _checkItem, _reauthItem });
@@ -472,11 +559,11 @@ internal sealed class MainForm : Form, IMessageFilter
         return card;
     }
 
-    private Label SectionLabel(string text, int x, int y)
+    private Label SectionLabel(string english, string vietnamese, int x, int y)
     {
         var label = new Label
         {
-            Text = text,
+            Text = Lang.T(english, vietnamese),
             AutoSize = true,
             Location = new Point(x, y),
             Font = SectionFont,
@@ -484,8 +571,63 @@ internal sealed class MainForm : Form, IMessageFilter
             BackColor = Color.Transparent,
         };
         _sectionLabels.Add(label);
+        _sectionLabelTexts.Add((label, english, vietnamese));
         return label;
     }
+
+    // Set every fixed text for the current language, then re-render the dynamic lists.
+    // Runs once after the layout is built and again on each Lang.Changed.
+    private void ApplyLanguage()
+    {
+        foreach (var (label, english, vietnamese) in _sectionLabelTexts) label.Text = Lang.T(english, vietnamese);
+
+        _queueBtn.Text = Lang.T("Add to queue", "Thêm vào hàng đợi");
+        _logNowBtn.Text = _busy ? BusyText : LogNowText;
+        _logNowBtn.AccessibleName = Lang.T("Log now menu", "Menu log ngay");
+        _moreBtn.AccessibleName = Lang.T("More actions", "Thao tác khác");
+        _refreshBtn.Text = Lang.T("Refresh", "Làm mới");
+        _jqlBtn.Text = Lang.T("Edit JQL", "Sửa JQL");
+        _clearBtn.Text = Lang.T("Clear", "Xóa");
+        _clearQueueBtn.Text = Lang.T("Clear queue", "Xóa hàng đợi");
+        _logAllBtn.Text = Lang.T("Log queue now", "Log cả hàng đợi");
+
+        _logTscItem.Text = Lang.T("TSC only", "Chỉ TSC");
+        UpdateLogNowMenu(); // TSC + HRM / HRM only carry the 6 PM suffix
+        _logOffItem.Text = Lang.T("Log OFF...", "Đánh dấu nghỉ (OFF)...");
+        _logOffItem.ToolTipText = Lang.T(
+            $"Write \"{TscCells.OffMarker}\" on a yellow background to TSC for the selected date (no HRM hours).",
+            $"Ghi \"{TscCells.OffMarker}\" nền vàng vào TSC cho ngày đã chọn (không ghi giờ HRM).");
+        _checkItem.Text = Lang.T("Check TSC session", "Kiểm tra phiên TSC");
+        _reauthItem.Text = Lang.T("Re-authenticate TSC", "Đăng nhập lại TSC");
+
+        _tickets.PlaceholderText = Lang.T("e.g. 1234, 5678  (MDP- optional)", "vd. 1234, 5678  (không cần MDP-)");
+        _ticketSearch.PlaceholderText = Lang.T("Search, then click a row to add", "Tìm, rồi bấm một dòng để thêm");
+        _ticketSearch.AccessibleName = Lang.T("Search my tickets", "Tìm ticket của tôi");
+
+        _tips.SetToolTip(_bell, Lang.T("Notifications", "Thông báo"));
+        _tips.SetToolTip(_themeBtn, Lang.T("Light / dark theme", "Giao diện sáng / tối"));
+        _tips.SetToolTip(_langBtn, Lang.T("Switch to Vietnamese", "Chuyển sang tiếng Anh"));
+        _tips.SetToolTip(_settingsBtn, Lang.T("Settings", "Cài đặt"));
+        _tips.SetToolTip(_closeBtn, Lang.T("Hide to tray", "Ẩn xuống khay"));
+        _closeBtn.AccessibleName = Lang.T("Hide to tray", "Ẩn xuống khay");
+        _tips.SetToolTip(_date, Lang.T(
+            "Dates and the daily auto-log use Vietnam time (Asia/Ho_Chi_Minh, UTC+7).",
+            "Ngày và giờ tự log hằng ngày theo giờ Việt Nam (Asia/Ho_Chi_Minh, UTC+7)."));
+        _tips.SetToolTip(_logNowBtn, Lang.T(
+            "Log the typed tickets right away instead of waiting for the scheduled run.",
+            "Log ngay các ticket đã nhập thay vì chờ tới giờ tự log."));
+        _tips.SetToolTip(_moreBtn, Lang.T("More actions: Log OFF, TSC session", "Thao tác khác: đánh dấu nghỉ, phiên TSC"));
+
+        if (_suggestionStatusText != null && _suggestionStatus.Text.Length != 0)
+            _suggestionStatus.Text = _suggestionStatusText();
+        else if (!_loadingSuggestions)
+            RenderSuggestions(_lastSuggestions);
+        UpdateWillLog();
+        if (_bellMenu.Visible) RenderNoticeHistory();
+    }
+
+    private static string LogNowText => Lang.T("Log now  ▾", "Log ngay  ▾");
+    private static string BusyText => Lang.T("Working...", "Đang chạy...");
 
     // Re-apply theme colors to the native controls (custom controls repaint
     // themselves via Theme.Changed) and re-render the suggestion rows.
@@ -566,22 +708,34 @@ internal sealed class MainForm : Form, IMessageFilter
         _bellMenu.Items.Clear();
         if (_notices.Count == 0)
         {
-            _bellMenu.Items.Add(new ToolStripMenuItem("No notifications yet") { Enabled = false });
+            _bellMenu.Items.Add(new ToolStripMenuItem(Lang.T("No notifications yet", "Chưa có thông báo")) { Enabled = false });
             return;
         }
+        // The menu opens right-aligned under the bell, so it may span from the bell's right
+        // edge back to the window's left margin, less the menu's own item padding (~50px).
+        var bellRight = PointToClient(_bell.PointToScreen(new Point(_bell.Width, 0))).X;
+        var maxTextWidth = bellRight - 20 - 50;
         for (var index = _notices.Count - 1; index >= 0; index--)
         {
             var (time, message, kind) = _notices[index];
             var mark = kind == NoticeKind.Success ? "✓" : kind == NoticeKind.Error ? "✕" : "•";
-            var shortText = message.Length > NoticeMenuMaxChars ? message[..(NoticeMenuMaxChars - 3)] + "..." : message;
-            _bellMenu.Items.Add(new ToolStripMenuItem($"{time:HH:mm}   {mark}  {shortText}")
+            var prefix = $"{time:HH:mm}   {mark}  ";
+            var text = FitToWidth(prefix + message, _bellMenu.Font, maxTextWidth);
+            _bellMenu.Items.Add(new ToolStripMenuItem(text)
             {
-                ToolTipText = message.Length > NoticeMenuMaxChars ? message : null,
+                ToolTipText = text.Length < prefix.Length + message.Length ? message : null,
             });
         }
     }
 
-    private const int NoticeMenuMaxChars = 80;
+    // Cut text with "..." so it renders within maxWidth pixels.
+    private static string FitToWidth(string text, Font font, int maxWidth)
+    {
+        if (TextRenderer.MeasureText(text, font).Width <= maxWidth) return text;
+        var length = text.Length;
+        while (length > 1 && TextRenderer.MeasureText(text[..length] + "...", font).Width > maxWidth) length--;
+        return text[..length].TrimEnd() + "...";
+    }
 
     // Open the JQL editor for the "My tickets" query; on save, apply it to the live
     // service, persist it, and re-fetch the list with the new query.
@@ -589,7 +743,7 @@ internal sealed class MainForm : Form, IMessageFilter
     {
         if (_service is null)
         {
-            SetSuggestionStatus("Config not loaded; cannot edit query.");
+            SetSuggestionStatus(() => Lang.T("Config not loaded; cannot edit query.", "Chưa có cấu hình; không sửa được truy vấn."));
             return;
         }
 
@@ -607,14 +761,14 @@ internal sealed class MainForm : Form, IMessageFilter
     {
         if (_service is null)
         {
-            SetSuggestionStatus("Config not loaded; cannot fetch tickets.");
+            SetSuggestionStatus(() => Lang.T("Config not loaded; cannot fetch tickets.", "Chưa có cấu hình; không tải được ticket."));
             return;
         }
 
         _verify.Clear(); // Refresh forces a fresh Jira check for every shown ticket
         _refreshBtn.Enabled = false;
         _loadingSuggestions = true;
-        SetSuggestionStatus("Loading your tickets...");
+        SetSuggestionStatus(() => Lang.T("Loading your tickets...", "Đang tải ticket của bạn..."));
         try
         {
             var tickets = await _service.GetMyTicketsAsync();
@@ -623,7 +777,7 @@ internal sealed class MainForm : Form, IMessageFilter
         }
         catch (Exception ex)
         {
-            SetSuggestionStatus($"Could not load tickets: {ex.Message}");
+            SetSuggestionStatus(() => Lang.T($"Could not load tickets: {ex.Message}", $"Không tải được ticket: {ex.Message}"));
             AppendLog($"[jira] my-tickets error: {ex.Message}");
         }
         finally
@@ -642,14 +796,14 @@ internal sealed class MainForm : Form, IMessageFilter
         ClearRows(_suggestions);
         if (tickets.Count == 0)
         {
-            SetSuggestionStatus("No open tickets found.");
+            SetSuggestionStatus(() => Lang.T("No open tickets found.", "Không có ticket nào đang mở."));
             return;
         }
 
         var shown = FilterSuggestions(tickets, _ticketSearch.Text);
         if (shown.Count == 0)
         {
-            SetSuggestionStatus("No tickets match the search.");
+            SetSuggestionStatus(() => Lang.T("No tickets match the search.", "Không có ticket nào khớp."));
             return;
         }
 
@@ -735,7 +889,7 @@ internal sealed class MainForm : Form, IMessageFilter
         var color = DueColor(ticket.DueDate);
         var dueLabel = FormatDue(ticket.DueDate);
         var accessibleName = dueLabel.Length != 0
-            ? $"{ticket.Key}, {ticket.Summary}, due {dueLabel}"
+            ? $"{ticket.Key}, {ticket.Summary}, {Lang.T("due", "hạn")} {dueLabel}"
             : $"{ticket.Key}, {ticket.Summary}";
 
         var row = new ClickableRow
@@ -828,12 +982,12 @@ internal sealed class MainForm : Form, IMessageFilter
         return row;
     }
 
-    // Format a Jira ISO due date ("yyyy-MM-dd") as a short "MMM d" label; empty when unset.
+    // Format a Jira ISO due date ("yyyy-MM-dd") as a short label ("Oct 1" / "01/10"); empty when unset.
     private static string FormatDue(string? due)
     {
         if (string.IsNullOrWhiteSpace(due)) return "";
         return DateTime.TryParse(due, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt)
-            ? dt.ToString("MMM d", CultureInfo.InvariantCulture)
+            ? Lang.ShortDate(dt)
             : due;
     }
 
@@ -851,10 +1005,11 @@ internal sealed class MainForm : Form, IMessageFilter
         _tickets.SelectionStart = _tickets.TextLength;
     }
 
-    private void SetSuggestionStatus(string message)
+    private void SetSuggestionStatus(Func<string> message)
     {
         ClearRows(_suggestions);
-        _suggestionStatus.Text = message;
+        _suggestionStatusText = message;
+        _suggestionStatus.Text = message();
     }
 
     // The distinct tickets currently shown in "Will log" (for Jira verification):
@@ -887,7 +1042,7 @@ internal sealed class MainForm : Form, IMessageFilter
         if (composing)
         {
             var minutes = TypedMinutes(typed.Count);
-            _willLogList.Controls.Add(WillLogText(_date.Value.ToString("dddd, MMMM d, yyyy") + "   (not added yet)", rowWidth));
+            _willLogList.Controls.Add(WillLogText(Lang.LongDate(_date.Value) + Lang.T("   (not added yet)", "   (chưa thêm)"), rowWidth));
             AddEditableTicketRows(typed, minutes, rowWidth);
         }
 
@@ -897,13 +1052,13 @@ internal sealed class MainForm : Form, IMessageFilter
             foreach (var entry in entries)
             {
                 if (!DateOnly.TryParseExact(entry.Date, "yyyy-MM-dd", out var d)) continue;
-                _willLogList.Controls.Add(WillLogText(d.ToString("dddd, MMMM d, yyyy") + $"   (queued for {LogTimeText})", rowWidth));
+                _willLogList.Controls.Add(WillLogText(Lang.LongDate(d.ToDateTime(TimeOnly.MinValue)) + Lang.T($"   (queued for {LogTimeText})", $"   (tự log lúc {LogTimeText})"), rowWidth));
                 AddTicketRows(entry.Date, entry.Tickets, entry.Minutes, rowWidth);
             }
         }
         else if (!composing)
         {
-            _willLogList.Controls.Add(WillLogText("Enter a ticket above to preview what will be logged.", rowWidth));
+            _willLogList.Controls.Add(WillLogText(Lang.T("Enter a ticket above to preview what will be logged.", "Nhập ticket ở trên để xem trước những gì sẽ được log."), rowWidth));
         }
 
         // Queue-wide buttons show only when not composing: they act on the whole queue and
@@ -951,12 +1106,12 @@ internal sealed class MainForm : Form, IMessageFilter
         _hoursHint.Visible = true;
         if (!allPositive)
         {
-            _hoursHint.Text = "each ticket needs > 0h";
+            _hoursHint.Text = Lang.T("each ticket needs > 0h", "mỗi ticket cần > 0h");
             _hoursHint.ForeColor = Color.FromArgb(230, 76, 76);
         }
         else if (sum > TimeSlots.TotalWorkMinutes)
         {
-            _hoursHint.Text = $"{sum / 60.0:0.#}h - over 8h, trim";
+            _hoursHint.Text = Lang.T($"{sum / 60.0:0.#}h - over 8h, trim", $"{sum / 60.0:0.#}h - quá 8h, giảm bớt");
             _hoursHint.ForeColor = Color.FromArgb(230, 76, 76);
         }
         else
@@ -1045,7 +1200,7 @@ internal sealed class MainForm : Form, IMessageFilter
             Slots = SlotText(slots),
             DotColor = DotColorFor(key),
         };
-        row.SetRemoveAccessibleName($"Remove {key} on {date}");
+        row.SetRemoveAccessibleName(Lang.T($"Remove {key} on {date}", $"Xóa {key} ngày {date}"));
         row.RemoveClicked += () => RemoveQueuedTicket(date, key);
         return row;
     }
@@ -1121,14 +1276,14 @@ internal sealed class MainForm : Form, IMessageFilter
         if (invalid.Count > 0) AppendLog($"[queue] Ignored invalid: {string.Join(", ", invalid)}");
         if (tickets.Count == 0)
         {
-            ShowStatus("No valid tickets to queue.", false);
+            ShowStatus(Lang.T("No valid tickets to queue.", "Không có ticket hợp lệ để thêm."), false);
             return;
         }
 
         var (sum, allPositive) = TypedMinuteStats();
         if (!allPositive || sum > TimeSlots.TotalWorkMinutes)
         {
-            ShowStatus("Fix the hours first: each ticket needs > 0h and the day can't exceed 8h.", false);
+            ShowStatus(Lang.T("Fix the hours first: each ticket needs > 0h and the day can't exceed 8h.", "Sửa giờ trước: mỗi ticket cần > 0h và cả ngày không quá 8h."), false);
             return;
         }
 
@@ -1141,7 +1296,7 @@ internal sealed class MainForm : Form, IMessageFilter
             var merged = TicketQueue.MergeInto(entries[idx], tickets, newMinutes);
             if (TicketQueue.DayMinutes(merged) > TimeSlots.TotalWorkMinutes)
             {
-                ShowStatus($"That would exceed 8h for {date}. Trim the hours before queueing.", false);
+                ShowStatus(Lang.T($"That would exceed 8h for {date}. Trim the hours before queueing.", $"Ngày {date} sẽ vượt 8h. Giảm bớt giờ trước khi thêm."), false);
                 return;
             }
             entries[idx] = merged;
@@ -1154,7 +1309,8 @@ internal sealed class MainForm : Form, IMessageFilter
         TicketQueue.Write(entries.OrderBy(x => x.Date).ToList());
         AppendLog($"[queue] Added {date}: {string.Join(", ", tickets)}");
         _tickets.Text = string.Empty; // clear so "Will log" flips to the list and shows the new row
-        ShowStatus($"Added {tickets.Count} ticket{(tickets.Count == 1 ? "" : "s")} to the queue for {date} (auto-logs at {LogTimeText}).", true);
+        ShowStatus(Lang.T($"Added {tickets.Count} ticket{(tickets.Count == 1 ? "" : "s")} to the queue for {date} (auto-logs at {LogTimeText}).",
+            $"Đã thêm {tickets.Count} ticket vào hàng đợi ngày {date} (tự log lúc {LogTimeText})."), true);
         RefreshQueuedView();
         QueueChanged?.Invoke();
     }
@@ -1163,7 +1319,7 @@ internal sealed class MainForm : Form, IMessageFilter
     {
         TicketQueue.Write(Array.Empty<QueueEntry>());
         RefreshQueuedView();
-        ShowStatus("Queue cleared.", true);
+        ShowStatus(Lang.T("Queue cleared.", "Đã xóa hàng đợi."), true);
         QueueChanged?.Invoke();
     }
 
@@ -1172,7 +1328,7 @@ internal sealed class MainForm : Form, IMessageFilter
     {
         TicketQueue.RemoveTicket(date, ticket);
         RefreshQueuedView();
-        ShowStatus($"Removed {ticket} from {date}.", true);
+        ShowStatus(Lang.T($"Removed {ticket} from {date}.", $"Đã xóa {ticket} khỏi ngày {date}."), true);
         QueueChanged?.Invoke();
     }
 
@@ -1180,16 +1336,16 @@ internal sealed class MainForm : Form, IMessageFilter
     // drain logs its progress to file, pops up the result, and re-renders on completion.
     private void OnLogAllNow(object? sender, EventArgs e)
     {
-        if (_service is null) { ShowStatus("Config not loaded; cannot log.", false); return; }
+        if (_service is null) { ShowStatus(Lang.T("Config not loaded; cannot log.", "Chưa có cấu hình; không log được."), false); return; }
         if (TicketQueue.Read().Count == 0)
         {
-            ShowStatus("Nothing queued to log.", false);
+            ShowStatus(Lang.T("Nothing queued to log.", "Hàng đợi trống, không có gì để log."), false);
             return;
         }
         _logAllBtn.Enabled = false;
         AppendLog("[log] Logging the whole queued list now...");
         // Sticky until the drain's result notice (always raised for a user drain) replaces it.
-        _toast.ShowNotice("Logging the queue...", NoticeKind.Info, sticky: true);
+        _toast.ShowNotice(Lang.T("Logging the queue...", "Đang log hàng đợi..."), NoticeKind.Info, sticky: true);
         DrainRequested?.Invoke();
     }
 
@@ -1225,16 +1381,17 @@ internal sealed class MainForm : Form, IMessageFilter
 
     private async void OnLogNow(object? sender, EventArgs e)
     {
-        if (_service is null) { ShowStatus("Config not loaded; cannot log.", false); return; }
+        if (_service is null) { ShowStatus(Lang.T("Config not loaded; cannot log.", "Chưa có cấu hình; không log được."), false); return; }
         var (tickets, date) = ParseEntry("log");
         if (tickets is null) return;
         if (HrmClosedForToday(date))
         {
-            ShowStatus("HRM can't log today's hours before 6 PM (it rejects future times). Add it to the queue instead, or use Log now > TSC only.", false);
+            ShowStatus(Lang.T("HRM can't log today's hours before 6 PM (it rejects future times). Add it to the queue instead, or use Log now > TSC only.",
+                "HRM không nhận giờ hôm nay trước 6 PM (không cho giờ tương lai). Hãy thêm vào hàng đợi, hoặc dùng Log ngay > Chỉ TSC."), false);
             return;
         }
 
-        SetBusy(true, "Logging to TSC + HRM...");
+        SetBusy(true, Lang.T("Logging to TSC + HRM...", "Đang log vào TSC + HRM..."));
         try
         {
             AppendLog($"[log] Logging {date:yyyy-MM-dd}: {string.Join(", ", tickets)} ...");
@@ -1243,61 +1400,62 @@ internal sealed class MainForm : Form, IMessageFilter
             AppendLog($"[log] TSC: {(result.TscSuccess ? "OK" : result.TscError)}");
             AppendLog($"[log] HRM: {(result.HrmSuccess ? "OK" : result.HrmError)}");
             ShowStatus(result.AllSuccess
-                ? $"Logged {date:yyyy-MM-dd} to TSC + HRM."
-                : $"Partly failed - TSC: {(result.TscSuccess ? "OK" : result.TscError)}; HRM: {(result.HrmSuccess ? "OK" : result.HrmError)}",
+                ? Lang.T($"Logged {date:yyyy-MM-dd} to TSC + HRM.", $"Đã log ngày {date:yyyy-MM-dd} vào TSC + HRM.")
+                : Lang.T("Partly failed", "Lỗi một phần") + $" - TSC: {(result.TscSuccess ? "OK" : result.TscError)}; HRM: {(result.HrmSuccess ? "OK" : result.HrmError)}",
                 result.AllSuccess);
         }
         catch (Exception ex)
         {
             AppendLog($"[log] Error: {ex.Message}");
-            ShowStatus($"Log failed: {ex.Message}", false);
+            ShowStatus(Lang.T($"Log failed: {ex.Message}", $"Log thất bại: {ex.Message}"), false);
         }
         finally { SetBusy(false); }
     }
 
     private async void OnLogTsc(object? sender, EventArgs e)
     {
-        if (_service is null) { ShowStatus("Config not loaded; cannot log.", false); return; }
+        if (_service is null) { ShowStatus(Lang.T("Config not loaded; cannot log.", "Chưa có cấu hình; không log được."), false); return; }
         var (tickets, date) = ParseEntry("tsc");
         if (tickets is null) return;
 
-        SetBusy(true, "Logging to TSC...");
+        SetBusy(true, Lang.T("Logging to TSC...", "Đang log vào TSC..."));
         try
         {
             var (ok, cell, err) = await _service.LogTscAsync(string.Join(", ", tickets), new[] { date }, AppendLog);
             AppendLog($"[tsc] {(ok ? $"OK ({cell})" : err)}");
-            ShowStatus(ok ? $"TSC logged ({cell})." : $"TSC failed: {err}", ok);
+            ShowStatus(ok ? Lang.T($"TSC logged ({cell}).", $"Đã log TSC ({cell}).") : Lang.T($"TSC failed: {err}", $"TSC lỗi: {err}"), ok);
         }
         catch (Exception ex)
         {
             AppendLog($"[tsc] Error: {ex.Message}");
-            ShowStatus($"TSC failed: {ex.Message}", false);
+            ShowStatus(Lang.T($"TSC failed: {ex.Message}", $"TSC lỗi: {ex.Message}"), false);
         }
         finally { SetBusy(false); }
     }
 
     private async void OnLogHrm(object? sender, EventArgs e)
     {
-        if (_service is null) { ShowStatus("Config not loaded; cannot log.", false); return; }
+        if (_service is null) { ShowStatus(Lang.T("Config not loaded; cannot log.", "Chưa có cấu hình; không log được."), false); return; }
         var (tickets, date) = ParseEntry("hrm");
         if (tickets is null) return;
         if (HrmClosedForToday(date))
         {
-            ShowStatus("HRM can't log today's hours before 6 PM (it rejects future times). Add it to the queue instead.", false);
+            ShowStatus(Lang.T("HRM can't log today's hours before 6 PM (it rejects future times). Add it to the queue instead.",
+                "HRM không nhận giờ hôm nay trước 6 PM (không cho giờ tương lai). Hãy thêm vào hàng đợi."), false);
             return;
         }
 
-        SetBusy(true, "Logging to HRM...");
+        SetBusy(true, Lang.T("Logging to HRM...", "Đang log vào HRM..."));
         try
         {
             var (ok, err) = await _service.LogHrmAsync(tickets, date, TypedMinutesFor(tickets), AppendLog);
             AppendLog($"[hrm] {(ok ? "OK" : err)}");
-            ShowStatus(ok ? "HRM logged." : $"HRM failed: {err}", ok);
+            ShowStatus(ok ? Lang.T("HRM logged.", "Đã log HRM.") : Lang.T($"HRM failed: {err}", $"HRM lỗi: {err}"), ok);
         }
         catch (Exception ex)
         {
             AppendLog($"[hrm] Error: {ex.Message}");
-            ShowStatus($"HRM failed: {ex.Message}", false);
+            ShowStatus(Lang.T($"HRM failed: {ex.Message}", $"HRM lỗi: {ex.Message}"), false);
         }
         finally { SetBusy(false); }
     }
@@ -1306,16 +1464,18 @@ internal sealed class MainForm : Form, IMessageFilter
     // workbook everyone reads.
     private async void OnLogOff(object? sender, EventArgs e)
     {
-        if (_service is null) { ShowStatus("Config not loaded; cannot log.", false); return; }
+        if (_service is null) { ShowStatus(Lang.T("Config not loaded; cannot log.", "Chưa có cấu hình; không log được."), false); return; }
 
         var date = DateOnly.FromDateTime(_date.Value.Date);
         var answer = MessageBox.Show(this,
-            $"Write \"{TscCells.OffMarker}\" to TSC for {date:dddd, MMMM d, yyyy}?\n\n"
-                + "Anything already in that day's cells will be replaced, and any queued tickets for it dropped.",
-            "Mark the day off", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+            Lang.T($"Write \"{TscCells.OffMarker}\" to TSC for {Lang.LongDate(_date.Value.Date)}?\n\n"
+                    + "Anything already in that day's cells will be replaced, and any queued tickets for it dropped.",
+                $"Ghi \"{TscCells.OffMarker}\" vào TSC cho {Lang.LongDate(_date.Value.Date)}?\n\n"
+                    + "Mọi nội dung đang có trong ô của ngày đó sẽ bị thay thế, và các ticket đang chờ của ngày đó sẽ bị bỏ."),
+            Lang.T("Mark the day off", "Đánh dấu ngày nghỉ"), MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         if (answer != DialogResult.Yes) return;
 
-        SetBusy(true, "Marking the day OFF in TSC...");
+        SetBusy(true, Lang.T("Marking the day OFF in TSC...", "Đang đánh dấu nghỉ (OFF) trong TSC..."));
         try
         {
             var result = await _service.LogOffAsync(new[] { date }, AppendLog);
@@ -1333,29 +1493,30 @@ internal sealed class MainForm : Form, IMessageFilter
 
             AppendLog($"[off] {(result.Success ? "OK" : result.Error)}");
             ShowStatus(result.Success
-                ? $"TSC marked {TscCells.OffMarker} for {date:yyyy-MM-dd}."
-                : $"Log OFF failed: {result.Error}",
+                ? Lang.T($"TSC marked {TscCells.OffMarker} for {date:yyyy-MM-dd}.", $"Đã đánh dấu {TscCells.OffMarker} trong TSC cho ngày {date:yyyy-MM-dd}.")
+                : Lang.T($"Log OFF failed: {result.Error}", $"Đánh dấu nghỉ lỗi: {result.Error}"),
                 result.Success);
         }
         catch (Exception ex)
         {
             AppendLog($"[off] Error: {ex.Message}");
-            ShowStatus($"Log OFF failed: {ex.Message}", false);
+            ShowStatus(Lang.T($"Log OFF failed: {ex.Message}", $"Đánh dấu nghỉ lỗi: {ex.Message}"), false);
         }
         finally { SetBusy(false); }
     }
 
     private async void OnCheckTsc(object? sender, EventArgs e)
     {
-        SetBusy(true, "Checking TSC session...");
+        SetBusy(true, Lang.T("Checking TSC session...", "Đang kiểm tra phiên TSC..."));
         AppendLog("[tsc] Checking session...");
         try
         {
             var (loggedIn, error) = await TscTokenSniffer.CheckCredentialsAsync();
             AppendLog(error != null ? $"[tsc] Check failed: {error}"
                 : loggedIn ? "[tsc] Session is valid." : "[tsc] Logged out - use Re-auth.");
-            ShowStatus(error != null ? $"TSC check failed: {error}"
-                : loggedIn ? "TSC session is valid." : "TSC is logged out - use Re-auth.",
+            ShowStatus(error != null ? Lang.T($"TSC check failed: {error}", $"Kiểm tra TSC lỗi: {error}")
+                : loggedIn ? Lang.T("TSC session is valid.", "Phiên TSC còn hiệu lực.")
+                : Lang.T("TSC is logged out - use Re-authenticate TSC.", "TSC đã đăng xuất - hãy dùng Đăng nhập lại TSC."),
                 error == null && loggedIn);
         }
         finally { SetBusy(false); }
@@ -1363,14 +1524,14 @@ internal sealed class MainForm : Form, IMessageFilter
 
     private async void OnReauth(object? sender, EventArgs e)
     {
-        SetBusy(true, "Waiting for TSC sign-in in the browser...");
+        SetBusy(true, Lang.T("Waiting for TSC sign-in in the browser...", "Đang chờ đăng nhập TSC trên trình duyệt..."));
         AppendLog("[tsc] Opening a browser for sign-in...");
         try
         {
             var (ok, error) = await TscTokenSniffer.ReauthenticateAsync(AppendLog);
             if (ok) _service?.InvalidateGraphToken();
             AppendLog(ok ? "[tsc] Session saved." : $"[tsc] Re-auth failed: {error}");
-            ShowStatus(ok ? "TSC session saved." : $"Re-auth failed: {error}", ok);
+            ShowStatus(ok ? Lang.T("TSC session saved.", "Đã lưu phiên TSC.") : Lang.T($"Re-auth failed: {error}", $"Đăng nhập lại lỗi: {error}"), ok);
             if (ok) ReauthSucceeded?.Invoke();
         }
         finally { SetBusy(false); }
@@ -1384,7 +1545,7 @@ internal sealed class MainForm : Form, IMessageFilter
         if (invalid.Count > 0) AppendLog($"[{tag}] Ignored invalid: {string.Join(", ", invalid)}");
         if (tickets.Count == 0)
         {
-            ShowStatus("No valid tickets.", false);
+            ShowStatus(Lang.T("No valid tickets.", "Không có ticket hợp lệ."), false);
             return (null, default);
         }
         return (tickets, DateOnly.FromDateTime(_date.Value.Date));
@@ -1403,22 +1564,20 @@ internal sealed class MainForm : Form, IMessageFilter
     {
         _busy = busy;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
-        _logNowBtn.Text = busy ? "Working..." : LogNowText;
+        _logNowBtn.Text = busy ? BusyText : LogNowText;
         if (busy && busyNotice != null) _toast.ShowNotice(busyNotice, NoticeKind.Info, sticky: true);
         if (!busy && _toast.IsSticky) _toast.HideNotice();
         UpdateActionState();
     }
 
-    // Enable the ticket-dependent actions only when there is at least one valid ticket
-    // and no operation is in flight. Add to queue and the TSC + HRM / HRM only log items also
-    // need valid hours (each ticket > 0, the selected day <= 8h); TSC only ignores time.
     // Checked on open because the 6 PM cutoff passes with no input event to react to.
     private void UpdateLogNowMenu()
     {
         UpdateActionState();
         var hrmClosed = HrmClosedForToday(DateOnly.FromDateTime(_date.Value.Date));
-        _logBothItem.Text = hrmClosed ? "TSC + HRM  (after 6 PM)" : "TSC + HRM";
-        _logHrmItem.Text = hrmClosed ? "HRM only  (after 6 PM)" : "HRM only";
+        var after6Pm = hrmClosed ? Lang.T("  (after 6 PM)", "  (sau 6 PM)") : "";
+        _logBothItem.Text = "TSC + HRM" + after6Pm;
+        _logHrmItem.Text = Lang.T("HRM only", "Chỉ HRM") + after6Pm;
         if (hrmClosed)
         {
             _logBothItem.Enabled = false;
@@ -1426,6 +1585,9 @@ internal sealed class MainForm : Form, IMessageFilter
         }
     }
 
+    // Enable the ticket-dependent actions only when there is at least one valid ticket
+    // and no operation is in flight. Add to queue and the TSC + HRM / HRM only log items also
+    // need valid hours (each ticket > 0, the selected day <= 8h); TSC only ignores time.
     private void UpdateActionState()
     {
         var hasTickets = TicketParser.Parse(_tickets.Text).Tickets.Count != 0;

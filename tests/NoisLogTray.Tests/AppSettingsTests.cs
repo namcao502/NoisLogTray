@@ -20,6 +20,7 @@ public class AppSettingsTests : IDisposable
         var s = AppSettings.LoadOrBackup(out var corrupt, _path);
         Assert.False(corrupt);
         Assert.True(s.Dark);
+        Assert.Equal("en", s.Language);
         Assert.Null(s.WindowX);
         Assert.Empty(s.Config);
     }
@@ -27,13 +28,14 @@ public class AppSettingsTests : IDisposable
     [Fact]
     public void RoundTripsUiStateAndConfig()
     {
-        var s = new AppSettings { Dark = false, WindowX = 120, WindowY = 340 };
+        var s = new AppSettings { Dark = false, Language = "vi", WindowX = 120, WindowY = 340 };
         s.Config["JIRA_EMAIL"] = "you@company.com";
         s.Config["LOG_TIME"] = "6:00 PM";
         AppSettings.Save(s, _path);
 
         var read = AppSettings.Load(_path);
         Assert.False(read.Dark);
+        Assert.Equal("vi", read.Language);
         Assert.Equal(120, read.WindowX);
         Assert.Equal(340, read.WindowY);
         Assert.Equal("you@company.com", read.Config["JIRA_EMAIL"]);

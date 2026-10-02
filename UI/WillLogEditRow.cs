@@ -50,7 +50,7 @@ internal sealed class WillLogEditRow : Control
         set
         {
             _key = value;
-            _hours.AccessibleName = $"Hours for {value}";
+            _hours.AccessibleName = Lang.T($"Hours for {value}", $"Số giờ cho {value}");
             AccessibleName = value;
         }
     }

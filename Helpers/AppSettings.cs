@@ -11,6 +11,7 @@ namespace NoisLogTray;
 internal sealed class AppSettings
 {
     public bool Dark { get; set; } = true;
+    public string Language { get; set; } = "en"; // "en" or "vi"
     public int? WindowX { get; set; }
     public int? WindowY { get; set; }
     public Dictionary<string, string> Config { get; set; } = new();

@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Globalization;
 
 namespace NoisLogTray;
 
@@ -30,9 +31,19 @@ internal sealed class RoundedDatePicker : Control
         AccessibleRole = AccessibleRole.DropList;
         UpdateAccessibleName();
         Theme.Changed += OnThemeChanged;
+        Lang.Changed += OnLanguageChanged;
     }
 
-    private void UpdateAccessibleName() => AccessibleName = $"Date, {_value.ToShortDateString()}";
+    // Vietnamese reads day-first; the English (system) short date would show 10/2 for 2 October.
+    private string DateText => Lang.Vietnamese ? _value.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture) : _value.ToShortDateString();
+
+    private void UpdateAccessibleName() => AccessibleName = $"{Lang.T("Date", "Ngày")}, {DateText}";
+
+    private void OnLanguageChanged()
+    {
+        UpdateAccessibleName();
+        Invalidate();
+    }
 
     // Space/Enter opens the calendar, matching a click, so the field is keyboard-operable.
     protected override void OnKeyDown(KeyEventArgs e)
@@ -57,7 +68,11 @@ internal sealed class RoundedDatePicker : Control
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing) Theme.Changed -= OnThemeChanged;
+        if (disposing)
+        {
+            Theme.Changed -= OnThemeChanged;
+            Lang.Changed -= OnLanguageChanged;
+        }
         base.Dispose(disposing);
     }
 
@@ -113,7 +128,7 @@ internal sealed class RoundedDatePicker : Control
         using (var pen = new Pen(Theme.InputBorder)) g.DrawPath(pen, path);
 
         var textRect = new Rectangle(10, 0, Width - 34, Height);
-        TextRenderer.DrawText(g, _value.ToShortDateString(), Font, textRect, Theme.TextPrimary,
+        TextRenderer.DrawText(g, DateText, Font, textRect, Theme.TextPrimary,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
         var cx = Width - 18;

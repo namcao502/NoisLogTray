@@ -12,6 +12,10 @@ internal sealed class CloseButton : Button
 {
     private bool _hover;
 
+    // The colour behind the button, read at paint time so a theme switch follows it.
+    // Defaults to the will-log list; the Settings card and the window header override it.
+    internal Func<Color> Surface = () => Theme.InputBg;
+
     internal CloseButton()
     {
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
@@ -42,7 +46,7 @@ internal sealed class CloseButton : Button
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.Clear(Theme.InputBg); // blend with the will-log list behind the button
+        g.Clear(Surface()); // blend with what is behind the button
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
         var rect = new Rectangle(0, 0, Width - 1, Height - 1);

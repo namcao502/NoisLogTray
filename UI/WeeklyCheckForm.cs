@@ -38,7 +38,7 @@ internal sealed class WeeklyCheckForm : Form
     private readonly Label _tscHeader = new();
     private readonly MacButton _prev = MacButton.Secondary("<");
     private readonly MacButton _next = MacButton.Secondary(">");
-    private readonly MacButton _refresh = MacButton.Secondary("Refresh");
+    private readonly MacButton _refresh = MacButton.Secondary(Lang.T("Refresh", "Làm mới"));
     private readonly Card _card = new();
     private readonly FlowLayoutPanel _rows = new();
 
@@ -59,7 +59,7 @@ internal sealed class WeeklyCheckForm : Form
 
     private void BuildLayout()
     {
-        Text = "Weekly check";
+        Text = Lang.T("Weekly check", "Kiểm tra tuần");
         Icon = AppIcon.Load(32);
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
@@ -67,7 +67,7 @@ internal sealed class WeeklyCheckForm : Form
         BackColor = Theme.WindowBg;
         ClientSize = new Size(W, 400);
 
-        _title.Text = "Weekly check";
+        _title.Text = Lang.T("Weekly check", "Kiểm tra tuần");
         _title.AutoSize = true;
         _title.Location = new Point(20, 16);
         _title.Font = TitleFont;
@@ -94,8 +94,8 @@ internal sealed class WeeklyCheckForm : Form
 
         _card.Size = new Size(Inner, 266);
         _card.Location = new Point(20, 84);
-        _card.Controls.Add(SectionHeader(_dayHeader, "DAY", 24));
-        _card.Controls.Add(SectionHeader(_hrmHeader, "HRM (HOURS)", 166));
+        _card.Controls.Add(SectionHeader(_dayHeader, Lang.T("DAY", "NGÀY"), 24));
+        _card.Controls.Add(SectionHeader(_hrmHeader, Lang.T("HRM (HOURS)", "HRM (GIỜ)"), 166));
         _card.Controls.Add(SectionHeader(_tscHeader, "TSC (TICKET)", 316));
 
         _rows.Location = new Point(16, 44);
@@ -163,21 +163,24 @@ internal sealed class WeeklyCheckForm : Form
     private async void LoadWeekAsync()
     {
         var days = Weekdays(_weekMonday);
-        _weekLabel.Text = $"{days[0]:MMM d} - {days[^1]:MMM d, yyyy}".ToUpperInvariant();
+        _weekLabel.Text = (Lang.Vietnamese
+            ? $"{days[0]:dd/MM} - {days[^1]:dd/MM/yyyy}"
+            : $"{days[0].ToString("MMM d", Lang.Culture)} - {days[^1].ToString("MMM d, yyyy", Lang.Culture)}").ToUpperInvariant();
 
-        if (_service is null) { SetStatus("Config not loaded; set up credentials first."); return; }
+        if (_service is null) { SetStatus(Lang.T("Config not loaded; set up credentials first.", "Chưa có cấu hình; hãy thiết lập thông tin đăng nhập trước.")); return; }
 
         SetBusy(true);
-        SetStatus("Reading TSC + HRM ...");
+        SetStatus(Lang.T("Reading TSC + HRM ...", "Đang đọc TSC + HRM ..."));
         try
         {
             var coverage = await _service.CheckWeekAsync(days, AppendLog);
             RenderRows(coverage);
-            SetStatus("Done. (Green = logged, amber = partial, red = missing, gray = pending/unknown/off.)");
+            SetStatus(Lang.T("Done. (Green = logged, amber = partial, red = missing, gray = pending/unknown/off.)",
+                "Xong. (Xanh = đã log, vàng = thiếu một phần, đỏ = chưa log, xám = chưa tới/không rõ/nghỉ.)"));
         }
         catch (Exception ex)
         {
-            SetStatus($"Failed: {ex.Message}");
+            SetStatus(Lang.T($"Failed: {ex.Message}", $"Lỗi: {ex.Message}"));
         }
         finally
         {
@@ -210,8 +213,10 @@ internal sealed class WeeklyCheckForm : Form
             ? new ClickableRow
             {
                 AccessibleName = c.IsOff
-                    ? $"{c.Date:dddd, MMMM d}, day off not marked - open to mark it"
-                    : $"{c.Date:dddd, MMMM d}, needs logging - open to log",
+                    ? Lang.T($"{Lang.LongDate(c.Date.ToDateTime(TimeOnly.MinValue))}, day off not marked - open to mark it",
+                        $"{Lang.LongDate(c.Date.ToDateTime(TimeOnly.MinValue))}, ngày nghỉ chưa đánh dấu - mở để đánh dấu")
+                    : Lang.T($"{Lang.LongDate(c.Date.ToDateTime(TimeOnly.MinValue))}, needs logging - open to log",
+                        $"{Lang.LongDate(c.Date.ToDateTime(TimeOnly.MinValue))}, cần log - mở để log"),
             }
             : new Panel();
         row.Width = Inner - 36;
@@ -225,7 +230,7 @@ internal sealed class WeeklyCheckForm : Form
 
         row.Controls.Add(new Label
         {
-            Text = c.Date.ToString("ddd  MMM d"),
+            Text = Lang.Vietnamese ? c.Date.ToString("ddd  dd/MM", Lang.Culture) : c.Date.ToString("ddd  MMM d", Lang.Culture),
             Location = new Point(8, 0),
             Size = new Size(130, 42),
             TextAlign = ContentAlignment.MiddleLeft,
@@ -293,9 +298,9 @@ internal sealed class WeeklyCheckForm : Form
     // A day off has no hours to log, so zero is never a miss.
     private static (Color, string) HrmStatus(DayCoverage c, bool future)
     {
-        if (c.IsOff) return (Gray, "off");
-        if (future) return (Gray, "pending");
-        if (c.HrmHours is null) return (Gray, "unknown");
+        if (c.IsOff) return (Gray, Lang.T("off", "nghỉ"));
+        if (future) return (Gray, Lang.T("pending", "chưa tới"));
+        if (c.HrmHours is null) return (Gray, Lang.T("unknown", "không rõ"));
         var h = c.HrmHours.Value;
         if (h >= FullDayHours) return (Green, h.ToString("0.#") + "h");
         if (h > 0) return (Amber, h.ToString("0.#") + "h");
@@ -309,10 +314,10 @@ internal sealed class WeeklyCheckForm : Form
         {
             return string.Equals(c.TscTicket?.Trim(), TscCells.OffMarker, StringComparison.OrdinalIgnoreCase)
                 ? (Green, TscCells.OffMarker)
-                : (Amber, "off - not marked");
+                : (Amber, Lang.T("off - not marked", "nghỉ - chưa đánh dấu"));
         }
-        if (future) return (Gray, "pending");
-        if (string.IsNullOrWhiteSpace(c.TscTicket)) return (Red, "none");
+        if (future) return (Gray, Lang.T("pending", "chưa tới"));
+        if (string.IsNullOrWhiteSpace(c.TscTicket)) return (Red, Lang.T("none", "trống"));
         return (Green, c.TscTicket!);
     }
 

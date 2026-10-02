@@ -103,7 +103,13 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   time and subscribe to `Theme.Changed` to repaint (the header's Dark/Light button calls
   `Theme.Toggle`; `MainForm.ApplyTheme` re-colors native controls). It defaults to dark
   and persists the choice through `AppSettings` (`Theme.Load` runs in `Program.Main`;
-  `Theme.Toggle` does a read-modify-write so it keeps the window position). Also `TrayApp`,
+  `Theme.Toggle` does a read-modify-write so it keeps the window position). `Lang` is the
+  same pattern for the UI language (English default, or Vietnamese): `Lang.T("English",
+  "Tiếng Việt")` picks the text at display time, `Lang.LongDate`/`ShortDate` format dates
+  per language, the choice persists as `AppSettings.Language` (`Lang.Load` in
+  `Program.Main`), and the header's EN/VI `LanguageToggleButton` calls `Lang.Toggle`.
+  `MainForm.ApplyLanguage` and `TrayApp.ApplyLanguage` re-label on `Lang.Changed`; other
+  dialogs read the language when opened. Logs and code stay English. Also `TrayApp`,
   `MainForm`, `CredentialsForm` (the themed first-run / edit-credentials dialog),
   `WeeklyCheckForm` (weekly coverage: HRM hours + TSC ticket per weekday, opened from the
   tray "Weekly check..." item; an under-logged past weekday is a clickable `ClickableRow`
@@ -113,7 +119,8 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   marked" and clickable, including when it is still in the future so planned leave can
   be marked ahead), and
   owner-drawn controls: `NotificationBell` + `NoticeToast` (see "Notices" under `MainForm`),
-  `ThemedMenuRenderer` (themed `ContextMenuStrip`s), `MacButton`
+  `ThemedMenuRenderer` (themed `ContextMenuStrip`s, opened right-aligned under their button
+  so they stay inside the window; the bell history also cuts each line to fit), `MacButton`
   (rounded button), `Card` (rounded card surface), `RoundedHost` (rounded border
   around native controls like the list/textbox), `RoundedDatePicker` (rounded date
   field with a custom `ModernCalendar` popup in a rounded `CalendarPopupForm`, replacing
@@ -133,15 +140,28 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   tooltip/balloon/log updates. `_draining` is an `Interlocked` guard so only one
   drain runs at a time. When config is missing it runs `RunFirstRunSetup` (a
   `BeginInvoke` after the message loop starts, not a modal in the ctor) to show
-  `CredentialsForm`; the "Edit credentials..." menu item reopens it. Saving writes the
+  `CredentialsForm`; the window's gear button (main entry, since users rarely right-click
+  the tray icon) or the tray "Settings..." item reopens it as the Settings dialog: a borderless
+  rounded card (modelled on TaskWatcher's settings popup) with instant-apply pill groups
+  (Language, Start with Windows via `StartupService`; selected pill = `MacButton.Selected`),
+  the account fields verified on Save, and an "Open log folder" footer. No Quit button
+  there on purpose - beside Settings it reads as "close this dialog"; quitting is the tray
+  menu's "Quit". The tray menu is deliberately short - Open, Weekly
+  check..., Settings..., Quit (plus "Download update..." when one exists); logging and TSC
+  session actions live only in the window, so they are not duplicated there. Saving writes the
   per-user config into `settings.json`, rebuilds `_service` via `ReloadServiceAndShow`,
   and opens the window so the user sees it worked. The dialog **verifies** the entered credentials before
   saving (Jira via `/myself`, HRM via an MCP connect) and rejects a bad token/key inline;
   an unreachable service falls back to a "save anyway?" prompt so offline setup isn't
-  blocked. A successful TSC re-auth (tray or window, via the `ReauthSucceeded` event)
+  blocked. A successful TSC re-auth (from the window, via the `ReauthSucceeded` event)
   calls `CatchUpIfDue` to retry any queue entries that were waiting on sign-in.
-- **`MainForm`** - the capture window: a standard-chrome window structured like the
-  old web app - a header (title, bell, theme toggle), then stacked `Card`s, input first: "New entry"
+- **`MainForm`** - the capture window: a **borderless rounded** window (no Windows 10
+  frame: `FormBorderStyle.None` + rounded `Region`, `CS_DROPSHADOW`, a 1px border painted
+  on the body, `WS_MINIMIZEBOX` so the taskbar button still minimizes; dragging the header
+  or empty background moves it via `WM_NCLBUTTONDOWN`/`HTCAPTION`) structured like the
+  old web app - a header (title, then bell, theme toggle, EN/VI language toggle, and a
+  rightmost gear `SettingsButton` that raises `SettingsRequested` -> `TrayApp` opens the
+  Settings dialog, deferred via `BeginInvoke` because saving rebuilds the window), then stacked `Card`s, input first: "New entry"
   (date + ticket, then one action row: the primary "Add to queue", a "Log now" dropdown
   with TSC + HRM / TSC only / HRM only, and a "more" dropdown with Log OFF... / Check TSC
   session / Re-authenticate TSC; the dropdowns are `ContextMenuStrip`s painted by
@@ -163,7 +183,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `QueueEntry.Minutes` (null = even split) and drive the HRM slots; TSC ignores time.
   With the input empty it falls back to the **whole persisted queue** grouped by date
   (each headed "(queued for <LOG_TIME>)"), shown read-only via `WillLogRow`, and shows a
-  "Log queue now" (secondary; the tray's guarded drain) + "Clear queue" buttons - this is the single view of what's scheduled (there is no
+  "Log queue now" (secondary; runs the tray's guarded drain) + "Clear queue" buttons - this is the single view of what's scheduled (there is no
   separate queue card). The card is **fixed height and scrolls internally**
   (`WillLogHostH`, sized for a date header + 3 ticket rows) so the window height stays
   stable with a long queue. "Log OFF" needs no ticket and takes any date,
@@ -184,7 +204,8 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   result replaces it. A notice arriving while the window is hidden clears any toast. Ticket-dependent buttons are gated on
   valid input via `UpdateActionState`.
   `MacButton`, `Card`, and `RoundedHost` are owner-drawn
-  (no third-party UI library). Closing (X) or Esc **hides to tray**; `TrayApp` owns exit.
+  (no third-party UI library). The header's ✕ (`CloseButton`), Alt+F4 or Esc **hides to
+  tray**; `TrayApp` owns exit.
   Keyboard fast path: showing the window and picking a suggestion both focus the ticket
   box, and Enter is the `AcceptButton` ("Add to queue"). Enter in the search box instead
   adds the top match to the ticket box (never queues). Hiding the window clears the
@@ -335,6 +356,6 @@ first load and removed. A missing or malformed `queue.json` yields an empty queu
 design so the 18:00 runner never throws; `AppSettings` likewise falls back to defaults on
 a missing/bad `settings.json` (preserving the bad copy as `settings.json.bad`). `AppLogger`
 deletes log files older than 30 days (`RetentionDays`) on the first write of each day;
-the tray's "Open log folder" item opens the folder. The TSC Chrome profile (the saved
+the Settings dialog's "Open log folder" link opens the folder. The TSC Chrome profile (the saved
 Microsoft session) lives separately at
 `%UserProfile%\.tsc-daily-log-browser` (`TscTokenSniffer.ProfileDir`).

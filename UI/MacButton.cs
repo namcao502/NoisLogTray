@@ -9,6 +9,15 @@ internal sealed class MacButton : Button
 {
     private readonly bool _secondary;
     private bool _hover;
+    private bool _selected;
+
+    // A secondary button drawn as primary while selected: the chosen pill in an option group.
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    internal bool Selected
+    {
+        get => _selected;
+        set { _selected = value; Invalidate(); }
+    }
 
     internal int Radius = 6;
     internal bool OnWindow; // true = sits on the window body (blend corners to WindowBg)
@@ -62,7 +71,7 @@ internal sealed class MacButton : Button
             fill = Theme.Dark ? Color.FromArgb(58, 58, 62) : Color.FromArgb(232, 232, 234);
             textColor = Theme.TextSecondary;
         }
-        else if (_secondary)
+        else if (_secondary && !_selected)
         {
             fill = _hover ? Theme.SecondaryBtnHover : Theme.SecondaryBtn;
             textColor = Theme.SecondaryBtnText;
@@ -83,7 +92,7 @@ internal sealed class MacButton : Button
         {
             var focusRect = Rectangle.Inflate(rect, -3, -3);
             using var focusPath = Rounded(focusRect, Math.Max(2, Radius - 2));
-            using var pen = new Pen(_secondary ? Theme.Accent : Color.White, 1.4f) { DashStyle = DashStyle.Dot };
+            using var pen = new Pen(_secondary && !_selected ? Theme.Accent : Color.White, 1.4f) { DashStyle = DashStyle.Dot };
             g.DrawPath(pen, focusPath);
         }
     }

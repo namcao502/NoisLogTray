@@ -16,9 +16,10 @@ internal sealed class ThemedMenuRenderer : ToolStripProfessionalRenderer
         return menu;
     }
 
-    // Open the menu right under its anchor button, left edges aligned.
+    // Open the menu right under its anchor button, right edges aligned, so a menu wider than
+    // the button grows into the window instead of past its right edge.
     internal static void ShowBelow(ContextMenuStrip menu, Control anchor) =>
-        menu.Show(anchor, new Point(0, anchor.Height + 2));
+        menu.Show(anchor, new Point(anchor.Width, anchor.Height + 2), ToolStripDropDownDirection.BelowLeft);
 
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
     {

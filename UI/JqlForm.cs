@@ -31,7 +31,7 @@ internal sealed class JqlForm : Form
         _defaultJql = defaultJql;
         _validate = validate;
 
-        Text = "Edit ticket query";
+        Text = Lang.T("Edit ticket query", "Sửa truy vấn ticket");
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -49,7 +49,7 @@ internal sealed class JqlForm : Form
     {
         var title = new Label
         {
-            Text = "Ticket query (JQL)",
+            Text = Lang.T("Ticket query (JQL)", "Truy vấn ticket (JQL)"),
             AutoSize = true,
             Location = new Point(Pad, y),
             Font = TitleFont,
@@ -61,8 +61,11 @@ internal sealed class JqlForm : Form
 
         var help = new Label
         {
-            Text = "This JQL drives the \"My tickets\" list. Leave blank to use the built-in default.\n" +
-                   "Checked against Jira when you save.",
+            Text = Lang.T(
+                "This JQL drives the \"My tickets\" list. Leave blank to use the built-in default.\n" +
+                "Checked against Jira when you save.",
+                "JQL này quyết định danh sách \"Ticket của tôi\". Để trống để dùng mặc định có sẵn.\n" +
+                "Sẽ được kiểm tra với Jira khi bạn lưu."),
             AutoSize = false,
             Size = new Size(FieldW, 34),
             Location = new Point(Pad, y),
@@ -115,19 +118,19 @@ internal sealed class JqlForm : Form
         Controls.Add(_error);
         y += 24;
 
-        _reset = MacButton.Secondary("Reset to default");
+        _reset = MacButton.Secondary(Lang.T("Reset to default", "Về mặc định"));
         _reset.OnWindow = true;
         _reset.Size = new Size(130, 36);
         _reset.Location = new Point(Pad, y);
         _reset.Click += (_, _) => { _box.Text = _defaultJql; _box.Focus(); };
 
-        _save = MacButton.Primary("Save");
+        _save = MacButton.Primary(Lang.T("Save", "Lưu"));
         _save.OnWindow = true;
         _save.Size = new Size(110, 36);
         _save.Location = new Point(Pad + FieldW - 110, y);
         _save.Click += OnSave;
 
-        _cancel = MacButton.Secondary("Cancel");
+        _cancel = MacButton.Secondary(Lang.T("Cancel", "Hủy"));
         _cancel.OnWindow = true;
         _cancel.Size = new Size(100, 36);
         _cancel.Location = new Point(Pad + FieldW - 110 - 12 - 100, y);
@@ -156,7 +159,7 @@ internal sealed class JqlForm : Form
         }
 
         JqlCheckResult result;
-        SetBusy(true, "Checking query...");
+        SetBusy(true, Lang.T("Checking query...", "Đang kiểm tra truy vấn..."));
         try
         {
             result = await _validate(text, CancellationToken.None);
@@ -175,13 +178,14 @@ internal sealed class JqlForm : Form
                 return;
 
             case JqlCheck.Invalid:
-                Fail(result.Error ?? "Jira rejected this query.");
+                Fail(result.Error ?? Lang.T("Jira rejected this query.", "Jira từ chối truy vấn này."));
                 return;
 
             case JqlCheck.Unreachable:
                 var answer = MessageBox.Show(this,
-                    "Couldn't reach Jira to check this query (are you online?).\n\nSave anyway?",
-                    "Couldn't verify", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                    Lang.T("Couldn't reach Jira to check this query (are you online?).\n\nSave anyway?",
+                        "Không kết nối được Jira để kiểm tra truy vấn (bạn có đang online không?).\n\nVẫn lưu?"),
+                    Lang.T("Couldn't verify", "Không kiểm tra được"), MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
                 if (answer == DialogResult.Yes)
                 {
                     Jql = text;

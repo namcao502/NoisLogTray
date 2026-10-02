@@ -62,13 +62,15 @@ internal sealed class ModernCalendar : Control
         using (var headFont = new Font("Segoe UI Semibold", 10.5F, FontStyle.Bold))
         {
             var header = new Rectangle(Pad + 28, Pad, Width - 2 * (Pad + 28), HeaderH);
-            TextRenderer.DrawText(g, _month.ToString("MMMM yyyy"), headFont, header, Theme.TextPrimary,
+            TextRenderer.DrawText(g, _month.ToString("MMMM yyyy", Lang.Culture), headFont, header, Theme.TextPrimary,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
         DrawChevron(g, PrevArrow, true);
         DrawChevron(g, NextArrow, false);
 
-        var days = new[] { "Su", "Mo", "Tu", "We", "Th", "Fr", "Sa" };
+        var days = Lang.Vietnamese
+            ? new[] { "CN", "T2", "T3", "T4", "T5", "T6", "T7" }
+            : new[] { "Su", "Mo", "Tu", "We", "Th", "Fr", "Sa" };
         using (var weekFont = new Font("Segoe UI", 8F, FontStyle.Bold))
             for (var c = 0; c < 7; c++)
             {

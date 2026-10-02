@@ -18,6 +18,7 @@ internal static class Program
 
         AppLogger.Info("NoisLogTray started.");
         Theme.Load();
+        Lang.Load();
         Application.Run(new TrayApp());
     }
 }

@@ -14,7 +14,6 @@ internal sealed class TrayApp : ApplicationContext
     private LoggingService? _service;
     private string? _configError;
     private readonly SixPmScheduler _scheduler;
-    private readonly ToolStripMenuItem _startupItem;
     private readonly ToolStripMenuItem _updateItem;
     private readonly ToolStripSeparator _updateSeparator;
     private UpdateInfo? _pendingUpdate; // set when a newer GitHub Release is found
@@ -23,6 +22,9 @@ internal sealed class TrayApp : ApplicationContext
     private int _draining; // 0 = idle, 1 = a drain is running
     private int _redrainPending; // 1 = a drain was requested while one ran; run one more pass
     private static readonly TimeSpan DrainTimeout = TimeSpan.FromMinutes(5);
+
+    // Tray menu items with both texts, so ApplyLanguage can re-label them on a switch.
+    private readonly List<(ToolStripItem Item, string English, string Vietnamese)> _menuTexts = new();
 
     internal TrayApp()
     {
@@ -35,30 +37,20 @@ internal sealed class TrayApp : ApplicationContext
 
         var menu = new ContextMenuStrip();
         // Hidden until the startup check finds a newer release; then it sits at the top.
-        _updateItem = new ToolStripMenuItem("Download update...", null, (_, _) => OpenUpdatePage())
+        _updateItem = new ToolStripMenuItem("", null, (_, _) => OpenUpdatePage())
         {
             Visible = false,
         };
         _updateSeparator = new ToolStripSeparator { Visible = false };
         menu.Items.Add(_updateItem);
         menu.Items.Add(_updateSeparator);
-        menu.Items.Add("Open", null, (_, _) => ShowForm());
-        menu.Items.Add("Log queue now", null, async (_, _) => await DrainAsync(fromUser: true));
-        menu.Items.Add("Weekly check...", null, (_, _) => ShowWeeklyCheck());
+        // Only what has no other home: logging and TSC actions live in the window, and
+        // startup / log folder sit in Settings.
+        AddMenuItem(menu, "Open", "Mở", (_, _) => ShowForm());
+        AddMenuItem(menu, "Weekly check...", "Kiểm tra tuần...", (_, _) => ShowWeeklyCheck());
+        AddMenuItem(menu, "Settings...", "Cài đặt...", (_, _) => EditCredentials());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Check TSC session", null, async (_, _) => await CheckTscAsync());
-        menu.Items.Add("Re-authenticate TSC", null, async (_, _) => await ReauthAsync());
-        menu.Items.Add("Edit credentials...", null, (_, _) => EditCredentials());
-        menu.Items.Add("Open log folder", null, (_, _) => OpenLogFolder());
-        menu.Items.Add(new ToolStripSeparator());
-        _startupItem = new ToolStripMenuItem("Start with Windows", null, (_, _) => ToggleStartup())
-        {
-            Checked = StartupService.IsEnabled(),
-            CheckOnClick = false,
-        };
-        menu.Items.Add(_startupItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Quit", null, (_, _) => Quit());
+        AddMenuItem(menu, "Quit", "Thoát", (_, _) => Quit());
 
         _tray = new NotifyIcon
         {
@@ -74,7 +66,8 @@ internal sealed class TrayApp : ApplicationContext
             if (e.Button == MouseButtons.Left) ShowForm();
         };
 
-        UpdateTooltip();
+        ApplyLanguage();
+        Lang.Changed += ApplyLanguage;
 
         _scheduler = new SixPmScheduler(config?.LogTime ?? AppConfig.DefaultLogTime, OnScheduledFireAsync, Log);
         _scheduler.Start();
@@ -83,8 +76,8 @@ internal sealed class TrayApp : ApplicationContext
 
         // TSC logging needs the system Chrome; warn once up front rather than at 6 PM.
         if (_service != null && !TscTokenSniffer.ChromeInstalled())
-            Notify("Google Chrome is not installed - TSC logging needs it. Install Chrome from google.com/chrome.",
-                ToolTipIcon.Warning);
+            Notify(Lang.T("Google Chrome is not installed - TSC logging needs it. Install Chrome from google.com/chrome.",
+                "Chưa cài Google Chrome - log TSC cần nó. Cài Chrome tại google.com/chrome."), ToolTipIcon.Warning);
 
         // Once the message loop is running: prompt for first-run config if it's
         // missing (rather than a modal dialog inside the constructor), otherwise
@@ -101,14 +94,15 @@ internal sealed class TrayApp : ApplicationContext
     {
         if (!PromptForCredentials(firstRun: true))
         {
-            Notify("Setup skipped - logging is disabled. Use \"Edit credentials...\" to set it up.",
-                ToolTipIcon.Warning);
+            Notify(Lang.T("Setup skipped - logging is disabled. Use \"Settings...\" in the tray menu to set it up.",
+                "Đã bỏ qua thiết lập - chưa log được. Dùng \"Cài đặt...\" trong menu khay để thiết lập."), ToolTipIcon.Warning);
             return;
         }
         ReloadServiceAndShow();
         Notify(_service != null
-            ? "Setup complete. Use \"Re-authenticate TSC\" to finish signing in."
-            : $"Saved, but config is still invalid: {_configError}",
+            ? Lang.T("Setup complete. Use \"Re-authenticate TSC\" to finish signing in.",
+                "Thiết lập xong. Dùng \"Đăng nhập lại TSC\" để hoàn tất đăng nhập.")
+            : Lang.T($"Saved, but config is still invalid: {_configError}", $"Đã lưu, nhưng cấu hình vẫn chưa hợp lệ: {_configError}"),
             _service != null ? ToolTipIcon.Info : ToolTipIcon.Warning);
     }
 
@@ -160,6 +154,8 @@ internal sealed class TrayApp : ApplicationContext
             _form.QueueChanged += UpdateTooltip;
             _form.ReauthSucceeded += CatchUpIfDue; // retry due entries once TSC is signed in
             _form.DrainRequested += () => _ = DrainAsync(fromUser: true); // "Log queue now"
+            // Deferred: saving disposes and rebuilds the window, so not inside its own click.
+            _form.SettingsRequested += () => _marshal.BeginInvoke(new Action(EditCredentials));
             _form.StatusRaised += (message, kind) =>
                 Notify(message, kind == NoticeKind.Error ? ToolTipIcon.Warning : ToolTipIcon.Info, kind);
         }
@@ -172,7 +168,7 @@ internal sealed class TrayApp : ApplicationContext
     // Open (or re-focus) the read-only weekly coverage window.
     private void ShowWeeklyCheck()
     {
-        if (_service == null) { Notify("Config not loaded; set up credentials first.", ToolTipIcon.Warning); return; }
+        if (_service == null) { Notify(Lang.T("Config not loaded; set up credentials first.", "Chưa có cấu hình; hãy thiết lập thông tin đăng nhập trước."), ToolTipIcon.Warning); return; }
         if (_weeklyForm == null || _weeklyForm.IsDisposed)
         {
             _weeklyForm = new WeeklyCheckForm(_service);
@@ -196,11 +192,12 @@ internal sealed class TrayApp : ApplicationContext
         _pendingUpdate = update;
         RunOnUi(() =>
         {
-            _updateItem.Text = $"Download update v{update.Latest}...";
+            ApplyLanguage(); // the update item's text carries the version
             _updateItem.Visible = true;
             _updateSeparator.Visible = true;
         });
-        Notify($"Update v{update.Latest} available - open the tray menu to download.", ToolTipIcon.Info);
+        Notify(Lang.T($"Update v{update.Latest} available - open the tray menu to download.",
+            $"Có bản cập nhật v{update.Latest} - mở menu khay để tải."), ToolTipIcon.Info);
     }
 
     // Open the release page in the default browser so the user can download the new build.
@@ -213,14 +210,14 @@ internal sealed class TrayApp : ApplicationContext
         }
         catch (Exception e)
         {
-            Notify($"Could not open the download page: {e.Message}", ToolTipIcon.Warning);
+            Notify(Lang.T($"Could not open the download page: {e.Message}", $"Không mở được trang tải: {e.Message}"), ToolTipIcon.Warning);
         }
     }
 
     private void UpdateTooltip() => RunOnUi(() =>
     {
         var count = TicketQueue.Read().Count;
-        _tray.Text = count > 0 ? $"NOIS Daily Log ({count} queued)" : "NOIS Daily Log";
+        _tray.Text = count > 0 ? Lang.T($"NOIS Daily Log ({count} queued)", $"NOIS Daily Log ({count} đang chờ)") : "NOIS Daily Log";
     });
 
     // The daily scheduled fire (at the configured time). If something is queued, drain
@@ -257,7 +254,8 @@ internal sealed class TrayApp : ApplicationContext
         RunOnUi(() =>
         {
             ShowForm();
-            Notify("Reminder: nothing is queued for today - log your work before you leave.", ToolTipIcon.Info);
+            Notify(Lang.T("Reminder: nothing is queued for today - log your work before you leave.",
+                "Nhắc nhở: hôm nay chưa có gì trong hàng đợi - hãy log công việc trước khi về."), ToolTipIcon.Info);
         });
     }
 
@@ -268,7 +266,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         if (_service == null)
         {
-            if (fromUser) Notify("Config not loaded; cannot log.", ToolTipIcon.Warning);
+            if (fromUser) Notify(Lang.T("Config not loaded; cannot log.", "Chưa có cấu hình; không log được."), ToolTipIcon.Warning);
             return;
         }
         if (Interlocked.CompareExchange(ref _draining, 1, 0) != 0)
@@ -276,7 +274,7 @@ internal sealed class TrayApp : ApplicationContext
             // A drain is already running; its snapshot may predate work just requested,
             // so flag one more pass to run after it finishes.
             Interlocked.Exchange(ref _redrainPending, 1);
-            if (fromUser) Notify("A logging run is already in progress.", ToolTipIcon.Info);
+            if (fromUser) Notify(Lang.T("A logging run is already in progress.", "Đang có một lượt log chạy."), ToolTipIcon.Info);
             return;
         }
 
@@ -289,16 +287,17 @@ internal sealed class TrayApp : ApplicationContext
 
             if (r.Total == 0)
             {
-                if (fromUser) Notify("Queue is empty.", ToolTipIcon.Info);
+                if (fromUser) Notify(Lang.T("Queue is empty.", "Hàng đợi trống."), ToolTipIcon.Info);
             }
             else if (r.Kept > 0)
             {
-                Notify($"Auto-log: {r.Logged} logged, {r.Kept} kept. Check TSC sign-in (Re-authenticate) - it retries automatically.",
+                Notify(Lang.T($"Auto-log: {r.Logged} logged, {r.Kept} kept. Check TSC sign-in (Re-authenticate) - it retries automatically.",
+                    $"Tự log: đã log {r.Logged}, giữ lại {r.Kept}. Kiểm tra đăng nhập TSC (Đăng nhập lại) - app sẽ tự thử lại."),
                     ToolTipIcon.Warning);
             }
             else
             {
-                Notify($"Auto-log: {r.Logged} logged.", ToolTipIcon.Info);
+                Notify(Lang.T($"Auto-log: {r.Logged} logged.", $"Tự log: đã log {r.Logged}."), ToolTipIcon.Info);
             }
         }
         catch (OperationCanceledException)
@@ -306,13 +305,14 @@ internal sealed class TrayApp : ApplicationContext
             UpdateTooltip();
             RunOnUi(() => { if (_form != null && !_form.IsDisposed) _form.RefreshQueuedView(); });
             Log($"[drain] Timed out after {DrainTimeout.TotalMinutes:0} min; kept unlogged entries for retry.");
-            Notify("Auto-log timed out; kept entries for retry. Check TSC sign-in if this repeats.",
+            Notify(Lang.T("Auto-log timed out; kept entries for retry. Check TSC sign-in if this repeats.",
+                "Tự log quá thời gian; đã giữ lại để thử lại. Nếu lặp lại, hãy kiểm tra đăng nhập TSC."),
                 ToolTipIcon.Warning);
         }
         catch (Exception e)
         {
             Log($"[drain] Error: {e.Message}");
-            Notify($"Auto-log error: {e.Message}", ToolTipIcon.Error);
+            Notify(Lang.T($"Auto-log error: {e.Message}", $"Tự log lỗi: {e.Message}"), ToolTipIcon.Error);
         }
         finally
         {
@@ -325,61 +325,29 @@ internal sealed class TrayApp : ApplicationContext
             await DrainAsync(fromUser: false);
     }
 
-    private async Task CheckTscAsync()
-    {
-        Notify("Checking TSC session...", ToolTipIcon.Info);
-        var (loggedIn, error) = await TscTokenSniffer.CheckCredentialsAsync();
-        if (error != null)
-            Notify($"TSC check failed: {error}", ToolTipIcon.Warning);
-        else
-            Notify(loggedIn ? "TSC session is valid." : "TSC session is logged out. Use Re-authenticate.",
-                loggedIn ? ToolTipIcon.Info : ToolTipIcon.Warning);
-    }
-
-    private async Task ReauthAsync()
-    {
-        Notify("Opening a browser for TSC sign-in...", ToolTipIcon.Info);
-        var (ok, error) = await TscTokenSniffer.ReauthenticateAsync(Log);
-        if (ok) _service?.InvalidateGraphToken();
-        Notify(ok ? "TSC session saved." : $"Re-auth failed: {error}",
-            ok ? ToolTipIcon.Info : ToolTipIcon.Warning);
-        if (ok) CatchUpIfDue(); // retry any queue entries that were waiting on sign-in
-    }
-
     // Show the credentials dialog; on save, write the per-user config into settings.json.
     // Returns true if saved. Used both at first run (config missing) and from the menu.
     private bool PromptForCredentials(bool firstRun)
     {
         var initial = AppConfig.ReadUserValues();
         using var dialog = new CredentialsForm(initial, firstRun);
-        if (dialog.ShowDialog() != DialogResult.OK) return false;
+        // Center on the window when it is open (the gear), else on screen (tray / first run).
+        var owner = _form != null && !_form.IsDisposed && _form.Visible ? _form : null;
+        if (owner != null) dialog.StartPosition = FormStartPosition.CenterParent;
+        if (dialog.ShowDialog(owner) != DialogResult.OK) return false;
         AppConfig.SaveUserConfig(dialog.Values);
         return true;
     }
 
-    // Tray menu: edit credentials, then rebuild the service and show the window as
+    // Settings (header gear or tray "Settings..."): edit the config, then rebuild the service and show the window as
     // confirmation the save took effect.
     private void EditCredentials()
     {
         if (!PromptForCredentials(firstRun: false)) return;
         ReloadServiceAndShow();
-        Notify(_service != null ? "Credentials saved." : $"Saved, but config still invalid: {_configError}",
+        Notify(_service != null ? Lang.T("Settings saved.", "Đã lưu cài đặt.")
+            : Lang.T($"Saved, but config still invalid: {_configError}", $"Đã lưu, nhưng cấu hình vẫn chưa hợp lệ: {_configError}"),
             _service != null ? ToolTipIcon.Info : ToolTipIcon.Warning);
-    }
-
-    private void ToggleStartup()
-    {
-        var target = !_startupItem.Checked;
-        var result = StartupService.TrySet(target);
-        if (result.Success)
-        {
-            _startupItem.Checked = target;
-            Notify(target ? "Will start with Windows." : "Won't start with Windows.", ToolTipIcon.Info);
-        }
-        else
-        {
-            Notify(result.ErrorMessage ?? "Startup change failed.", ToolTipIcon.Warning);
-        }
     }
 
     private void Quit()
@@ -390,10 +358,21 @@ internal sealed class TrayApp : ApplicationContext
 
     private static void Log(string line) => AppLogger.Info(line);
 
-    private static void OpenLogFolder()
+    private void AddMenuItem(ContextMenuStrip menu, string english, string vietnamese, EventHandler onClick)
     {
-        Directory.CreateDirectory(AppPaths.LogDirectory);
-        Process.Start(new ProcessStartInfo(AppPaths.LogDirectory) { UseShellExecute = true });
+        var item = new ToolStripMenuItem(Lang.T(english, vietnamese), null, onClick);
+        menu.Items.Add(item);
+        _menuTexts.Add((item, english, vietnamese));
+    }
+
+    // Re-label the tray menu and tooltip for the current language (the window re-labels itself).
+    private void ApplyLanguage()
+    {
+        foreach (var (item, english, vietnamese) in _menuTexts) item.Text = Lang.T(english, vietnamese);
+        _updateItem.Text = _pendingUpdate != null
+            ? Lang.T($"Download update v{_pendingUpdate.Latest}...", $"Tải bản cập nhật v{_pendingUpdate.Latest}...")
+            : Lang.T("Download update...", "Tải bản cập nhật...");
+        UpdateTooltip();
     }
 
     // Every notice lands in the window's bell history and shows in-window while the window is
@@ -419,6 +398,7 @@ internal sealed class TrayApp : ApplicationContext
         if (disposing)
         {
             _scheduler.Dispose();
+            Lang.Changed -= ApplyLanguage;
             _tray.Visible = false;
             _tray.Dispose();
             _form?.Dispose();
