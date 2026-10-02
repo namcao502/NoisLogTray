@@ -159,7 +159,7 @@ internal sealed class TrayApp : ApplicationContext
             _form = new MainForm(_service, _configError);
             _form.QueueChanged += UpdateTooltip;
             _form.ReauthSucceeded += CatchUpIfDue; // retry due entries once TSC is signed in
-            _form.DrainRequested += () => _ = DrainAsync(fromUser: true); // "Log all now"
+            _form.DrainRequested += () => _ = DrainAsync(fromUser: true); // "Log queue now"
             _form.StatusRaised += (message, kind) =>
                 Notify(message, kind == NoticeKind.Error ? ToolTipIcon.Warning : ToolTipIcon.Info, kind);
         }
@@ -396,15 +396,15 @@ internal sealed class TrayApp : ApplicationContext
         Process.Start(new ProcessStartInfo(AppPaths.LogDirectory) { UseShellExecute = true });
     }
 
-    // Every notice lands in the window's bell history. It shows in-window while the window
-    // is on screen, and as a Windows balloon otherwise.
+    // Every notice lands in the window's bell history and shows in-window while the window is
+    // on screen; a Windows balloon is added unless the window is the one in the foreground.
     private void Notify(string message, ToolTipIcon icon, NoticeKind? kind = null) =>
         RunOnUi(() =>
         {
             var noticeKind = kind ?? (icon == ToolTipIcon.Info ? NoticeKind.Info : NoticeKind.Error);
             var form = _form != null && !_form.IsDisposed ? _form : null;
             form?.PostNotice(message, noticeKind);
-            if (form == null || !form.IsOnScreen) _tray.ShowBalloonTip(5000, "NOIS Daily Log", message, icon);
+            if (form == null || !form.IsForeground) _tray.ShowBalloonTip(5000, "NOIS Daily Log", message, icon);
         });
 
     private void RunOnUi(Action action)

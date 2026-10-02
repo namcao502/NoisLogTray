@@ -141,11 +141,12 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   blocked. A successful TSC re-auth (tray or window, via the `ReauthSucceeded` event)
   calls `CatchUpIfDue` to retry any queue entries that were waiting on sign-in.
 - **`MainForm`** - the capture window: a standard-chrome window structured like the
-  old web app - a header (title + date), then stacked `Card`s, input first: "New entry"
+  old web app - a header (title, bell, theme toggle), then stacked `Card`s, input first: "New entry"
   (date + ticket, then one action row: the primary "Add to queue", a "Log now" dropdown
   with TSC + HRM / TSC only / HRM only, and a "more" dropdown with Log OFF... / Check TSC
   session / Re-authenticate TSC; the dropdowns are `ContextMenuStrip`s painted by
-  `ThemedMenuRenderer`), "Will log" (described below), and last "My tickets" (a
+  `ThemedMenuRenderer`), "Queue" (titled QUEUE; called "Will log" in code, described
+  below), and last "My tickets" (a
   "My tickets" list from `LoggingService.GetMyTicketsAsync` - every match, paged via
   `nextPageToken` (capped at 500), in a fixed-height list that scrolls - each row shows the key,
   summary, then a right-aligned due date - click a row to add it; an "Edit JQL" button
@@ -162,7 +163,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `QueueEntry.Minutes` (null = even split) and drive the HRM slots; TSC ignores time.
   With the input empty it falls back to the **whole persisted queue** grouped by date
   (each headed "(queued for <LOG_TIME>)"), shown read-only via `WillLogRow`, and shows a
-  "Clear queue" button - this is the single view of what's scheduled (there is no
+  "Log queue now" (secondary; the tray's guarded drain) + "Clear queue" buttons - this is the single view of what's scheduled (there is no
   separate queue card). The card is **fixed height and scrolls internally**
   (`WillLogHostH`, sized for a date header + 3 ticket rows) so the window height stays
   stable with a long queue. "Log OFF" needs no ticket and takes any date,
@@ -174,15 +175,20 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   only. **Notices:** every user-facing message goes through `TrayApp.Notify`, which records
   it in the window's bell history (`MainForm.PostNotice`, last 20, session-only; the
   header bell shows a red dot until opened) and shows it as an in-window `NoticeToast`
-  under the bell while the window is on screen (3s, errors 6s), else as a Windows
-  balloon. A window action's result (`ShowStatus`) reaches it via `StatusRaised`. While
-  an action runs, `SetBusy` shows a sticky toast naming it ("Logging to TSC + HRM...")
-  and the Log now button reads "Working...". Ticket-dependent buttons are gated on
+  under the bell while the window is on screen (3s, errors 6s; capped at 2 lines). A Windows balloon is
+  added unless the window is the **foreground** one (`IsForeground`), so a result that
+  lands while the window is covered by another app is not missed. A window action's
+  result (`ShowStatus`) reaches it via `StatusRaised`. While an action runs, `SetBusy`
+  shows a sticky toast naming it ("Logging to TSC + HRM...") and the Log now button
+  reads "Working..."; "Log queue now" shows "Logging the queue..." until the drain's
+  result replaces it. A notice arriving while the window is hidden clears any toast. Ticket-dependent buttons are gated on
   valid input via `UpdateActionState`.
   `MacButton`, `Card`, and `RoundedHost` are owner-drawn
   (no third-party UI library). Closing (X) or Esc **hides to tray**; `TrayApp` owns exit.
   Keyboard fast path: showing the window and picking a suggestion both focus the ticket
-  box, and Enter is the `AcceptButton` ("Add to queue").
+  box, and Enter is the `AcceptButton` ("Add to queue"). Enter in the search box instead
+  adds the top match to the ticket box (never queues). Hiding the window clears the
+  half-typed ticket text, because the date resets to today on reopen.
   Icons come from the embedded `app.ico` via `AppIcon.Load(size)`. The window position
   is persisted via `AppSettings` (saved on move/close, restored on open only if it
   still lands on a connected monitor, else centered).
@@ -252,8 +258,8 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   if the tz lookup fails). Worksheet year, day-of-year row, and HRM `workDate` all
   derive from it. Consequence: HRM rejects future stop times, so **today's** queue
   only succeeds from 18:00 on; past dates work anytime. `MainForm.HrmClosedForToday`
-  blocks the TSC + HRM / HRM only log items for today before 18:00 with an explanatory
-  status (Add to queue instead), rather than letting HRM fail confusingly. `SixPmScheduler` fires the
+  greys out the TSC + HRM / HRM only log items for today before 18:00 ("(after 6 PM)",
+  re-checked each time the menu opens) and the handlers still refuse with a status, rather than letting HRM fail confusingly. `SixPmScheduler` fires the
   daily run in-process at a **configurable** time (`LOG_TIME`, default 18:00 HCM;
   replacing the old external Task Scheduler job). Setting `LOG_TIME` earlier than 18:00
   makes today's HRM entries fail until 18:00 (the future-stop-time rule still applies).

@@ -12,6 +12,9 @@ internal sealed class NoticeToast : Control
     private const int BarW = 4;
     private const int PadX = 12;
     private const int PadY = 9;
+    private const int MaxLines = 2; // longer text is cut with "..."; the bell history has it whole
+    private const TextFormatFlags WrapFlags =
+        TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix;
     private static readonly Color SuccessColor = Color.FromArgb(46, 160, 80);
     private static readonly Color ErrorColor = Color.FromArgb(230, 76, 76);
 
@@ -56,10 +59,11 @@ internal sealed class NoticeToast : Control
         Text = message;
         AccessibleName = message;
 
-        // Grow to fit the wrapped text (the width is fixed by the owner).
+        // Grow to fit the wrapped text, up to MaxLines (the width is fixed by the owner).
         var textW = Width - BarW - 2 * PadX;
-        var textH = TextRenderer.MeasureText(message, Font, new Size(textW, int.MaxValue), TextFormatFlags.WordBreak).Height;
-        Height = Math.Max(36, textH + 2 * PadY);
+        var textH = TextRenderer.MeasureText(message, Font, new Size(textW, int.MaxValue), WrapFlags).Height;
+        var maxTextH = MaxLines * TextRenderer.MeasureText("A", Font).Height;
+        Height = Math.Max(36, Math.Min(textH, maxTextH) + 2 * PadY);
         using (var path = Rounded(new Rectangle(0, 0, Width, Height), Radius))
             Region = new Region(path);
 
@@ -101,8 +105,7 @@ internal sealed class NoticeToast : Control
             g.DrawPath(pen, path);
 
         var textRect = new Rectangle(BarW + PadX, PadY, Width - BarW - 2 * PadX, Height - 2 * PadY);
-        TextRenderer.DrawText(g, Text, Font, textRect, Theme.TextPrimary,
-            TextFormatFlags.WordBreak | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        TextRenderer.DrawText(g, Text, Font, textRect, Theme.TextPrimary, WrapFlags | TextFormatFlags.VerticalCenter);
     }
 
     private static GraphicsPath Rounded(Rectangle r, int radius)

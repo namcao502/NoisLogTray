@@ -68,7 +68,7 @@ internal sealed class MainForm : Form, IMessageFilter
     // One height for every button and input; widths vary by role (the primary button is
     // widest, card-header toolbar buttons share ToolbarBtnW). Neighbours sit 8px apart.
     private const int BtnH = 30;
-    private const int ToolbarBtnW = 96;
+    private const int ToolbarBtnW = 112;
     private const int BtnGap = 8;
     private const int ToolbarY = 7;   // card-header toolbar, centred on the section title
     private const int CardBodyY = 44; // first content row under a card header
@@ -83,7 +83,6 @@ internal sealed class MainForm : Form, IMessageFilter
     private readonly Panel _body = new();
     private readonly Panel _header = new();
     private readonly Label _headerTitle = new();
-    private readonly Label _headerSubtitle = new();
     private readonly ThemeToggleButton _themeBtn = new();
     private readonly NotificationBell _bell = new();
     private readonly ContextMenuStrip _bellMenu = ThemedMenuRenderer.CreateMenu();
@@ -122,7 +121,7 @@ internal sealed class MainForm : Form, IMessageFilter
     private readonly System.Windows.Forms.Timer _verifyTimer = new() { Interval = 500 };
     private readonly Dictionary<string, (VState State, string? Title)> _verify = new();
     private readonly MacButton _clearQueueBtn = MacButton.Secondary("Clear queue");
-    private readonly MacButton _logAllBtn = MacButton.Primary("Log all now");
+    private readonly MacButton _logAllBtn = MacButton.Secondary("Log queue now");
     private readonly Label _hoursHint = new();
 
     // Per typed-ticket HRM minutes while composing an entry. null = the default even
@@ -140,7 +139,7 @@ internal sealed class MainForm : Form, IMessageFilter
     // Raised after a successful TSC re-auth so the tray can retry any due queue entries.
     internal event Action? ReauthSucceeded;
 
-    // Raised by "Log all now" so the tray drains the whole queue through its guarded path.
+    // Raised by "Log queue now" so the tray drains the whole queue through its guarded path.
     internal event Action? DrainRequested;
 
     // Raised with each action's result so the tray shows it as a popup (ok = success).
@@ -255,7 +254,7 @@ internal sealed class MainForm : Form, IMessageFilter
         ClientSize = new Size(600, myTickets.Bottom + 20); // fit the cards snugly
 
         _toast.Width = 320;
-        _toast.Location = new Point(20 + CardW - _toast.Width, 14 + 12 + 30 + 6);
+        _toast.Location = new Point(20 + CardW - _toast.Width, 14 + _bell.Bottom + 6); // header sits at y=14
         _body.Controls.Add(_toast);
 
         AcceptButton = _queueBtn;
@@ -264,7 +263,8 @@ internal sealed class MainForm : Form, IMessageFilter
 
     private Panel BuildHeader()
     {
-        _header.Size = new Size(CardW, 76);
+        // Title only: the date already shows in the New entry date field.
+        _header.Size = new Size(CardW, 48);
         _header.BackColor = Theme.WindowBg;
 
         _headerTitle.Text = "NOIS Daily Log";
@@ -273,24 +273,16 @@ internal sealed class MainForm : Form, IMessageFilter
         _headerTitle.Font = new Font("Segoe UI Semibold", 20F, FontStyle.Bold);
         _headerTitle.ForeColor = Theme.TextPrimary;
 
-        var now = Hcm.Now();
-        _headerSubtitle.Text = $"{now:dddd}    /    {now:MMMM d}    /    {now:yyyy}".ToUpperInvariant();
-        _headerSubtitle.AutoSize = true;
-        _headerSubtitle.Location = new Point(3, 48);
-        _headerSubtitle.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
-        _headerSubtitle.ForeColor = Theme.TextSecondary;
-
         _themeBtn.OnWindow = true;
         _themeBtn.Size = new Size(BtnH, BtnH);
-        _themeBtn.Location = new Point(CardW - BtnH, 12);
+        _themeBtn.Location = new Point(CardW - BtnH, 9);
 
         _bell.Size = new Size(BtnH, BtnH);
-        _bell.Location = new Point(CardW - 2 * BtnH - BtnGap, 12);
+        _bell.Location = new Point(CardW - 2 * BtnH - BtnGap, 9);
         _bell.Click += (_, _) => OpenNoticeHistory();
         _tips.SetToolTip(_bell, "Notifications");
 
         _header.Controls.Add(_headerTitle);
-        _header.Controls.Add(_headerSubtitle);
         _header.Controls.Add(_themeBtn);
         _header.Controls.Add(_bell);
         return _header;
@@ -361,7 +353,7 @@ internal sealed class MainForm : Form, IMessageFilter
     private Card BuildWillLogCard()
     {
         var card = new Card { Size = new Size(CardW, CardBodyY + WillLogHostH + 12) };
-        card.Controls.Add(SectionLabel("WILL LOG", 16, 14));
+        card.Controls.Add(SectionLabel("QUEUE", 16, 14));
 
         // Running total / validation hint, right-aligned in the header (typed view only).
         _hoursHint.AutoSize = false;
@@ -465,6 +457,7 @@ internal sealed class MainForm : Form, IMessageFilter
         _logTscItem.Click += OnLogTsc;
         _logHrmItem.Click += OnLogHrm;
         _logNowMenu.Items.AddRange(new ToolStripItem[] { _logBothItem, _logTscItem, _logHrmItem });
+        _logNowMenu.Opening += (_, _) => UpdateLogNowMenu();
 
         _logOffItem.Click += OnLogOff;
         _logOffItem.ToolTipText =
@@ -503,7 +496,6 @@ internal sealed class MainForm : Form, IMessageFilter
         _header.BackColor = Theme.WindowBg;
 
         _headerTitle.ForeColor = Theme.TextPrimary;
-        _headerSubtitle.ForeColor = Theme.TextSecondary;
         foreach (var l in _sectionLabels) l.ForeColor = Theme.TextSecondary;
         foreach (var d in _dividers) d.BackColor = Theme.Divider;
 
@@ -552,9 +544,13 @@ internal sealed class MainForm : Form, IMessageFilter
         }
         _bell.HasUnread = true;
         if (IsOnScreen) _toast.ShowNotice(message, kind);
+        else _toast.HideNotice(); // drop a stale "Logging..." so it is not there on reopen
     }
 
     internal bool IsOnScreen => Visible && WindowState != FormWindowState.Minimized;
+
+    // The window the user is looking at right now; a window covered by another app is not.
+    internal bool IsForeground => IsOnScreen && ActiveForm == this;
 
     private void OpenNoticeHistory()
     {
@@ -1192,6 +1188,8 @@ internal sealed class MainForm : Form, IMessageFilter
         }
         _logAllBtn.Enabled = false;
         AppendLog("[log] Logging the whole queued list now...");
+        // Sticky until the drain's result notice (always raised for a user drain) replaces it.
+        _toast.ShowNotice("Logging the queue...", NoticeKind.Info, sticky: true);
         DrainRequested?.Invoke();
     }
 
@@ -1414,6 +1412,20 @@ internal sealed class MainForm : Form, IMessageFilter
     // Enable the ticket-dependent actions only when there is at least one valid ticket
     // and no operation is in flight. Add to queue and the TSC + HRM / HRM only log items also
     // need valid hours (each ticket > 0, the selected day <= 8h); TSC only ignores time.
+    // Checked on open because the 6 PM cutoff passes with no input event to react to.
+    private void UpdateLogNowMenu()
+    {
+        UpdateActionState();
+        var hrmClosed = HrmClosedForToday(DateOnly.FromDateTime(_date.Value.Date));
+        _logBothItem.Text = hrmClosed ? "TSC + HRM  (after 6 PM)" : "TSC + HRM";
+        _logHrmItem.Text = hrmClosed ? "HRM only  (after 6 PM)" : "HRM only";
+        if (hrmClosed)
+        {
+            _logBothItem.Enabled = false;
+            _logHrmItem.Enabled = false;
+        }
+    }
+
     private void UpdateActionState()
     {
         var hasTickets = TicketParser.Parse(_tickets.Text).Tickets.Count != 0;
@@ -1449,6 +1461,19 @@ internal sealed class MainForm : Form, IMessageFilter
     // Esc hides the window to the tray, except while it is clearing a non-empty search.
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
+        // Enter in the search box picks the top match; it must never fall through to
+        // AcceptButton and queue whatever is already in the ticket box.
+        if (keyData == Keys.Enter && _ticketSearch.Focused)
+        {
+            var matches = FilterSuggestions(_lastSuggestions, _ticketSearch.Text);
+            if (_ticketSearch.Text.Trim().Length != 0 && matches.Count != 0)
+            {
+                _ticketSearch.Text = string.Empty;
+                AddTicketToInput(matches[0].Key);
+            }
+            return true;
+        }
+
         var clearingSearch = _ticketSearch.Focused && _ticketSearch.TextLength != 0;
         if (keyData == Keys.Escape && !clearingSearch)
         {
@@ -1466,6 +1491,8 @@ internal sealed class MainForm : Form, IMessageFilter
             e.Cancel = true;
             SaveWindowPosition();
             _date.ForgetManualPick();
+            // The date resets to today on reopen, so a half-typed entry would land on the wrong day.
+            _tickets.Text = string.Empty;
             Hide();
             return;
         }
