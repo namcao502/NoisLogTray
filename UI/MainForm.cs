@@ -71,6 +71,7 @@ internal sealed class MainForm : Form, IMessageFilter
     // widest, card-header toolbar buttons share ToolbarBtnW). Neighbours sit 8px apart.
     private const int BtnH = 30;
     private const int ToolbarBtnW = 112;
+    private const int ToolbarTextPad = 24; // label inset when a toolbar button widens to fit
     private const int BtnGap = 8;
     private const int ToolbarY = 7;   // card-header toolbar, centred on the section title
     private const int CardBodyY = 44; // first content row under a card header
@@ -726,6 +727,27 @@ internal sealed class MainForm : Form, IMessageFilter
             RenderSuggestions(_lastSuggestions);
         UpdateWillLog();
         if (_bellMenu.Visible) RenderNoticeHistory();
+        FitToolbarButtons();
+    }
+
+    // Fonts scale with display DPI but the layout is in fixed pixels, so at 125% a
+    // ToolbarBtnW button cuts "Log queue now" to "...". Widen each to its current label,
+    // keeping the toolbar's right edge; the search box gives up the space.
+    private void FitToolbarButtons()
+    {
+        FitButtonLeftOf(_refreshBtn, _refreshBtn.Right);
+        FitButtonLeftOf(_jqlBtn, _refreshBtn.Left - BtnGap);
+        var searchHost = _ticketSearch.Parent!;
+        searchHost.Width = _jqlBtn.Left - BtnGap - searchHost.Left;
+
+        FitButtonLeftOf(_clearQueueBtn, _clearQueueBtn.Right);
+        FitButtonLeftOf(_logAllBtn, _clearQueueBtn.Left - BtnGap);
+    }
+
+    private static void FitButtonLeftOf(MacButton button, int right)
+    {
+        var width = Math.Max(ToolbarBtnW, TextRenderer.MeasureText(button.Text, button.Font).Width + ToolbarTextPad);
+        button.SetBounds(right - width, button.Top, width, button.Height);
     }
 
     private static string LogNowText => Lang.T("Log now  ▾", "Log ngay  ▾");
