@@ -3,7 +3,7 @@ using System.Text.Json;
 namespace NoisLogTray;
 
 // Persisted user data (settings.json under %AppData%\NoisLogTray): UI state (theme,
-// window position) plus the Config key/value map that AppConfig reads. Kept in one
+// window position and size) plus the Config key/value map that AppConfig reads. Kept in one
 // object so independent writers (theme toggle, window move, credential save) round-trip
 // the whole thing and never clobber each other's keys. Writes are atomic (temp file +
 // rename); a file that exists but cannot be parsed is preserved as settings.json.bad
@@ -14,6 +14,8 @@ internal sealed class AppSettings
     public string Language { get; set; } = "en"; // "en" or "vi"
     public int? WindowX { get; set; }
     public int? WindowY { get; set; }
+    public int? WindowWidth { get; set; }
+    public int? WindowHeight { get; set; }
     public Dictionary<string, string> Config { get; set; } = new();
 
     private static readonly JsonSerializerOptions Options = new()

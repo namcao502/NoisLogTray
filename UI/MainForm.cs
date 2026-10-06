@@ -169,6 +169,7 @@ internal sealed class MainForm : Form, IMessageFilter
         RefreshQueuedView(); // also renders the Will log (falls back to the queue)
         if (configError != null) AppendLog($"[config] {configError}");
         LoadMyTicketsAsync();
+        ReflowRowsOnResize();
     }
 
     protected override void Dispose(bool disposing)
@@ -204,9 +205,11 @@ internal sealed class MainForm : Form, IMessageFilter
         // square Windows 10 frame; the header doubles as the title bar.
         FormBorderStyle = FormBorderStyle.None;
         BackColor = Theme.WindowBg;
+        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.OptimizedDoubleBuffer, true);
         RestoreWindowPosition();
 
         BuildBody();
+        RestoreWindowSize();
     }
 
     // Restore the last window position if it still lands on a connected monitor;
@@ -226,19 +229,39 @@ internal sealed class MainForm : Form, IMessageFilter
         }
     }
 
-    // Persist the window position (read-modify-write so the theme key is preserved).
-    private void SaveWindowPosition()
+    // Restore the last size, clamped to the minimum (the built layout) and to the screen.
+    private void RestoreWindowSize()
+    {
+        var settings = AppSettings.Load();
+        if (settings.WindowWidth is not int width || settings.WindowHeight is not int height) return;
+        var workingArea = Screen.FromPoint(Location).WorkingArea;
+        ClientSize = new Size(
+            Math.Clamp(width, MinimumSize.Width, Math.Max(MinimumSize.Width, workingArea.Width)),
+            Math.Clamp(height, MinimumSize.Height, Math.Max(MinimumSize.Height, workingArea.Height)));
+    }
+
+    // Persist the window position and size (read-modify-write so the theme key is preserved).
+    private void SaveWindowBounds()
     {
         if (WindowState != FormWindowState.Normal) return;
         var settings = AppSettings.Load();
         settings.WindowX = Location.X;
         settings.WindowY = Location.Y;
+        settings.WindowWidth = ClientSize.Width;
+        settings.WindowHeight = ClientSize.Height;
         AppSettings.Save(settings);
     }
 
     // ---- Borderless rounded chrome: shadow, taskbar minimize, rounded corners, border, drag.
 
     private const int WindowRadius = 12;
+
+    // The form's own edge strip, outside _body, that Windows treats as the resize border.
+    private const int ResizeGrip = 6;
+    private const int WmNcHitTest = 0x0084;
+
+    // How much shorter than the built layout the window may get; only My tickets shrinks.
+    private const int MinHeightSlack = 100;
 
     protected override CreateParams CreateParams
     {
@@ -259,12 +282,24 @@ internal sealed class MainForm : Form, IMessageFilter
         Region = new Region(path);
     }
 
-    private void PaintWindowBorder(object? sender, PaintEventArgs e)
+    // Drawn on the form, not _body: _body is inset by the resize grip.
+    protected override void OnPaint(PaintEventArgs e)
     {
+        base.OnPaint(e);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var path = RoundedPath(new Rectangle(0, 0, _body.Width - 1, _body.Height - 1), WindowRadius);
+        using var path = RoundedPath(new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1), WindowRadius);
         using var pen = new Pen(Theme.CardBorder, 1f);
         e.Graphics.DrawPath(pen, path);
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        base.WndProc(ref m);
+        if (m.Msg != WmNcHitTest || WindowState != FormWindowState.Normal) return;
+        var lParam = m.LParam.ToInt64();
+        var cursor = PointToClient(new Point((short)(lParam & 0xFFFF), (short)((lParam >> 16) & 0xFFFF)));
+        var hit = ResizeHitTest.At(cursor, ClientSize, ResizeGrip, WindowRadius);
+        if (hit != ResizeHitTest.None) m.Result = hit;
     }
 
     [DllImport("user32.dll")]
@@ -296,45 +331,112 @@ internal sealed class MainForm : Form, IMessageFilter
     protected override void OnResizeEnd(EventArgs e)
     {
         base.OnResizeEnd(e);
-        SaveWindowPosition();
+        SaveWindowBounds();
     }
 
     private void BuildBody()
     {
         _body.Dock = DockStyle.Fill;
         _body.BackColor = Theme.WindowBg;
-        _body.Paint += PaintWindowBorder;
         _body.MouseDown += DragWindow;
         _body.AutoScroll = false; // main window never scrolls
 
-        var y = 14;
+        // _body starts ResizeGrip in from the window edge; offsets subtract it so the
+        // cards stay 20px from the visible edge.
+        const int left = 20 - ResizeGrip;
+        var y = 14 - ResizeGrip;
         var header = BuildHeader();
-        header.Location = new Point(20, y);
+        header.Location = new Point(left, y);
         _body.Controls.Add(header);
         y += header.Height + 8;
 
         // Input + primary action first (where focus lands), the queue next, the picker last.
         var newEntry = BuildNewEntryCard();
-        newEntry.Location = new Point(20, y);
+        newEntry.Location = new Point(left, y);
         _body.Controls.Add(newEntry);
         y += newEntry.Height + 12;
 
         var willLog = BuildWillLogCard();
-        willLog.Location = new Point(20, y);
+        willLog.Location = new Point(left, y);
         _body.Controls.Add(willLog);
         y += willLog.Height + 12;
 
         var myTickets = BuildMyTicketsCard();
-        myTickets.Location = new Point(20, y);
+        myTickets.Location = new Point(left, y);
         _body.Controls.Add(myTickets);
-        ClientSize = new Size(600, myTickets.Bottom + 20); // fit the cards snugly
+        ClientSize = new Size(600, myTickets.Bottom + 20 + ResizeGrip); // fit the cards snugly
+        MinimumSize = new Size(ClientSize.Width, ClientSize.Height - MinHeightSlack);
 
         _toast.Width = 320;
-        _toast.Location = new Point(20 + CardW - _toast.Width, 14 + _bell.Bottom + 6); // header sits at y=14
+        _toast.Location = new Point(header.Right - _toast.Width, header.Top + _bell.Bottom + 6);
         _body.Controls.Add(_toast);
 
         AcceptButton = _queueBtn;
+        Padding = new Padding(ResizeGrip);
         Controls.Add(_body);
+
+        AnchorForResize(header, newEntry, willLog, myTickets);
+    }
+
+    // Set after _body is docked at its final size: WinForms records each anchor's edge
+    // distances when Anchor is assigned, so the built layout is what a resize preserves.
+    // Cards and inputs stretch with the width, right-hand buttons stay right, and only
+    // the My tickets list takes extra height.
+    private void AnchorForResize(Panel header, Card newEntry, Card willLog, Card myTickets)
+    {
+        const AnchorStyles stretch = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        const AnchorStyles right = AnchorStyles.Top | AnchorStyles.Right;
+
+        header.Anchor = stretch;
+        foreach (var button in new Control[] { _bell, _themeBtn, _langBtn, _settingsBtn, _closeBtn }) button.Anchor = right;
+        _toast.Anchor = right;
+
+        newEntry.Anchor = stretch;
+        _tickets.Parent!.Anchor = stretch;
+        _tickets.Anchor = stretch;
+        _clearBtn.Anchor = right;
+        _queueBtn.Anchor = stretch;
+        _logNowBtn.Anchor = right;
+        _moreBtn.Anchor = right;
+
+        willLog.Anchor = stretch;
+        _hoursHint.Anchor = right;
+        _clearQueueBtn.Anchor = right;
+        _logAllBtn.Anchor = right;
+        _willLogList.Parent!.Anchor = stretch;
+
+        myTickets.Anchor = stretch | AnchorStyles.Bottom;
+        _ticketSearch.Parent!.Anchor = stretch;
+        _ticketSearch.Anchor = stretch;
+        _jqlBtn.Anchor = right;
+        _refreshBtn.Anchor = right;
+        _suggestions.Parent!.Anchor = stretch | AnchorStyles.Bottom;
+    }
+
+    // Rows are built at the list's width, so a width change rebuilds them. Hooked after
+    // the first render so construction-time layout passes don't re-render early.
+    // The rebuild is posted: run inside the window's layout pass, the list keeps the old
+    // wider scroll extent after a shrink and shows a stray horizontal scrollbar.
+    private void ReflowRowsOnResize()
+    {
+        var suggestionsWidth = _suggestions.Width;
+        _suggestions.Resize += (_, _) =>
+        {
+            if (_suggestions.Width == suggestionsWidth || !IsHandleCreated) return;
+            suggestionsWidth = _suggestions.Width;
+            BeginInvoke(() =>
+            {
+                if (!_loadingSuggestions) RenderSuggestions(_lastSuggestions); // keep "Loading..." visible
+            });
+        };
+
+        var willLogWidth = _willLogList.Width;
+        _willLogList.Resize += (_, _) =>
+        {
+            if (_willLogList.Width == willLogWidth || !IsHandleCreated) return;
+            willLogWidth = _willLogList.Width;
+            BeginInvoke(UpdateWillLog);
+        };
     }
 
     private Panel BuildHeader()
@@ -1651,7 +1753,7 @@ internal sealed class MainForm : Form, IMessageFilter
         if (e.CloseReason == CloseReason.UserClosing)
         {
             e.Cancel = true;
-            SaveWindowPosition();
+            SaveWindowBounds();
             _date.ForgetManualPick();
             // The date resets to today on reopen, so a half-typed entry would land on the wrong day.
             _tickets.Text = string.Empty;
