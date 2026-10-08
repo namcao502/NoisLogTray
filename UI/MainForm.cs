@@ -1322,6 +1322,7 @@ internal sealed class MainForm : Form, IMessageFilter
             Key = key,
             KeyColor = TicketColor(key),
             Slots = SlotText(slots),
+            Summary = SummaryFor(key),
             DotColor = DotColorFor(key),
         };
         row.SetRemoveAccessibleName(Lang.T($"Remove {key} on {date}", $"Xóa {key} ngày {date}"));
@@ -1337,6 +1338,7 @@ internal sealed class MainForm : Form, IMessageFilter
             Key = key,
             KeyColor = TicketColor(key),
             Slots = SlotText(slots),
+            Summary = SummaryFor(key),
             DotColor = DotColorFor(key),
             Index = index,
             Hours = Math.Round(minutes / 60.0, 2),
@@ -1347,6 +1349,10 @@ internal sealed class MainForm : Form, IMessageFilter
 
     private static string SlotText(IReadOnlyList<TimeSlot> slots)
         => string.Join("  /  ", slots.Select(s => $"{s.Start}-{s.End}"));
+
+    // The Jira title from verification (or a My tickets row); empty while unverified.
+    private string SummaryFor(string key)
+        => _verify.TryGetValue(key, out var v) && v.Title != null ? v.Title : "";
 
     // The Jira verification color for a ticket's status dot (grey when unknown).
     private Color DotColorFor(string key)

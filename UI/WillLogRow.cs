@@ -5,8 +5,8 @@ using System.Windows.Forms;
 namespace NoisLogTray;
 
 // One line of the "Will log" preview (queued view): a status dot, the colored ticket
-// key, its time slots right after the key, and a remove [X] on the far right that drops
-// just that ticket. The dot/key/slots are drawn in a single paint pass so they share one
+// key, its time slots right after the key, the Jira summary, and a remove [X] on the far
+// right that drops just that ticket. The dot/key/slots are drawn in a single paint pass so they share one
 // baseline; the [X] is a small owner-drawn child control (CloseButton).
 internal sealed class WillLogRow : Control
 {
@@ -20,11 +20,15 @@ internal sealed class WillLogRow : Control
     private const int RemovePad = 2;   // gap from the right edge
 
     private readonly CloseButton _remove = new();
+    private readonly SummaryTip _summaryTip = new();
 
     internal Color DotColor = Color.FromArgb(150, 150, 156);
     internal string Key = "";
     internal Color KeyColor = Color.Gray;
     internal string Slots = "";
+    internal string Summary = ""; // Jira title; empty until the ticket is verified
+
+    private const int MinSummaryW = 40; // below this a summary is only "..."; skip it
 
     // Raised when the row's [X] is clicked (removes this ticket from the queue).
     internal event Action? RemoveClicked;
@@ -43,6 +47,12 @@ internal sealed class WillLogRow : Control
 
     // Name the [X] for screen readers (e.g. "Remove MDP-1234 on 2026-07-24").
     internal void SetRemoveAccessibleName(string name) => _remove.AccessibleName = name;
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing) _summaryTip.Dispose();
+        base.Dispose(disposing);
+    }
 
     protected override void OnSizeChanged(EventArgs e)
     {
@@ -67,5 +77,15 @@ internal sealed class WillLogRow : Control
         var slotsW = Math.Max(10, Width - slotsX - RemoveSize - RemovePad - 6);
         TextRenderer.DrawText(g, Slots, TextFont, new Rectangle(slotsX, 0, slotsW, Height),
             Theme.TextSecondary, LeftFlags);
+
+        // The Jira summary fills what is left before the [X], cut with "..." when long.
+        var summaryX = slotsX + TextRenderer.MeasureText(Slots, TextFont).Width + 12;
+        var summaryW = Width - summaryX - RemoveSize - RemovePad - 6;
+        if (Summary.Length != 0 && summaryW > MinSummaryW)
+            TextRenderer.DrawText(g, Summary, TextFont, new Rectangle(summaryX, 0, summaryW, Height),
+                Theme.TextPrimary, LeftFlags | TextFormatFlags.EndEllipsis);
+        var isSummaryCut = Summary.Length != 0
+            && (summaryW <= MinSummaryW || TextRenderer.MeasureText(Summary, TextFont).Width > summaryW);
+        _summaryTip.Update(this, Summary, isSummaryCut);
     }
 }
