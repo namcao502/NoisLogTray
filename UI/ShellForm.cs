@@ -493,9 +493,14 @@ internal sealed class ShellForm : Form
             case Keys.Control | Keys.NumPad4:
                 ShowPage(ShellPage.Week);
                 return true;
+            case Keys.Control | Keys.D5:
+            case Keys.Control | Keys.NumPad5:
+                ShowPage(ShellPage.Claude);
+                return true;
         }
 
-        if (keyData != Keys.Escape) return base.ProcessCmdKey(ref msg, keyData);
+        // In the terminal Esc belongs to Claude (it interrupts a running turn).
+        if (keyData != Keys.Escape || CurrentPage == ShellPage.Claude) return base.ProcessCmdKey(ref msg, keyData);
 
         // Esc clears a non-empty input box first (placeholder marks the inputs, which skips
         // the inline hours field); otherwise it hides the window to the tray.

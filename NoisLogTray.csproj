@@ -42,9 +42,22 @@
     <None Update=".env.example" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- xterm.js (MIT) for the in-app Claude terminal, served to WebView2 from the output folder. -->
+  <ItemGroup>
+    <None Include="Assets\terminal\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Playwright" Version="1.61.0" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />
     <PackageReference Include="ModelContextProtocol" Version="2.1.0" />
   </ItemGroup>
+
+  <!-- WebView2's targets always reference its WPF wrapper, which clashes with WinForms' WindowsBase (MSB3277). -->
+  <Target Name="DropWebView2Wpf" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
 
 </Project>

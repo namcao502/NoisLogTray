@@ -94,7 +94,9 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `TicketQueue`, `UpdateService` (startup GitHub-Releases update check), and the Tasks
   board: `TicketStore` (JSON state files), `TicketBoard` (section logic), `TicketPoller` (Jira poll),
   `AzureDevOpsClient` + `PrTracker` + `PrUpdateChecker` (PR tracking), `TeamsNotifier`
-  (Teams webhook cards), `JiraStatusFlow` (the walk to Ready to Test).
+  (Teams webhook cards), `JiraStatusFlow` (the walk to Ready to Test); the Claude terminal:
+  `PseudoConsoleSession` (one child process on a Windows ConPTY, P/Invoke) and `ClaudeSessionHost`
+  (owns that session for the tray's lifetime plus a ~1MB replay buffer).
 - `Helpers/` - utilities: `TicketParser` (incl. `TryParseKey` for a key or Jira link), `TicketSearch`, `TimeSlots`, `TscCells`, `Timesheet`, `Leave`,
   `Hcm`, `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppSettings`,
   `AppIcon`, `TicketSort` (earliest due first, undated last, then key; Tasks + Dashboard),
@@ -121,8 +123,8 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `ShellForm`, `SidebarNav`, the pages and `TrayApp.ApplyLanguage` re-label on `Lang.Changed`;
   other dialogs read the language when opened. Logs and code stay English. Also `TrayApp`,
   `ShellForm` + `SidebarNav` + `ShellLayout` (the one app window, see below), the pages
-  `DashboardPage` (with `DashboardRow`, see below), `LogPage`, `TasksPage` (with `TaskRow`) and
-  `WeekPage` (weekly coverage: HRM hours + TSC
+  `DashboardPage` (with `DashboardRow`, see below), `LogPage`, `TasksPage` (with `TaskRow`),
+  `ClaudePage` (see below) and `WeekPage` (weekly coverage: HRM hours + TSC
   ticket per weekday; an under-logged past weekday is a clickable `ClickableRow` that raises
   `LogDayRequested` -> `TrayApp` shows the Log page on that date via `LogPage.PrepareForDate`.
   An approved day off (`DayCoverage.IsOff`) reads gray "off"
@@ -172,8 +174,9 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   window is hidden or not built yet, and keep the current page when it is already on screen; the
   18:00 reminder and a Week day click still open the Log page. Logging and TSC session actions live
   only in the window, so they are not duplicated there. `ShowShell(page)` builds the shell and its
-  pages lazily (`_shell`, `_dashboardPage`, `_logPage`, `_tasksPage`, `_weekPage`, `_settingsPage`) and shows the
-  requested page. Ticket state changes refresh both ticket views via `RefreshTicketViews`
+  pages lazily (`_shell`, `_dashboardPage`, `_logPage`, `_tasksPage`, `_weekPage`, `_claudePage`, `_settingsPage`) and shows the
+  requested page. `_claudeHost` (the Claude session) is created once and outlives every shell
+  rebuild; Quit and `Dispose` end it. Ticket state changes refresh both ticket views via `RefreshTicketViews`
   (Tasks + Dashboard); launch stages and the checking state are pushed to both pages.
   A page Save (`SettingsPage.SaveRequested` -> `OnSettingsSaved`) writes the per-user config into
   `settings.json` (an IO/permission failure is logged and noticed), then - deferred via
@@ -186,7 +189,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   blocked. A successful TSC re-auth (from the window, via the `ReauthSucceeded` event)
   calls `CatchUpIfDue` to retry any queue entries that were waiting on sign-in.
 - **`ShellForm`** - the single app window (title "NOIS Workday"): a `SidebarNav` on the left
-  (one row per `ShellPage` - Dashboard, Log, Tasks, Week, and Settings pinned at the bottom), and on the right a
+  (one row per `ShellPage` - Dashboard, Log, Tasks, Week, Claude, and Settings pinned at the bottom), and on the right a
   header (menu button that collapses the sidebar to glyphs, page title, bell, theme toggle, EN/VI
   language toggle, then minimize / maximize-restore / close) over the current page. Pages are
   `UserControl`s added with `AddPage`; they may implement `IShellPage` (`OnPageShown` when the page
@@ -208,9 +211,10 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   Tasks row shows a red **badge** with `TasksPage.AttentionCount` (In progress / Done tickets with
   a Ready to Test button, or In progress ones already Done in Jira), raised via `AttentionChanged`
   on every `Reload`.
-  **Keys:** Ctrl+1 / Ctrl+2 / Ctrl+3 / Ctrl+4 switch to Dashboard / Log / Tasks / Week (Settings
+  **Keys:** Ctrl+1 .. Ctrl+5 switch to Dashboard / Log / Tasks / Week / Claude (Settings
   has no shortcut). Esc clears a non-empty input
-  box (one with a placeholder, so not the inline hours field), otherwise hides to tray; the
+  box (one with a placeholder, so not the inline hours field), otherwise hides to tray - except on
+  the Claude page, where Esc goes to the CLI (it interrupts a running turn); the
   header's close button and Alt+F4 also **hide to tray**; `TrayApp` owns exit.
   **Notices:** every user-facing message goes through `TrayApp.Notify`, which records
   it in the bell history (`ShellForm.PostNotice`, last 20, session-only; the
@@ -341,6 +345,21 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   first `OnPageShown` after the window was shown (switching pages keeps the week on screen);
   hiding to tray resets it, so reopening reloads the current week. Refresh re-reads it.
   Icons come from the embedded `app.ico` via `AppIcon.Load(size)`.
+- **`ClaudePage`** - an interactive `claude` CLI inside the window. `ClaudeSessionHost` (owned by
+  `TrayApp`) runs `%UserProfile%\.local\bin\claude.exe` (else `claude.exe` on PATH) under ConPTY in
+  `DEV_REPO_PATH` (the user profile if missing); the page draws it with **xterm.js** in a **WebView2**
+  (`Assets/terminal/`: `index.html` + vendored xterm 6 and addon-fit, MIT, copied to the output and
+  served through the virtual host `noislogtray.terminal`; WebView2 data in `%AppData%\NoisLogTray\WebView2`).
+  The WebView2 starts on the page's first show. Messages are JSON: page -> host `ready` / `resize` /
+  `input` / `page` (Ctrl+1..5 typed in the terminal, which WebView2 keeps from the form's
+  `ProcessCmdKey`; mapped by `ClaudePage.PageForShortcut`), host -> page `output` (base64 bytes, so
+  split UTF-8 survives) / `theme` / `focus` / `reset`. Output is coalesced and flushed at most every
+  16ms. A rebuilt page (Settings save) `Attach`es to the running session and replays its buffered
+  output, then resizes to nudge a repaint. Ctrl+C copies a selection, else sends ^C. When the CLI
+  exits the page says so and Enter starts a new session; the top bar shows the working directory
+  and a Restart button (stop, clear the screen, start again). The csproj's `DropWebView2Wpf`
+  target (also in the test project) removes the package's WPF wrapper reference, which otherwise
+  clashes with WinForms' `WindowsBase` (MSB3277).
 - **`LoggingService`** - orchestrator over both destinations plus Jira. `DrainQueueAsync`
   is the core: sniff one Graph token, log every queued entry to both destinations
   (`LogEntryAsync` runs TSC + HRM in parallel), and remove only entries that fully
@@ -486,7 +505,8 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
 (the pending log queue), `settings.json` (theme, window position, **and** the `Config`
 key/value map of secrets/settings written from Settings, via `AppSettings`), and
-`logs/app-yyyy-MM-dd.log` (one file per day). A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
+`logs/app-yyyy-MM-dd.log` (one file per day), plus `WebView2/` (the Claude terminal's browser
+data). A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
 first load and removed. A missing or malformed `queue.json` yields an empty queue by
 design so the 18:00 runner never throws; `AppSettings` likewise falls back to defaults on
 a missing/bad `settings.json` (preserving the bad copy as `settings.json.bad`). `AppLogger`

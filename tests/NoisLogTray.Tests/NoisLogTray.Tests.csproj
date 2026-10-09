@@ -23,4 +23,11 @@
     <ProjectReference Include="..\..\NoisLogTray.csproj" />
   </ItemGroup>
 
+  <!-- Same as the app: WebView2's targets reference its WPF wrapper, which clashes with WindowsBase (MSB3277). -->
+  <Target Name="DropWebView2Wpf" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup>
+      <Reference Remove="@(Reference)" Condition="'%(Filename)' == 'Microsoft.Web.WebView2.Wpf'" />
+    </ItemGroup>
+  </Target>
+
 </Project>

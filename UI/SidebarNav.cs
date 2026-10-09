@@ -43,6 +43,7 @@ internal sealed class SidebarNav : Panel
         AddItem(ShellPage.Log, "", () => PageLabel(ShellPage.Log));
         AddItem(ShellPage.Tasks, "", () => PageLabel(ShellPage.Tasks));
         AddItem(ShellPage.Week, "", () => PageLabel(ShellPage.Week));
+        AddItem(ShellPage.Claude, "", () => PageLabel(ShellPage.Claude));
         AddItem(ShellPage.Settings, "", () => PageLabel(ShellPage.Settings));
 
         ApplyLanguage();
@@ -67,6 +68,7 @@ internal sealed class SidebarNav : Panel
         ShellPage.Log => "Log",
         ShellPage.Tasks => "Tasks",
         ShellPage.Week => Lang.T("Week", "Tuần"),
+        ShellPage.Claude => "Claude",
         ShellPage.Settings => Lang.T("Settings", "Cài đặt"),
         _ => throw new ArgumentOutOfRangeException(nameof(page)),
     };

@@ -7,5 +7,6 @@ internal enum ShellPage
     Log,
     Tasks,
     Week,
+    Claude,
     Settings,
 }

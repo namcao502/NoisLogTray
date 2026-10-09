@@ -24,6 +24,8 @@ internal sealed class TrayApp : ApplicationContext
     private LogPage? _logPage;
     private TasksPage? _tasksPage; // null when Tasks is disabled this session
     private WeekPage? _weekPage;
+    private ClaudePage? _claudePage;
+    private ClaudeSessionHost? _claudeHost;
     private SettingsPage? _settingsPage;
     // All three stay null when the TaskWatcher state import failed: Tasks is disabled this session.
     private readonly TicketStore? _ticketStore;
@@ -169,6 +171,7 @@ internal sealed class TrayApp : ApplicationContext
         _logPage = null;
         _tasksPage = null;
         _weekPage = null;
+        _claudePage = null;
         _settingsPage = null;
         if (_service != null)
         {
@@ -251,6 +254,11 @@ internal sealed class TrayApp : ApplicationContext
             _shell.AddPage(ShellPage.Week, _weekPage);
             // Clicking an under-logged day opens the Log page on that date.
             _weekPage.LogDayRequested += date => { ShowShell(ShellPage.Log); _logPage?.PrepareForDate(date); };
+            // The session lives in TrayApp so a rebuilt window (Settings save) reattaches instead of killing it.
+            _claudeHost ??= new ClaudeSessionHost(() => _service?.DevRepoPath ?? AppConfig.DefaultDevRepoPath);
+            _claudePage = new ClaudePage(_claudeHost);
+            _shell.AddPage(ShellPage.Claude, _claudePage);
+            _claudePage.PageRequested += ShowShell;
             _settingsPage = new SettingsPage();
             _shell.AddPage(ShellPage.Settings, _settingsPage);
             _settingsPage.SaveRequested += OnSettingsSaved;
@@ -868,6 +876,7 @@ internal sealed class TrayApp : ApplicationContext
         _scheduler.Dispose();
         _tasksTimer.Dispose();
         _shell?.Dispose();
+        _claudeHost?.Dispose();
         ExitThread();
     }
 
@@ -918,6 +927,7 @@ internal sealed class TrayApp : ApplicationContext
             _tray.Visible = false;
             _tray.Dispose();
             _shell?.Dispose();
+            _claudeHost?.Dispose();
             _marshal.Dispose();
         }
         base.Dispose(disposing);
