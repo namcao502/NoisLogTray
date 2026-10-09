@@ -15,6 +15,8 @@ internal sealed class AppConfig
     // Daily time (Asia/Ho_Chi_Minh) for the auto-log drain and the empty-queue reminder.
     internal static readonly TimeOnly DefaultLogTime = new(18, 0);
 
+    internal const string DefaultDevRepoPath = @"C:\Project\Backend-DotNet";
+
     // Accepted LOG_TIME input formats: 12-hour with AM/PM first, 24-hour still allowed.
     internal static readonly string[] LogTimeFormats = { "h:mm tt", "hh:mm tt", "H:mm", "HH:mm" };
 
@@ -22,7 +24,10 @@ internal sealed class AppConfig
     internal static readonly string[] UserKeys =
     {
         "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "HRM_API_KEY", "TSC_GRAPH_COLUMNS", "LOG_TIME",
+        "DEV_REPO_PATH", "AZURE_DEVOPS_PAT", "TEAMS_WEBHOOK_URL",
     };
+
+    internal static readonly string[] DevTokenKeys = { "AZURE_DEVOPS_PAT", "TEAMS_WEBHOOK_URL" };
 
     // Config key for the custom "My tickets" query (managed by its own JqlForm dialog,
     // not the credentials dialog). Unset -> JiraClient.DefaultMyTicketsJql is used.
@@ -35,7 +40,10 @@ internal sealed class AppConfig
     internal string HrmProjectId { get; }
     internal string? MsGraphToken { get; }
     internal TimeOnly LogTime { get; }
+    internal string DevRepoPath { get; }
     internal string? JiraMyTicketsJql { get; }
+    internal string? AzureDevOpsPat { get; }
+    internal string? TeamsWebhookUrl { get; }
     internal GraphTscOptions Graph { get; }
 
     private AppConfig(Env env)
@@ -47,7 +55,10 @@ internal sealed class AppConfig
         HrmProjectId = env.Get("HRM_PROJECT_ID") ?? DefaultProjectId;
         MsGraphToken = env.Get("MS_GRAPH_TOKEN");
         LogTime = ParseLogTime(env.Get("LOG_TIME"));
+        DevRepoPath = ParseDevRepoPath(env.Get("DEV_REPO_PATH"));
         JiraMyTicketsJql = env.Get(MyTicketsJqlKey);
+        AzureDevOpsPat = env.Get("AZURE_DEVOPS_PAT");
+        TeamsWebhookUrl = env.Get("TEAMS_WEBHOOK_URL");
         Graph = new GraphTscOptions(
             DriveId: env.Get("TSC_GRAPH_DRIVE_ID"),
             ItemId: env.Get("TSC_GRAPH_ITEM_ID"),
@@ -65,6 +76,9 @@ internal sealed class AppConfig
             return time;
         return DefaultLogTime;
     }
+
+    internal static string ParseDevRepoPath(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? DefaultDevRepoPath : value.Trim();
 
     // Current effective values for the managed keys, for pre-filling the edit dialog.
     internal static IReadOnlyDictionary<string, string> ReadUserValues()
@@ -96,6 +110,9 @@ internal sealed class AppConfig
         var settings = AppSettings.LoadOrBackup(out var corrupt);
         MigrateLegacyEnv(settings);
         UpgradeSecretsAtRest(settings);
+        var tokensPath = Path.Combine(
+            ParseDevRepoPath(settings.Config.GetValueOrDefault("DEV_REPO_PATH")), "docs", "local-config", "tokens.env");
+        if (ImportDevTokens(settings, tokensPath)) AppSettings.Save(settings);
         try
         {
             var config = new AppConfig(new Env(Decrypted(settings.Config)));
@@ -134,6 +151,25 @@ internal sealed class AppConfig
         {
             AppLogger.Error($"Legacy .env migration failed: {e.Message}");
         }
+    }
+
+    // One-time import; a key the user already has (even cleared to "") is never overwritten.
+    internal static bool ImportDevTokens(AppSettings settings, string tokensPath)
+    {
+        var changed = false;
+        try
+        {
+            var tokens = Env.ParseFile(tokensPath);
+            foreach (var key in DevTokenKeys)
+                if (!settings.Config.ContainsKey(key) && tokens.TryGetValue(key, out var value) && value.Length != 0)
+                {
+                    settings.Config[key] = Secrets.Protect(value);
+                    changed = true;
+                }
+        }
+        // Called outside TryLoad's try, so nothing may escape: config load never crashes startup.
+        catch (Exception e) { AppLogger.Error($"tokens.env import failed: {e.Message}"); }
+        return changed;
     }
 
     // A copy of the stored config with secret values decrypted, for building the

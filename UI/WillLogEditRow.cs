@@ -13,12 +13,13 @@ namespace NoisLogTray;
 // mid-edit. HoursChanged carries the row index and the parsed hours.
 internal sealed class WillLogEditRow : Control
 {
-    private static readonly Font KeyFont = new("Segoe UI", 9F, FontStyle.Bold);
-    private static readonly Font TextFont = new("Segoe UI", 9F);
+    private static readonly Font KeyFont = UiScale.Font("Segoe UI", 9F, FontStyle.Bold);
+    private static readonly Font TextFont = UiScale.Font("Segoe UI", 9F);
 
-    private const int SlotsW = 120; // minimum; widens when DPI-scaled text needs more
-    private const int HoursW = 40;
-    private const int UnitW = 12; // room for the trailing "h"
+    private static readonly int SlotsW = UiScale.S(120); // minimum; widens when DPI-scaled text needs more
+    private static readonly int HoursW = UiScale.S(40);
+    private static readonly int UnitW = UiScale.S(12); // room for the trailing "h"
+    private static readonly int TextX = UiScale.S(18); // key text starts right of the dot
 
     private const TextFormatFlags LeftFlags =
         TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding;
@@ -52,7 +53,7 @@ internal sealed class WillLogEditRow : Control
         }
     }
 
-    private const int MinSummaryW = 40; // below this a summary is only "..."; skip it
+    private static readonly int MinSummaryW = UiScale.S(40); // below this a summary is only "..."; skip it
 
     // Raised when the user commits a new hours value (parsed, >= 0).
     internal event Action<int, double>? HoursChanged;
@@ -76,7 +77,7 @@ internal sealed class WillLogEditRow : Control
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
             | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        Height = 26;
+        Height = UiScale.S(26);
         Margin = new Padding(0);
 
         _hours.BorderStyle = BorderStyle.None;
@@ -116,15 +117,15 @@ internal sealed class WillLogEditRow : Control
 
     // Fonts scale with display DPI, so at 125% two slots overflow a fixed 120px and lose
     // their left edge ("00-12:00").
-    private int SlotsWidth() => Math.Max(SlotsW, TextRenderer.MeasureText(Slots, TextFont).Width + 4);
+    private int SlotsWidth() => Math.Max(SlotsW, TextRenderer.MeasureText(Slots, TextFont).Width + UiScale.S(4));
 
     // The hours field sits just left of the right-aligned slots text.
     private Rectangle HoursRect()
     {
-        const int boxH = 18;
+        var boxH = UiScale.S(18);
         var boxY = (Height - boxH) / 2;
-        var slotsX = Width - SlotsWidth() - 2;
-        var boxRight = slotsX - UnitW - 4;
+        var slotsX = Width - SlotsWidth() - UiScale.S(2);
+        var boxRight = slotsX - UnitW - UiScale.S(4);
         return new Rectangle(boxRight - HoursW, boxY, HoursW, boxH);
     }
 
@@ -144,7 +145,8 @@ internal sealed class WillLogEditRow : Control
     {
         var r = HoursRect();
         var h = _hours.PreferredHeight;
-        _hours.Bounds = new Rectangle(r.X + 3, r.Y + Math.Max(0, (r.Height - h) / 2), r.Width - 6, h);
+        var inset = UiScale.S(3);
+        _hours.Bounds = new Rectangle(r.X + inset, r.Y + Math.Max(0, (r.Height - h) / 2), r.Width - 2 * inset, h);
     }
 
     protected override void OnPaint(PaintEventArgs e)
@@ -153,16 +155,17 @@ internal sealed class WillLogEditRow : Control
         g.Clear(Theme.InputBg);
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
+        var dotSize = UiScale.S(8f);
         using (var dot = new SolidBrush(DotColor))
-            g.FillEllipse(dot, 4, (Height - 8) / 2f, 8, 8);
+            g.FillEllipse(dot, UiScale.S(4f), (Height - dotSize) / 2f, dotSize, dotSize);
 
         var box = HoursRect();
-        var keyRect = new Rectangle(18, 0, box.Left - 26, Height);
+        var keyRect = new Rectangle(TextX, 0, box.Left - UiScale.S(26), Height);
         TextRenderer.DrawText(g, Key, KeyFont, keyRect, KeyColor, LeftFlags);
 
         // The Jira summary fills the gap between the key and the hours field.
-        var summaryX = 18 + TextRenderer.MeasureText(Key, KeyFont).Width + 12;
-        var summaryW = box.Left - 8 - summaryX;
+        var summaryX = TextX + Math.Max(RowColumns.KeyWidth(KeyFont), TextRenderer.MeasureText(Key, KeyFont).Width) + UiScale.S(12);
+        var summaryW = box.Left - UiScale.S(8) - summaryX;
         if (Summary.Length != 0 && summaryW > MinSummaryW)
             TextRenderer.DrawText(g, Summary, TextFont, new Rectangle(summaryX, 0, summaryW, Height),
                 Theme.TextPrimary, LeftFlags | TextFormatFlags.EndEllipsis);
@@ -171,14 +174,14 @@ internal sealed class WillLogEditRow : Control
         _summaryTip.Update(this, Summary, isSummaryCut);
 
         // Field border + trailing "h" unit.
-        using (var path = Rounded(box, 4))
+        using (var path = Rounded(box, UiScale.S(4)))
         using (var pen = new Pen(Theme.Divider))
             g.DrawPath(pen, path);
         var unitRect = new Rectangle(box.Right + 1, 0, UnitW, Height);
         TextRenderer.DrawText(g, "h", TextFont, unitRect, Theme.TextSecondary, LeftFlags);
 
         var slotsWidth = SlotsWidth();
-        var slotsRect = new Rectangle(Width - slotsWidth - 2, 0, slotsWidth, Height);
+        var slotsRect = new Rectangle(Width - slotsWidth - UiScale.S(2), 0, slotsWidth, Height);
         TextRenderer.DrawText(g, Slots, TextFont, slotsRect, Theme.TextSecondary, RightFlags);
     }
 

@@ -41,6 +41,11 @@ internal sealed class LoggingService
         => _jira.ValidateJqlAsync(jql, ct);
 
     internal TimeOnly LogTime => _config.LogTime;
+    internal string DevRepoPath => _config.DevRepoPath;
+
+    internal IJiraClient Jira => _jira;
+
+    internal string JiraBaseUrl => _config.JiraBaseUrl.TrimEnd('/');
 
     internal Task<JiraVerifyResult> VerifyAsync(string ticketId, CancellationToken ct = default)
         => _jira.VerifyTicketAsync(ticketId, ct);
@@ -84,6 +89,25 @@ internal sealed class LoggingService
         }
     }
 
+    // Override or a still-valid cached token; never sniffs and never blocks (a busy lock means
+    // a sniff is in flight, so there is nothing cached to hand out yet).
+    internal string? TryGetCachedGraphToken()
+    {
+        if (!string.IsNullOrEmpty(_config.MsGraphToken)) return _config.MsGraphToken;
+
+        if (!_tokenLock.Wait(0)) return null;
+        try
+        {
+            return _cachedToken != null && DateTimeOffset.UtcNow < _cachedTokenExpiry - TokenSafetyBuffer
+                ? _cachedToken
+                : null;
+        }
+        finally
+        {
+            _tokenLock.Release();
+        }
+    }
+
     // Drop any cached Graph token so the next log re-sniffs. Call after a re-auth so
     // a stale token from a previous session is not reused.
     internal void InvalidateGraphToken()
@@ -107,6 +131,7 @@ internal sealed class LoggingService
         var token = await AcquireGraphTokenAsync(onLog);
         if (string.IsNullOrEmpty(token))
             return (false, "", "No Graph token (session may be logged out; run Check TSC / Re-authenticate).");
+        TscWrittenDates.Record(dates);
         return await GraphTscClient.WriteTicketAsync(ticketString, dates, token, _config.Graph, onLog, ct);
     }
 
@@ -130,6 +155,7 @@ internal sealed class LoggingService
             return new OffWriteResult(Array.Empty<DateOnly>(),
                 "No Graph token (session may be logged out; run Check TSC / Re-authenticate).");
         }
+        TscWrittenDates.Record(dates);
         return await GraphTscClient.WriteOffAsync(dates, token, _config.Graph, onLog, ct);
     }
 
@@ -140,6 +166,11 @@ internal sealed class LoggingService
         Action<string>? onLog = null, CancellationToken ct = default)
     {
         var ticketString = string.Join(", ", tickets);
+
+        if (!string.IsNullOrEmpty(graphToken))
+        {
+            TscWrittenDates.Record(new[] { date });
+        }
 
         Task<(bool Success, string Cell, string? Error)> tscTask = string.IsNullOrEmpty(graphToken)
             ? Task.FromResult((false, "", (string?)"No Graph token (session may be logged out)."))
@@ -154,17 +185,20 @@ internal sealed class LoggingService
     // TSC ticket cell + HRM total hours. Acquires one Graph token, then runs the TSC
     // read and HRM hours in parallel (HRM is browser-free). Future dates are not read
     // (HRM rejects future stop times and nothing is logged yet) and come back as nulls.
+    // allowSniff false = background reads: TSC uses only an override/cached token, never Chrome.
     internal async Task<IReadOnlyList<DayCoverage>> CheckWeekAsync(
-        IReadOnlyList<DateOnly> dates, Action<string>? onLog = null, CancellationToken ct = default)
+        IReadOnlyList<DateOnly> dates, Action<string>? onLog = null, CancellationToken ct = default,
+        bool allowSniff = true)
     {
         var today = Hcm.Today();
         var readable = dates.Where(d => d <= today).ToList();
 
-        var token = await AcquireGraphTokenAsync(onLog);
+        var token = allowSniff ? await AcquireGraphTokenAsync(onLog) : TryGetCachedGraphToken();
+        var hadToken = !string.IsNullOrEmpty(token);
 
-        var tscTask = string.IsNullOrEmpty(token)
-            ? Task.FromResult((IReadOnlyDictionary<DateOnly, string?>)new Dictionary<DateOnly, string?>())
-            : GraphTscClient.ReadTicketsAsync(readable, token, _config.Graph, onLog, ct);
+        var tscTask = hadToken
+            ? GraphTscClient.ReadTicketsAsync(readable, token!, _config.Graph, onLog, ct)
+            : Task.FromResult<IReadOnlyDictionary<DateOnly, string?>?>(null);
         var hrmTask = HrmMcpClient.GetDayHoursAsync(readable, _config.HrmApiKey, onLog, ct);
         // Full week, not just readable: a planned day off should read "off", not "pending".
         var offTask = dates.Count == 0
@@ -175,13 +209,26 @@ internal sealed class LoggingService
         var offDates = offTask.Result.ToHashSet();
 
         var result = new List<DayCoverage>();
+        var map = tscTask.Result;
         foreach (var d in dates)
         {
-            tscTask.Result.TryGetValue(d, out var ticket);
+            string? ticket = null;
+            map?.TryGetValue(d, out ticket);
             hrmTask.Result.TryGetValue(d, out var hours);
-            result.Add(new DayCoverage(d, hours, ticket, offDates.Contains(d)));
+            var tscState = TscStateFor(d, today, hadToken, allowSniff, map);
+            result.Add(new DayCoverage(d, hours, ticket, offDates.Contains(d), tscState));
         }
         return result;
+    }
+
+    // No token after a sniff attempt is a failure; with sniffing off it was simply not tried.
+    internal static TscReadState TscStateFor(DateOnly d, DateOnly today, bool hadToken, bool allowSniff,
+        IReadOnlyDictionary<DateOnly, string?>? map)
+    {
+        if (d > today) return TscReadState.NotDue;
+        if (!hadToken) return allowSniff ? TscReadState.Failed : TscReadState.NoToken;
+        if (map == null || !map.ContainsKey(d)) return TscReadState.Failed;
+        return TscReadState.Read;
     }
 
     // Drain the queue: sniff one Graph token, log every entry to both

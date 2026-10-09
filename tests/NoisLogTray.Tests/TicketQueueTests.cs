@@ -239,4 +239,98 @@ public class TicketQueueTests : IDisposable
         Assert.Equal("2026-07-26", read[0].Date);
         Assert.Equal(new[] { "MDP-9" }, read[0].Tickets);
     }
+
+    private static readonly DateTimeOffset Morning = new(2026, 7, 24, 10, 0, 0, TimeSpan.FromHours(7));
+    private static readonly TimeOnly SixPm = new(18, 0);
+
+    // Returns the result as a string: QueueAddResult is internal, so a public test cannot take it.
+    private string AddStarted(string ticket, DateTimeOffset now, TimeOnly logTime, bool isTodayWritten)
+        => TicketQueue.AddStartedTicket(ticket, now, logTime, isTodayWritten, _path).ToString();
+
+    [Fact]
+    public void AddStartedTicket_ReturnsAdded_CreatesNewEntry()
+    {
+        Assert.Equal("Added", AddStarted("MDP-1", Morning, SixPm, false));
+        var read = TicketQueue.Read(_path);
+        Assert.Equal("2026-07-24", Assert.Single(read).Date);
+        Assert.Equal(new[] { "MDP-1" }, read[0].Tickets);
+    }
+
+    [Fact]
+    public void AddStartedTicket_ReturnsAdded_MergesIntoEvenSplitEntry()
+    {
+        TicketQueue.Write(new[] { new QueueEntry("2026-07-24", new[] { "MDP-1" }) }, _path);
+        Assert.Equal("Added", AddStarted("MDP-2", Morning, SixPm, false));
+        Assert.Equal(new[] { "MDP-1", "MDP-2" }, Assert.Single(TicketQueue.Read(_path)).Tickets);
+    }
+
+    [Fact]
+    public void AddStartedTicket_ReturnsAlreadyQueued()
+    {
+        TicketQueue.Write(new[] { new QueueEntry("2026-07-24", new[] { "MDP-1" }) }, _path);
+        var before = File.ReadAllText(_path);
+        Assert.Equal("AlreadyQueued", AddStarted("MDP-1", Morning, SixPm, false));
+        Assert.Equal(before, File.ReadAllText(_path));
+    }
+
+    [Fact]
+    public void AddStartedTicket_ReturnsCustomHours_WhenEntryHasMinutes()
+    {
+        TicketQueue.Write(new[] { new QueueEntry("2026-07-24", new[] { "MDP-1" }, new[] { 240 }) }, _path);
+        Assert.Equal("CustomHours", AddStarted("MDP-2", Morning, SixPm, false));
+        var entry = Assert.Single(TicketQueue.Read(_path));
+        Assert.Equal(new[] { "MDP-1" }, entry.Tickets);
+        Assert.Equal(new[] { 240 }, entry.Minutes);
+    }
+
+    [Fact]
+    public void AddStartedTicket_ReturnsTooLate_AtOrAfter18()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 18, 0, 0, TimeSpan.FromHours(7));
+        Assert.Equal("TooLate", AddStarted("MDP-1", now, SixPm, false));
+        Assert.Empty(TicketQueue.Read(_path));
+    }
+
+    [Fact]
+    public void AddStartedTicket_ReturnsTooLate_After18_WhenLogTimeLater()
+    {
+        var now = new DateTimeOffset(2026, 7, 24, 18, 30, 0, TimeSpan.FromHours(7));
+        Assert.Equal("TooLate", AddStarted("MDP-1", now, new TimeOnly(19, 0), false));
+    }
+
+    [Fact]
+    public void AddStartedTicket_ReturnsWeekend_OnSaturday()
+    {
+        var saturday = new DateTimeOffset(2026, 7, 25, 9, 0, 0, TimeSpan.FromHours(7));
+        Assert.Equal("Weekend", AddStarted("MDP-1", saturday, new TimeOnly(18, 0), false));
+        Assert.Empty(TicketQueue.Read(_path));
+    }
+
+    [Fact]
+    public void AddStartedTicket_ReturnsTooLate_FromEarlierLogTime()
+    {
+        Assert.Equal("TooLate", AddStarted("MDP-1", Morning, new TimeOnly(9, 30), false));
+    }
+
+    [Fact]
+    public void AddStartedTicket_ReturnsAlreadyLogged_WhenNoEntryAndTodayWritten()
+    {
+        Assert.Equal("AlreadyLogged", AddStarted("MDP-1", Morning, SixPm, true));
+        Assert.Empty(TicketQueue.Read(_path));
+    }
+
+    [Fact]
+    public void AddStartedTicket_AppendsToExistingEntry_EvenWhenTodayWritten()
+    {
+        TicketQueue.Write(new[] { new QueueEntry("2026-07-24", new[] { "MDP-1" }) }, _path);
+        Assert.Equal("Added", AddStarted("MDP-2", Morning, SixPm, true));
+        Assert.Equal(new[] { "MDP-1", "MDP-2" }, Assert.Single(TicketQueue.Read(_path)).Tickets);
+    }
+
+    [Fact]
+    public void AddStartedTicket_ReturnsUnsupported_ForNonMdpKey()
+    {
+        Assert.Equal("Unsupported", AddStarted("ABC-1", Morning, SixPm, false));
+        Assert.Empty(TicketQueue.Read(_path));
+    }
 }

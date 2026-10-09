@@ -10,6 +10,8 @@ internal static class AppPaths
 
     internal static string QueuePath => Path.Combine(DataDirectory, "queue.json");
 
+    internal static string TscWrittenPath => Path.Combine(DataDirectory, "tsc-written.json");
+
     internal static string SettingsPath => Path.Combine(DataDirectory, "settings.json");
 
     // Legacy per-user config file. Config now lives in settings.json; on load,
@@ -17,4 +19,10 @@ internal static class AppPaths
     internal static string EnvPath => Path.Combine(DataDirectory, ".env");
 
     internal static string LogDirectory => Path.Combine(DataDirectory, "logs");
+
+    internal static string TicketsDirectory => Path.Combine(DataDirectory, "tasks");
+
+    // Where the standalone TaskWatcher app keeps its state; imported once by TicketStore.
+    internal static string TaskWatcherStateDirectory => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TaskWatcher", "state");
 }

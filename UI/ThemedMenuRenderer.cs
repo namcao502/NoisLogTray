@@ -12,14 +12,14 @@ internal sealed class ThemedMenuRenderer : ToolStripProfessionalRenderer
     internal static ContextMenuStrip CreateMenu()
     {
         var menu = new ContextMenuStrip { Renderer = new ThemedMenuRenderer(), ShowImageMargin = false };
-        menu.Font = new Font("Segoe UI", 9.5F);
+        menu.Font = UiScale.Font("Segoe UI", 9.5F);
         return menu;
     }
 
     // Open the menu right under its anchor button, right edges aligned, so a menu wider than
     // the button grows into the window instead of past its right edge.
     internal static void ShowBelow(ContextMenuStrip menu, Control anchor) =>
-        menu.Show(anchor, new Point(anchor.Width, anchor.Height + 2), ToolStripDropDownDirection.BelowLeft);
+        menu.Show(anchor, new Point(anchor.Width, anchor.Height + UiScale.S(2)), ToolStripDropDownDirection.BelowLeft);
 
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
     {

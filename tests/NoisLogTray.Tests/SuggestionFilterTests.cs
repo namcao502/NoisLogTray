@@ -13,14 +13,14 @@ public class SuggestionFilterTests
     [Fact]
     public void BlankQueryKeepsEveryTicket()
     {
-        Assert.Equal(2, MainForm.FilterSuggestions(Tickets, "  ").Count);
+        Assert.Equal(2, LogPage.FilterSuggestions(Tickets, "  ").Count);
     }
 
     [Fact]
     public void MatchesKeyDigitsOrSummaryIgnoringCase()
     {
-        Assert.Equal("MDP-5678", Assert.Single(MainForm.FilterSuggestions(Tickets, "5678")).Key);
-        Assert.Equal("MDP-1234", Assert.Single(MainForm.FilterSuggestions(Tickets, "INVOICE")).Key);
-        Assert.Empty(MainForm.FilterSuggestions(Tickets, "nothing"));
+        Assert.Equal("MDP-5678", Assert.Single(LogPage.FilterSuggestions(Tickets, "5678")).Key);
+        Assert.Equal("MDP-1234", Assert.Single(LogPage.FilterSuggestions(Tickets, "INVOICE")).Key);
+        Assert.Empty(LogPage.FilterSuggestions(Tickets, "nothing"));
     }
 }

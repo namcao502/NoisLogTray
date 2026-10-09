@@ -8,14 +8,14 @@ namespace NoisLogTray;
 // this panel paints the rounded input surface + border.
 internal sealed class RoundedHost : Panel
 {
-    internal int Radius = 8;
+    internal int Radius = UiScale.S(8);
 
     internal RoundedHost()
     {
         SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw
             | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
         BackColor = Theme.CardSurface;
-        Padding = new Padding(4);
+        Padding = UiScale.S(new Padding(4));
         Theme.Changed += OnThemeChanged;
     }
 

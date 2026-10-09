@@ -42,4 +42,23 @@ public class TicketParserTests
         Assert.Empty(tickets);
         Assert.Empty(invalid);
     }
+
+    [Theory]
+    [InlineData("MDP-1234", "MDP-1234")]
+    [InlineData("  mdp-1234 ", "MDP-1234")]
+    [InlineData("1234", "MDP-1234")]
+    [InlineData("https://newoceaninfosys.atlassian.net/browse/MDP-1234?focusedCommentId=1", "MDP-1234")]
+    public void TryParseKey_ReturnsUppercaseKey_WhenInputContainsKey(string input, string expected)
+    {
+        Assert.True(TicketParser.TryParseKey(input, out var ticketKey));
+        Assert.Equal(expected, ticketKey);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("MDP-")]
+    [InlineData("hello")]
+    public void TryParseKey_ReturnsFalse_WhenInputHasNoKey(string input)
+        => Assert.False(TicketParser.TryParseKey(input, out _));
 }

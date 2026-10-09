@@ -10,7 +10,7 @@ internal sealed class ThemeToggleButton : Control
 {
     private bool _hover;
 
-    internal int Radius = 6;
+    internal int Radius = UiScale.S(6);
     internal bool OnWindow = true; // sits on the header (blend corners to WindowBg)
 
     internal ThemeToggleButton()
@@ -61,28 +61,30 @@ internal sealed class ThemeToggleButton : Control
 
     private static void DrawSun(Graphics g, float cx, float cy, Color color)
     {
-        const float r = 4f;
+        var r = UiScale.S(4f);
+        var rayStart = r + UiScale.S(2f);
+        var rayEnd = r + UiScale.S(5f);
         using var brush = new SolidBrush(color);
         g.FillEllipse(brush, cx - r, cy - r, 2 * r, 2 * r);
-        using var pen = new Pen(color, 1.5f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        using var pen = new Pen(color, UiScale.S(1.5f)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
         for (var i = 0; i < 8; i++)
         {
             var a = i * Math.PI / 4;
-            var x1 = cx + (float)Math.Cos(a) * (r + 2);
-            var y1 = cy + (float)Math.Sin(a) * (r + 2);
-            var x2 = cx + (float)Math.Cos(a) * (r + 5);
-            var y2 = cy + (float)Math.Sin(a) * (r + 5);
+            var x1 = cx + (float)Math.Cos(a) * rayStart;
+            var y1 = cy + (float)Math.Sin(a) * rayStart;
+            var x2 = cx + (float)Math.Cos(a) * rayEnd;
+            var y2 = cy + (float)Math.Sin(a) * rayEnd;
             g.DrawLine(pen, x1, y1, x2, y2);
         }
     }
 
     private static void DrawMoon(Graphics g, float cx, float cy, Color color, Color bg)
     {
-        const float r = 6.5f;
+        var r = UiScale.S(6.5f);
         using var brush = new SolidBrush(color);
         g.FillEllipse(brush, cx - r, cy - r, 2 * r, 2 * r);
         using var carve = new SolidBrush(bg);
-        g.FillEllipse(carve, cx - r + 4.5f, cy - r - 1.5f, 2 * r, 2 * r);
+        g.FillEllipse(carve, cx - r + UiScale.S(4.5f), cy - r - UiScale.S(1.5f), 2 * r, 2 * r);
     }
 
     private static GraphicsPath Rounded(Rectangle r, int radius)

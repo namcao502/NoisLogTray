@@ -1,19 +1,19 @@
 using System.Drawing;
-using System.Drawing.Drawing2D;
 using System.Globalization;
-using System.Runtime.InteropServices;
 
 namespace NoisLogTray;
 
-// The capture window: a header (with a light/dark toggle), then stacked cards -- "New
-// entry" (date/ticket + actions), "Will log" (preview + queue), and "My tickets".
-// Closing (X) hides to the tray; TrayApp owns the process lifetime.
-internal sealed class MainForm : Form, IMessageFilter
+// The Log page of the shell: stacked cards -- "New entry" (date/ticket + actions),
+// "Will log" (preview + queue), and "My tickets".
+internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
 {
-    private static readonly Font KeyFont = new("Segoe UI", 9F, FontStyle.Bold);
-    private static readonly Font SummaryFont = new("Segoe UI", 9F);
-    private static readonly Font SectionFont = new("Segoe UI", 8.5F, FontStyle.Bold);
-    private static readonly Font WillLogFont = new("Segoe UI", 8.5F, FontStyle.Bold);
+    private static readonly Font TicketsFont = UiScale.Font("Segoe UI", 9.5F);
+    private static readonly Font HoursHintFont = UiScale.Font("Segoe UI", 8.5F, FontStyle.Bold);
+    private static readonly Font SearchFont = UiScale.Font("Segoe UI", 9F);
+    private static readonly Font KeyFont = UiScale.Font("Segoe UI", 9F, FontStyle.Bold);
+    private static readonly Font SummaryFont = UiScale.Font("Segoe UI", 9F);
+    private static readonly Font SectionFont = UiScale.Font("Segoe UI", 8.5F, FontStyle.Bold);
+    private static readonly Font WillLogFont = UiScale.Font("Segoe UI", 8.5F, FontStyle.Bold);
 
     // Per-ticket accent colours, tuned per theme so the key text stays readable:
     // bright shades on dark, deeper shades on light. Same index = same hue.
@@ -65,38 +65,32 @@ internal sealed class MainForm : Form, IMessageFilter
 
     private const int DueHeatMaxDays = 14; // due >= this many days out reads as coolest
 
-    private const int CardW = 560;
+    // Logical (100%) px, since ShellLayout.TwoColumnMinWidth is built from it; scale before use.
+    internal const int CardW = 560;
 
     // One height for every button and input; widths vary by role (the primary button is
     // widest, card-header toolbar buttons share ToolbarBtnW). Neighbours sit 8px apart.
-    private const int BtnH = 30;
-    private const int ToolbarBtnW = 112;
-    private const int ToolbarTextPad = 24; // label inset when a toolbar button widens to fit
-    private const int BtnGap = 8;
-    private const int ToolbarY = 7;   // card-header toolbar, centred on the section title
-    private const int CardBodyY = 44; // first content row under a card header
-    private const int InnerW = 528; // CardW - 2*16
+    private static readonly int BtnH = UiScale.S(30);
+    private static readonly int ToolbarBtnW = UiScale.S(112);
+    private static readonly int BtnGap = UiScale.S(8);
+    private static readonly int ToolbarY = UiScale.S(7);   // card-header toolbar, centred on the section title
+    private static readonly int CardBodyY = UiScale.S(44); // first content row under a card header
+    private static readonly int CardPad = UiScale.S(16);   // a card's inner left/right padding
+    private static readonly int InnerW = UiScale.S(528); // CardW - 2*16
     // Fixed height: a date header + 3 (editable, tallest) ticket rows + list padding;
     // longer lists scroll internally.
-    private const int WillLogHostH = 20 + 3 * 26 + 8;
-    private const int SuggestionRowPitch = 31; // suggestion row height (zero margin)
+    private const int WillLogHostHLogical = 20 + 3 * 26 + 8;
+    private static readonly int WillLogHostH = UiScale.S(WillLogHostHLogical);
+    private static readonly int SuggestionRowPitch = UiScale.S(31); // suggestion row height (zero margin)
+
+    // Built card heights in logical px, like the rest of the ShellLayout bookkeeping.
+    private const int NewEntryCardH = 96 + 30 + 16;
+    private const int WillLogCardH = 44 + WillLogHostHLogical + 12;
+    private const int MyTicketsCardH = 44 + 204 + 16;
 
     private readonly LoggingService? _service;
 
     private readonly Panel _body = new();
-    private readonly Panel _header = new();
-    private readonly Label _headerTitle = new();
-    private readonly ThemeToggleButton _themeBtn = new();
-    private readonly LanguageToggleButton _langBtn = new();
-    private readonly SettingsButton _settingsBtn = new();
-    private readonly CloseButton _closeBtn = new() { Surface = () => Theme.WindowBg };
-    private readonly NotificationBell _bell = new();
-    private readonly ContextMenuStrip _bellMenu = ThemedMenuRenderer.CreateMenu();
-    private readonly NoticeToast _toast = new();
-
-    // Recent notices for the bell's history, newest last; session-only, capped.
-    private const int NoticeHistoryCap = 20;
-    private readonly List<(DateTime Time, string Message, NoticeKind Kind)> _notices = new();
     private readonly List<Label> _sectionLabels = new();
     private readonly List<Panel> _dividers = new();
 
@@ -153,20 +147,19 @@ internal sealed class MainForm : Form, IMessageFilter
     // Raised by "Log queue now" so the tray drains the whole queue through its guarded path.
     internal event Action? DrainRequested;
 
-    // Raised by the header gear; the tray owns the Settings dialog (saving rebuilds this window).
-    internal event Action? SettingsRequested;
+    // The running action's sticky toast text, or null when it ends; the shell shows it.
+    internal event Action<string?>? BusyChanged;
 
     // Raised with each action's result so the tray shows it as a popup (ok = success).
     internal event Action<string, NoticeKind>? StatusRaised;
 
-    internal MainForm(LoggingService? service, string? configError)
+    internal LogPage(LoggingService? service, string? configError)
     {
         _service = service;
         BuildLayout();
         ApplyLanguage();
         Theme.Changed += ApplyTheme;
         Lang.Changed += ApplyLanguage;
-        Application.AddMessageFilter(this);
         RefreshQueuedView(); // also renders the Will log (falls back to the queue)
         if (configError != null) AppendLog($"[config] {configError}");
         LoadMyTicketsAsync();
@@ -179,8 +172,9 @@ internal sealed class MainForm : Form, IMessageFilter
         {
             Theme.Changed -= ApplyTheme;
             Lang.Changed -= ApplyLanguage;
-            Application.RemoveMessageFilter(this);
-            _bellMenu.Dispose();
+            _verifyTimer.Stop(); // OnHidden's Clear() can arm it right before the shell is disposed
+            _verifyTimer.Dispose();
+            _tips.Dispose();
             _logNowMenu.Dispose();
             _moreMenu.Dispose();
         }
@@ -189,210 +183,121 @@ internal sealed class MainForm : Form, IMessageFilter
 
     private const int WmLButtonDown = 0x0201;
 
+    // How much shorter than the built layout the page may get; only My tickets shrinks. Logical px.
+    private const int MinHeightSlack = 100;
+
+    // Placed by LayoutCards on every resize; the heights are the built ones, in logical px.
+    private Card? _newEntryCard;
+    private Card? _willLogCard;
+    private Card? _myTicketsCard;
+    private int _newEntryH;
+    private int _willLogH;
+    private int _myTicketsMinH;
+
+    private bool _suggestionsRenderPosted;
+    private int _suggestionsShownCount;
+    private int _suggestionsRenderedWidth;
+    private bool _suggestionsRenderedOverflow;
+    // A Queue rebuild deferred while an hours box has focus, so a half-typed value survives.
+    private bool _willLogReflowPending;
+
+    protected override void OnHandleCreated(EventArgs e)
+    {
+        base.OnHandleCreated(e);
+        Application.AddMessageFilter(this);
+    }
+
+    protected override void OnHandleDestroyed(EventArgs e)
+    {
+        Application.RemoveMessageFilter(this);
+        base.OnHandleDestroyed(e);
+    }
+
     // Drop focus from the search box on a click anywhere else. Labels and rows do not take
     // focus themselves, so without this the caret would stay in the search box.
     public bool PreFilterMessage(ref Message m)
     {
         if (m.Msg == WmLButtonDown && _ticketSearch.Focused && m.HWnd != _ticketSearch.Handle)
-            ActiveControl = null;
+        {
+            var form = FindForm();
+            if (form != null) form.ActiveControl = null;
+        }
         return false; // never swallow the click
     }
 
     private void BuildLayout()
     {
-        Text = "NOIS Daily Log";
-        Icon = AppIcon.Load(32);
-        // Borderless rounded window drawn by the app (like the Settings card) instead of the
-        // square Windows 10 frame; the header doubles as the title bar.
-        FormBorderStyle = FormBorderStyle.None;
         BackColor = Theme.WindowBg;
-        SetStyle(ControlStyles.ResizeRedraw | ControlStyles.OptimizedDoubleBuffer, true);
-        RestoreWindowPosition();
+        _body.Dock = DockStyle.Fill;
+        _body.BackColor = Theme.WindowBg;
+        _body.AutoScroll = false; // the page never scrolls
 
-        BuildBody();
-        RestoreWindowSize();
-    }
+        // Summed in logical px and scaled once, exactly as LayoutCards scales ShellLayout's bounds.
+        const int left = 20;
+        var y = 14;
 
-    // Restore the last window position if it still lands on a connected monitor;
-    // otherwise center (the saved monitor may be gone).
-    private void RestoreWindowPosition()
-    {
-        var settings = AppSettings.Load();
-        if (settings.WindowX is int x && settings.WindowY is int y &&
-            Screen.AllScreens.Any(s => s.WorkingArea.Contains(new Point(x, y))))
-        {
-            StartPosition = FormStartPosition.Manual;
-            Location = new Point(x, y);
-        }
-        else
-        {
-            StartPosition = FormStartPosition.CenterScreen;
-        }
-    }
+        // Input + primary action first (where focus lands), the queue next, the picker last.
+        var newEntry = BuildNewEntryCard();
+        newEntry.Location = UiScale.S(new Point(left, y));
+        _body.Controls.Add(newEntry);
+        _newEntryCard = newEntry;
+        _newEntryH = NewEntryCardH;
+        y += NewEntryCardH + 12;
 
-    // Restore the last size, clamped to the minimum (the built layout) and to the screen.
-    private void RestoreWindowSize()
-    {
-        var settings = AppSettings.Load();
-        if (settings.WindowWidth is not int width || settings.WindowHeight is not int height) return;
-        var workingArea = Screen.FromPoint(Location).WorkingArea;
-        ClientSize = new Size(
-            Math.Clamp(width, MinimumSize.Width, Math.Max(MinimumSize.Width, workingArea.Width)),
-            Math.Clamp(height, MinimumSize.Height, Math.Max(MinimumSize.Height, workingArea.Height)));
-    }
+        var willLog = BuildWillLogCard();
+        willLog.Location = UiScale.S(new Point(left, y));
+        _body.Controls.Add(willLog);
+        _willLogCard = willLog;
+        _willLogH = WillLogCardH;
+        y += WillLogCardH + 12;
 
-    // Persist the window position and size (read-modify-write so the theme key is preserved).
-    private void SaveWindowBounds()
-    {
-        if (WindowState != FormWindowState.Normal) return;
-        var settings = AppSettings.Load();
-        settings.WindowX = Location.X;
-        settings.WindowY = Location.Y;
-        settings.WindowWidth = ClientSize.Width;
-        settings.WindowHeight = ClientSize.Height;
-        AppSettings.Save(settings);
-    }
+        var myTickets = BuildMyTicketsCard();
+        myTickets.Location = UiScale.S(new Point(left, y));
+        _body.Controls.Add(myTickets);
+        _myTicketsCard = myTickets;
+        _myTicketsMinH = MyTicketsCardH - MinHeightSlack;
+        var builtH = y + MyTicketsCardH + 20;
 
-    // ---- Borderless rounded chrome: shadow, taskbar minimize, rounded corners, border, drag.
+        // Cards and heights are stored above so the OnSizeChanged this Size triggers
+        // reproduces the built bounds; anchoring (below) must come after it.
+        Size = UiScale.S(new Size(600, builtH));
+        MinimumSize = UiScale.S(new Size(600, builtH - MinHeightSlack));
+        Controls.Add(_body);
 
-    private const int WindowRadius = 12;
-
-    // The form's own edge strip, outside _body, that Windows treats as the resize border.
-    private const int ResizeGrip = 6;
-    private const int WmNcHitTest = 0x0084;
-
-    // How much shorter than the built layout the window may get; only My tickets shrinks.
-    private const int MinHeightSlack = 100;
-
-    protected override CreateParams CreateParams
-    {
-        get
-        {
-            var cp = base.CreateParams;
-            cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW
-            cp.Style |= 0x00020000;      // WS_MINIMIZEBOX: the taskbar button still minimizes/restores
-            return cp;
-        }
+        AnchorForResize();
     }
 
     protected override void OnSizeChanged(EventArgs e)
     {
         base.OnSizeChanged(e);
-        if (ClientSize.Width == 0 || ClientSize.Height == 0) return;
-        using var path = RoundedPath(new Rectangle(0, 0, ClientSize.Width, ClientSize.Height), WindowRadius);
-        Region = new Region(path);
+        LayoutCards();
     }
 
-    // Drawn on the form, not _body: _body is inset by the resize grip.
-    protected override void OnPaint(PaintEventArgs e)
+    // One column stacks the cards; a wide page puts the Queue in its own right column.
+    // Only Bounds change, so nothing is rebuilt and typed text stays.
+    private void LayoutCards()
     {
-        base.OnPaint(e);
-        e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        using var path = RoundedPath(new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1), WindowRadius);
-        using var pen = new Pen(Theme.CardBorder, 1f);
-        e.Graphics.DrawPath(pen, path);
-    }
+        if (_newEntryCard == null || _willLogCard == null || _myTicketsCard == null || _newEntryH == 0 || _willLogH == 0 || _myTicketsMinH == 0) return;
 
-    protected override void WndProc(ref Message m)
-    {
-        base.WndProc(ref m);
-        if (m.Msg != WmNcHitTest || WindowState != FormWindowState.Normal) return;
-        var lParam = m.LParam.ToInt64();
-        var cursor = PointToClient(new Point((short)(lParam & 0xFFFF), (short)((lParam >> 16) & 0xFFFF)));
-        var hit = ResizeHitTest.At(cursor, ClientSize, ResizeGrip, WindowRadius);
-        if (hit != ResizeHitTest.None) m.Result = hit;
-    }
-
-    [DllImport("user32.dll")]
-    private static extern bool ReleaseCapture();
-
-    [DllImport("user32.dll")]
-    private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
-
-    // Hand the drag to Windows as a title-bar drag; ResizeEnd then saves the new position.
-    private void DragWindow(object? sender, MouseEventArgs e)
-    {
-        if (e.Button != MouseButtons.Left) return;
-        ReleaseCapture();
-        SendMessage(Handle, 0xA1 /* WM_NCLBUTTONDOWN */, (IntPtr)2 /* HTCAPTION */, IntPtr.Zero);
-    }
-
-    private static GraphicsPath RoundedPath(Rectangle r, int radius)
-    {
-        var d = radius * 2;
-        var path = new GraphicsPath();
-        path.AddArc(r.X, r.Y, d, d, 180, 90);
-        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-        path.CloseFigure();
-        return path;
-    }
-
-    protected override void OnResizeEnd(EventArgs e)
-    {
-        base.OnResizeEnd(e);
-        SaveWindowBounds();
-    }
-
-    private void BuildBody()
-    {
-        _body.Dock = DockStyle.Fill;
-        _body.BackColor = Theme.WindowBg;
-        _body.MouseDown += DragWindow;
-        _body.AutoScroll = false; // main window never scrolls
-
-        // _body starts ResizeGrip in from the window edge; offsets subtract it so the
-        // cards stay 20px from the visible edge.
-        const int left = 20 - ResizeGrip;
-        var y = 14 - ResizeGrip;
-        var header = BuildHeader();
-        header.Location = new Point(left, y);
-        _body.Controls.Add(header);
-        y += header.Height + 8;
-
-        // Input + primary action first (where focus lands), the queue next, the picker last.
-        var newEntry = BuildNewEntryCard();
-        newEntry.Location = new Point(left, y);
-        _body.Controls.Add(newEntry);
-        y += newEntry.Height + 12;
-
-        var willLog = BuildWillLogCard();
-        willLog.Location = new Point(left, y);
-        _body.Controls.Add(willLog);
-        y += willLog.Height + 12;
-
-        var myTickets = BuildMyTicketsCard();
-        myTickets.Location = new Point(left, y);
-        _body.Controls.Add(myTickets);
-        ClientSize = new Size(600, myTickets.Bottom + 20 + ResizeGrip); // fit the cards snugly
-        MinimumSize = new Size(ClientSize.Width, ClientSize.Height - MinHeightSlack);
-
-        _toast.Width = 320;
-        _toast.Location = new Point(header.Right - _toast.Width, header.Top + _bell.Bottom + 6);
-        _body.Controls.Add(_toast);
-
-        AcceptButton = _queueBtn;
-        Padding = new Padding(ResizeGrip);
-        Controls.Add(_body);
-
-        AnchorForResize(header, newEntry, willLog, myTickets);
+        // ShellLayout works in logical px: convert the page size in, scale the bounds back out.
+        var (newEntry, queue, myTickets) = ShellLayout.LogCardBounds(
+            UiScale.Logical(ClientSize.Width), UiScale.Logical(ClientSize.Height), _newEntryH, _willLogH, _myTicketsMinH);
+        _body.SuspendLayout();
+        _newEntryCard.Bounds = UiScale.S(newEntry);
+        _willLogCard.Bounds = UiScale.S(queue);
+        _myTicketsCard.Bounds = UiScale.S(myTickets);
+        _body.ResumeLayout();
     }
 
     // Set after _body is docked at its final size: WinForms records each anchor's edge
     // distances when Anchor is assigned, so the built layout is what a resize preserves.
-    // Cards and inputs stretch with the width, right-hand buttons stay right, and only
-    // the My tickets list takes extra height.
-    private void AnchorForResize(Panel header, Card newEntry, Card willLog, Card myTickets)
+    // Cards are placed by LayoutCards; inside them inputs stretch with the width,
+    // right-hand buttons stay right, and the Queue and My tickets lists take extra height.
+    private void AnchorForResize()
     {
         const AnchorStyles stretch = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         const AnchorStyles right = AnchorStyles.Top | AnchorStyles.Right;
 
-        header.Anchor = stretch;
-        foreach (var button in new Control[] { _bell, _themeBtn, _langBtn, _settingsBtn, _closeBtn }) button.Anchor = right;
-        _toast.Anchor = right;
-
-        newEntry.Anchor = stretch;
         _tickets.Parent!.Anchor = stretch;
         _tickets.Anchor = stretch;
         _clearBtn.Anchor = right;
@@ -400,13 +305,11 @@ internal sealed class MainForm : Form, IMessageFilter
         _logNowBtn.Anchor = right;
         _moreBtn.Anchor = right;
 
-        willLog.Anchor = stretch;
         _hoursHint.Anchor = right;
         _clearQueueBtn.Anchor = right;
         _logAllBtn.Anchor = right;
-        _willLogList.Parent!.Anchor = stretch;
+        _willLogList.Parent!.Anchor = stretch | AnchorStyles.Bottom;
 
-        myTickets.Anchor = stretch | AnchorStyles.Bottom;
         _ticketSearch.Parent!.Anchor = stretch;
         _ticketSearch.Anchor = stretch;
         _jqlBtn.Anchor = right;
@@ -414,19 +317,23 @@ internal sealed class MainForm : Form, IMessageFilter
         _suggestions.Parent!.Anchor = stretch | AnchorStyles.Bottom;
     }
 
-    // Rows are built at the list's width, so a width change rebuilds them. Hooked after
+    // Rows are built at the list's width, so a width change rebuilds them (suggestions also
+    // when a height change flips the scrollbar allowance). Hooked after
     // the first render so construction-time layout passes don't re-render early.
     // The rebuild is posted: run inside the window's layout pass, the list keeps the old
     // wider scroll extent after a shrink and shows a stray horizontal scrollbar.
     private void ReflowRowsOnResize()
     {
-        var suggestionsWidth = _suggestions.Width;
         _suggestions.Resize += (_, _) =>
         {
-            if (_suggestions.Width == suggestionsWidth || !IsHandleCreated) return;
-            suggestionsWidth = _suggestions.Width;
+            // No rows on screen (status line only): nothing depends on the size.
+            if (!IsHandleCreated || _suggestionsRenderPosted || _suggestionsShownCount == 0) return;
+            var overflow = _suggestionsShownCount * SuggestionRowPitch > _suggestions.ClientSize.Height;
+            if (_suggestions.Width == _suggestionsRenderedWidth && overflow == _suggestionsRenderedOverflow) return;
+            _suggestionsRenderPosted = true; // one queued rebuild per drag burst, not one per pixel
             BeginInvoke(() =>
             {
+                _suggestionsRenderPosted = false;
                 if (!_loadingSuggestions) RenderSuggestions(_lastSuggestions); // keep "Loading..." visible
             });
         };
@@ -436,97 +343,55 @@ internal sealed class MainForm : Form, IMessageFilter
         {
             if (_willLogList.Width == willLogWidth || !IsHandleCreated) return;
             willLogWidth = _willLogList.Width;
-            BeginInvoke(UpdateWillLog);
+            BeginInvoke(() =>
+            {
+                if (_willLogList.ContainsFocus) _willLogReflowPending = true;
+                else UpdateWillLog();
+            });
         };
-    }
-
-    private Panel BuildHeader()
-    {
-        // Title only: the date already shows in the New entry date field.
-        _header.Size = new Size(CardW, 48);
-        _header.BackColor = Theme.WindowBg;
-
-        _headerTitle.Text = "NOIS Daily Log";
-        _headerTitle.AutoSize = true;
-        _headerTitle.Location = new Point(0, 4);
-        _headerTitle.Font = new Font("Segoe UI Semibold", 20F, FontStyle.Bold);
-        _headerTitle.ForeColor = Theme.TextPrimary;
-
-        _themeBtn.OnWindow = true;
-        _themeBtn.Size = new Size(BtnH, BtnH);
-        // Right to left: close (hide to tray), then a wider gap, settings, language, theme, bell.
-        _closeBtn.Size = new Size(BtnH, BtnH);
-        _closeBtn.Location = new Point(CardW - BtnH, 9);
-        _closeBtn.Click += (_, _) => Close(); // OnFormClosing turns this into hide-to-tray
-
-        const int toolsRight = CardW - BtnH - 12;
-        _settingsBtn.Size = new Size(BtnH, BtnH);
-        _settingsBtn.Location = new Point(toolsRight - BtnH, 9);
-        _settingsBtn.Click += (_, _) => SettingsRequested?.Invoke();
-
-        _langBtn.Size = new Size(BtnH, BtnH);
-        _langBtn.Location = new Point(toolsRight - 2 * BtnH - BtnGap, 9);
-
-        _themeBtn.Location = new Point(toolsRight - 3 * BtnH - 2 * BtnGap, 9);
-
-        _bell.Size = new Size(BtnH, BtnH);
-        _bell.Location = new Point(toolsRight - 4 * BtnH - 3 * BtnGap, 9);
-        _bell.Click += (_, _) => OpenNoticeHistory();
-
-        // There is no title bar, so the header (and its title) drags the window.
-        _header.MouseDown += DragWindow;
-        _headerTitle.MouseDown += DragWindow;
-
-        _header.Controls.Add(_headerTitle);
-        _header.Controls.Add(_themeBtn);
-        _header.Controls.Add(_langBtn);
-        _header.Controls.Add(_settingsBtn);
-        _header.Controls.Add(_closeBtn);
-        _header.Controls.Add(_bell);
-        return _header;
+        _willLogList.Leave += (_, _) =>
+        {
+            if (!_willLogReflowPending) return;
+            _willLogReflowPending = false;
+            UpdateWillLog();
+        };
     }
 
     private Card BuildMyTicketsCard()
     {
-        var card = new Card { Size = new Size(CardW, CardBodyY + 204 + 16) };
+        var card = new Card { Size = UiScale.S(new Size(CardW, MyTicketsCardH)) };
         card.Controls.Add(SectionLabel("MY TICKETS", "TICKET CỦA TÔI", 16, 14));
 
         // Quick filter over the loaded list, between the section label and the buttons; it
         // starts after the wider of the two label texts so a language switch never overlaps.
         var labelWidth = Math.Max(TextRenderer.MeasureText("MY TICKETS", SectionFont).Width,
             TextRenderer.MeasureText("TICKET CỦA TÔI", SectionFont).Width);
-        var searchX = 16 + labelWidth + 8;
-        var searchHost = new RoundedHost { Location = new Point(searchX, ToolbarY), Size = new Size(16 + InnerW - 2 * (ToolbarBtnW + BtnGap) - searchX, BtnH) };
+        var searchX = CardPad + labelWidth + UiScale.S(8);
+        var searchHost = new RoundedHost { Location = new Point(searchX, ToolbarY), Size = new Size(CardPad + InnerW - 2 * (ToolbarBtnW + BtnGap) - searchX, BtnH) };
         _ticketSearch.BorderStyle = BorderStyle.None;
-        _ticketSearch.Font = new Font("Segoe UI", 9F);
+        _ticketSearch.Font = SearchFont;
         _ticketSearch.BackColor = Theme.InputBg;
         _ticketSearch.ForeColor = Theme.TextPrimary;
         _ticketSearch.TextChanged += (_, _) =>
         {
             if (!_loadingSuggestions) RenderSuggestions(_lastSuggestions); // keep "Loading..." visible
         };
-        _ticketSearch.KeyDown += (_, e) =>
-        {
-            if (e.KeyCode != Keys.Escape) return;
-            _ticketSearch.Text = string.Empty;
-            e.SuppressKeyPress = true;
-        };
         var searchH = _ticketSearch.PreferredHeight;
-        _ticketSearch.SetBounds(8, (searchHost.Height - searchH) / 2, searchHost.Width - 16, searchH);
+        _ticketSearch.SetBounds(UiScale.S(8), (searchHost.Height - searchH) / 2, searchHost.Width - UiScale.S(16), searchH);
         searchHost.Controls.Add(_ticketSearch);
         card.Controls.Add(searchHost);
 
         _jqlBtn.Size = new Size(ToolbarBtnW, BtnH);
-        _jqlBtn.Location = new Point(16 + InnerW - 2 * ToolbarBtnW - BtnGap, ToolbarY);
+        _jqlBtn.Location = new Point(CardPad + InnerW - 2 * ToolbarBtnW - BtnGap, ToolbarY);
         _jqlBtn.Click += (_, _) => EditJql();
         card.Controls.Add(_jqlBtn);
 
         _refreshBtn.Size = new Size(ToolbarBtnW, BtnH);
-        _refreshBtn.Location = new Point(16 + InnerW - ToolbarBtnW, ToolbarY);
+        _refreshBtn.Location = new Point(CardPad + InnerW - ToolbarBtnW, ToolbarY);
         _refreshBtn.Click += (_, _) => LoadMyTicketsAsync();
         card.Controls.Add(_refreshBtn);
 
-        var sugHost = new RoundedHost { Location = new Point(16, CardBodyY), Size = new Size(InnerW, 204) };
+        var sugHost = new RoundedHost { Location = new Point(CardPad, CardBodyY), Size = new Size(InnerW, UiScale.S(204)) };
         _suggestions.Dock = DockStyle.Fill;
         _suggestions.FlowDirection = FlowDirection.TopDown;
         _suggestions.WrapContents = false;
@@ -537,7 +402,7 @@ internal sealed class MainForm : Form, IMessageFilter
 
         _suggestionStatus.Text = "";
         _suggestionStatus.AutoSize = true;
-        _suggestionStatus.Location = new Point(8, 8);
+        _suggestionStatus.Location = UiScale.S(new Point(8, 8));
         _suggestionStatus.ForeColor = Theme.TextSecondary;
         _suggestionStatus.BackColor = Theme.InputBg;
         _suggestionStatus.Font = SummaryFont;
@@ -550,15 +415,17 @@ internal sealed class MainForm : Form, IMessageFilter
 
     private Card BuildWillLogCard()
     {
-        var card = new Card { Size = new Size(CardW, CardBodyY + WillLogHostH + 12) };
+        var card = new Card { Size = UiScale.S(new Size(CardW, WillLogCardH)) };
         card.Controls.Add(SectionLabel("QUEUE", "HÀNG ĐỢI", 16, 14));
 
         // Running total / validation hint, right-aligned in the header (typed view only).
         _hoursHint.AutoSize = false;
-        _hoursHint.Size = new Size(170, 18);
-        _hoursHint.Location = new Point(16 + InnerW - 170, ToolbarY + (BtnH - 18) / 2);
+        var hintW = UiScale.S(170);
+        var hintH = UiScale.S(18);
+        _hoursHint.Size = new Size(hintW, hintH);
+        _hoursHint.Location = new Point(CardPad + InnerW - hintW, ToolbarY + (BtnH - hintH) / 2);
         _hoursHint.TextAlign = ContentAlignment.MiddleRight;
-        _hoursHint.Font = new Font("Segoe UI", 8.5F, FontStyle.Bold);
+        _hoursHint.Font = HoursHintFont;
         _hoursHint.ForeColor = Theme.TextSecondary;
         _hoursHint.BackColor = Color.Transparent;
         _hoursHint.Visible = false;
@@ -567,7 +434,7 @@ internal sealed class MainForm : Form, IMessageFilter
         // Clears the persisted queue; only shown while the card is displaying the
         // queued fallback (input empty + something queued).
         _clearQueueBtn.Size = new Size(ToolbarBtnW, BtnH);
-        _clearQueueBtn.Location = new Point(16 + InnerW - ToolbarBtnW, ToolbarY);
+        _clearQueueBtn.Location = new Point(CardPad + InnerW - ToolbarBtnW, ToolbarY);
         _clearQueueBtn.Visible = false;
         _clearQueueBtn.Click += OnClearQueue;
         card.Controls.Add(_clearQueueBtn);
@@ -575,20 +442,20 @@ internal sealed class MainForm : Form, IMessageFilter
         // Logs the whole queued list now (same guarded drain as the tray "Log queue now");
         // shown beside Clear queue, only in the queued fallback view.
         _logAllBtn.Size = new Size(ToolbarBtnW, BtnH);
-        _logAllBtn.Location = new Point(16 + InnerW - 2 * ToolbarBtnW - BtnGap, ToolbarY);
+        _logAllBtn.Location = new Point(CardPad + InnerW - 2 * ToolbarBtnW - BtnGap, ToolbarY);
         _logAllBtn.Visible = false;
         _logAllBtn.Click += OnLogAllNow;
         card.Controls.Add(_logAllBtn);
 
         // Fixed-height list; rows scroll internally once they overflow so the Actions
         // card below stays at a stable, visible position.
-        var host = new RoundedHost { Location = new Point(16, CardBodyY), Size = new Size(InnerW, WillLogHostH) };
+        var host = new RoundedHost { Location = new Point(CardPad, CardBodyY), Size = new Size(InnerW, WillLogHostH) };
         _willLogList.Dock = DockStyle.Fill;
         _willLogList.FlowDirection = FlowDirection.TopDown;
         _willLogList.WrapContents = false;
         _willLogList.AutoScroll = true;
         _willLogList.BackColor = Theme.InputBg;
-        _willLogList.Padding = new Padding(6, 4, 6, 4);
+        _willLogList.Padding = UiScale.S(new Padding(6, 4, 6, 4));
         host.Controls.Add(_willLogList);
 
         _verifyTimer.Tick += (_, _) => { _verifyTimer.Stop(); VerifyTicketsAsync(); };
@@ -599,29 +466,38 @@ internal sealed class MainForm : Form, IMessageFilter
 
     private Card BuildNewEntryCard()
     {
-        var card = new Card { Size = new Size(CardW, 96 + BtnH + 16) };
+        var card = new Card { Size = UiScale.S(new Size(CardW, NewEntryCardH)) };
         card.Controls.Add(SectionLabel("NEW ENTRY", "NHẬP MỚI", 16, 14));
 
         card.Controls.Add(SectionLabel("DATE", "NGÀY", 16, 40));
         card.Controls.Add(SectionLabel("TICKET", "TICKET", 214, 40));
 
-        _date.Location = new Point(16, 58);
-        _date.Size = new Size(190, BtnH);
+        var fieldY = UiScale.S(58);
+        _date.Location = new Point(CardPad, fieldY);
+        _date.Size = new Size(UiScale.S(190), BtnH);
         _date.ValueChanged += (_, _) => { UpdateWillLog(); VerifyTicketsAsync(); };
 
-        var ticketHost = new RoundedHost { Location = new Point(214, 58), Size = new Size(262, BtnH) };
+        var ticketHost = new RoundedHost { Location = new Point(UiScale.S(214), fieldY), Size = new Size(UiScale.S(262), BtnH) };
         _tickets.BorderStyle = BorderStyle.None;
-        _tickets.Font = new Font("Segoe UI", 9.5F);
+        _tickets.Font = TicketsFont;
         _tickets.BackColor = Theme.InputBg;
         _tickets.ForeColor = Theme.TextPrimary;
         _tickets.TextChanged += (_, _) => { _typedMinutes = null; UpdateWillLog(); UpdateActionState(); _verifyTimer.Stop(); _verifyTimer.Start(); };
         _tickets.Leave += (_, _) => { _verifyTimer.Stop(); VerifyTicketsAsync(); };
+        // Enter queues only from the ticket box, and only when Add to queue is enabled.
+        _tickets.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode != Keys.Enter) return;
+            if (_queueBtn.Enabled) OnQueue(this, EventArgs.Empty);
+            e.SuppressKeyPress = true;
+        };
         var ticketH = _tickets.PreferredHeight;
-        _tickets.SetBounds(10, (ticketHost.Height - ticketH) / 2, ticketHost.Width - 20, ticketH);
+        _tickets.SetBounds(UiScale.S(10), (ticketHost.Height - ticketH) / 2, ticketHost.Width - UiScale.S(20), ticketH);
         ticketHost.Controls.Add(_tickets);
 
-        _clearBtn.Size = new Size(16 + InnerW - (476 + BtnGap), BtnH); // fills to the card edge
-        _clearBtn.Location = new Point(476 + BtnGap, 58);
+        var clearX = ticketHost.Right + BtnGap; // 476 + 8 at 100%
+        _clearBtn.Size = new Size(CardPad + InnerW - clearX, BtnH); // fills to the card edge
+        _clearBtn.Location = new Point(clearX, fieldY);
         _clearBtn.Click += (_, _) => _tickets.Text = string.Empty;
 
         card.Controls.Add(_date);
@@ -629,20 +505,21 @@ internal sealed class MainForm : Form, IMessageFilter
         card.Controls.Add(_clearBtn);
 
         // One row: the primary "Add to queue", then the "Log now" and "more" dropdowns.
-        const int logNowW = 140;
-        const int moreW = 52;
-        const int queueW = InnerW - logNowW - moreW - 2 * BtnGap;
+        var logNowW = UiScale.S(140);
+        var moreW = UiScale.S(52);
+        var queueW = InnerW - logNowW - moreW - 2 * BtnGap;
+        var actionY = UiScale.S(96);
 
         _queueBtn.Size = new Size(queueW, BtnH);
-        _queueBtn.Location = new Point(16, 96);
+        _queueBtn.Location = new Point(CardPad, actionY);
         _queueBtn.Click += OnQueue;
 
         _logNowBtn.Size = new Size(logNowW, BtnH);
-        _logNowBtn.Location = new Point(16 + queueW + BtnGap, 96);
+        _logNowBtn.Location = new Point(CardPad + queueW + BtnGap, actionY);
         _logNowBtn.Click += (_, _) => ThemedMenuRenderer.ShowBelow(_logNowMenu, _logNowBtn);
 
         _moreBtn.Size = new Size(moreW, BtnH);
-        _moreBtn.Location = new Point(16 + InnerW - moreW, 96);
+        _moreBtn.Location = new Point(CardPad + InnerW - moreW, actionY);
         _moreBtn.Click += (_, _) => ThemedMenuRenderer.ShowBelow(_moreMenu, _moreBtn);
 
         _logBothItem.Click += OnLogNow;
@@ -668,7 +545,7 @@ internal sealed class MainForm : Form, IMessageFilter
         {
             Text = Lang.T(english, vietnamese),
             AutoSize = true,
-            Location = new Point(x, y),
+            Location = UiScale.S(new Point(x, y)), // x, y are logical
             Font = SectionFont,
             ForeColor = Theme.TextSecondary,
             BackColor = Color.Transparent,
@@ -707,12 +584,6 @@ internal sealed class MainForm : Form, IMessageFilter
         _ticketSearch.PlaceholderText = Lang.T("Search, then click a row to add", "Tìm, rồi bấm một dòng để thêm");
         _ticketSearch.AccessibleName = Lang.T("Search my tickets", "Tìm ticket của tôi");
 
-        _tips.SetToolTip(_bell, Lang.T("Notifications", "Thông báo"));
-        _tips.SetToolTip(_themeBtn, Lang.T("Light / dark theme", "Giao diện sáng / tối"));
-        _tips.SetToolTip(_langBtn, Lang.T("Switch to Vietnamese", "Chuyển sang tiếng Anh"));
-        _tips.SetToolTip(_settingsBtn, Lang.T("Settings", "Cài đặt"));
-        _tips.SetToolTip(_closeBtn, Lang.T("Hide to tray", "Ẩn xuống khay"));
-        _closeBtn.AccessibleName = Lang.T("Hide to tray", "Ẩn xuống khay");
         _tips.SetToolTip(_date, Lang.T(
             "Dates and the daily auto-log use Vietnam time (Asia/Ho_Chi_Minh, UTC+7).",
             "Ngày và giờ tự log hằng ngày theo giờ Việt Nam (Asia/Ho_Chi_Minh, UTC+7)."));
@@ -726,13 +597,11 @@ internal sealed class MainForm : Form, IMessageFilter
         else if (!_loadingSuggestions)
             RenderSuggestions(_lastSuggestions);
         UpdateWillLog();
-        if (_bellMenu.Visible) RenderNoticeHistory();
         FitToolbarButtons();
     }
 
-    // Fonts scale with display DPI but the layout is in fixed pixels, so at 125% a
-    // ToolbarBtnW button cuts "Log queue now" to "...". Widen each to its current label,
-    // keeping the toolbar's right edge; the search box gives up the space.
+    // One fixed width for every toolbar button (sized for the longest label, both languages, at the
+    // current DPI), keeping the toolbar's right edge; the search box gives up the space.
     private void FitToolbarButtons()
     {
         FitButtonLeftOf(_refreshBtn, _refreshBtn.Right);
@@ -746,7 +615,7 @@ internal sealed class MainForm : Form, IMessageFilter
 
     private static void FitButtonLeftOf(MacButton button, int right)
     {
-        var width = Math.Max(ToolbarBtnW, TextRenderer.MeasureText(button.Text, button.Font).Width + ToolbarTextPad);
+        var width = ButtonWidths.ToolbarWidth(button.Font);
         button.SetBounds(right - width, button.Top, width, button.Height);
     }
 
@@ -759,9 +628,7 @@ internal sealed class MainForm : Form, IMessageFilter
     {
         BackColor = Theme.WindowBg;
         _body.BackColor = Theme.WindowBg;
-        _header.BackColor = Theme.WindowBg;
 
-        _headerTitle.ForeColor = Theme.TextPrimary;
         foreach (var l in _sectionLabels) l.ForeColor = Theme.TextSecondary;
         foreach (var d in _dividers) d.BackColor = Theme.Divider;
 
@@ -774,7 +641,7 @@ internal sealed class MainForm : Form, IMessageFilter
         _suggestionStatus.ForeColor = Theme.TextSecondary;
         _willLogList.BackColor = Theme.InputBg;
 
-        RenderSuggestions(_lastSuggestions);
+        if (!_loadingSuggestions && _suggestionsShownCount != 0) RenderSuggestions(_lastSuggestions);
         UpdateWillLog();
         Invalidate(true);
     }
@@ -783,82 +650,11 @@ internal sealed class MainForm : Form, IMessageFilter
     private static void AppendLog(string line) => AppLogger.Info(line);
 
     // An action's result: logged, then raised so the tray routes it (in-window notice
-    // while this window is shown, Windows balloon otherwise).
+    // when the shell is the foreground window, Windows balloon otherwise).
     private void ShowStatus(string message, bool ok)
     {
         AppLogger.Write(ok ? "INFO" : "ERROR", message);
         StatusRaised?.Invoke(message, ok ? NoticeKind.Success : NoticeKind.Error);
-    }
-
-    // Record a notice in the bell history and, when the window is on screen, show the toast.
-    // With the history menu open the menu itself is refreshed instead. Safe from any thread.
-    internal void PostNotice(string message, NoticeKind kind)
-    {
-        if (InvokeRequired)
-        {
-            BeginInvoke(new Action<string, NoticeKind>(PostNotice), message, kind);
-            return;
-        }
-
-        _notices.Add((DateTime.Now, message, kind));
-        if (_notices.Count > NoticeHistoryCap) _notices.RemoveAt(0);
-
-        if (_bellMenu.Visible)
-        {
-            RenderNoticeHistory();
-            return;
-        }
-        _bell.HasUnread = true;
-        if (IsOnScreen) _toast.ShowNotice(message, kind);
-        else _toast.HideNotice(); // drop a stale "Logging..." so it is not there on reopen
-    }
-
-    internal bool IsOnScreen => Visible && WindowState != FormWindowState.Minimized;
-
-    // The window the user is looking at right now; a window covered by another app is not.
-    internal bool IsForeground => IsOnScreen && ActiveForm == this;
-
-    private void OpenNoticeHistory()
-    {
-        _toast.HideNotice();
-        _bell.HasUnread = false;
-        RenderNoticeHistory();
-        ThemedMenuRenderer.ShowBelow(_bellMenu, _bell);
-    }
-
-    // Newest first; long messages are cut in the menu and shown whole in the item tooltip.
-    private void RenderNoticeHistory()
-    {
-        _bellMenu.Items.Clear();
-        if (_notices.Count == 0)
-        {
-            _bellMenu.Items.Add(new ToolStripMenuItem(Lang.T("No notifications yet", "Chưa có thông báo")) { Enabled = false });
-            return;
-        }
-        // The menu opens right-aligned under the bell, so it may span from the bell's right
-        // edge back to the window's left margin, less the menu's own item padding (~50px).
-        var bellRight = PointToClient(_bell.PointToScreen(new Point(_bell.Width, 0))).X;
-        var maxTextWidth = bellRight - 20 - 50;
-        for (var index = _notices.Count - 1; index >= 0; index--)
-        {
-            var (time, message, kind) = _notices[index];
-            var mark = kind == NoticeKind.Success ? "✓" : kind == NoticeKind.Error ? "✕" : "•";
-            var prefix = $"{time:HH:mm}   {mark}  ";
-            var text = FitToWidth(prefix + message, _bellMenu.Font, maxTextWidth);
-            _bellMenu.Items.Add(new ToolStripMenuItem(text)
-            {
-                ToolTipText = text.Length < prefix.Length + message.Length ? message : null,
-            });
-        }
-    }
-
-    // Cut text with "..." so it renders within maxWidth pixels.
-    private static string FitToWidth(string text, Font font, int maxWidth)
-    {
-        if (TextRenderer.MeasureText(text, font).Width <= maxWidth) return text;
-        var length = text.Length;
-        while (length > 1 && TextRenderer.MeasureText(text[..length] + "...", font).Width > maxWidth) length--;
-        return text[..length].TrimEnd() + "...";
     }
 
     // Open the JQL editor for the "My tickets" query; on save, apply it to the live
@@ -873,7 +669,7 @@ internal sealed class MainForm : Form, IMessageFilter
 
         using var dlg = new JqlForm(_service.MyTicketsJql, JiraClient.DefaultMyTicketsJql,
             _service.ValidateMyTicketsJqlAsync);
-        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        if (dlg.ShowDialog(FindForm()) != DialogResult.OK) return;
 
         _service.SetMyTicketsJql(dlg.Jql);
         AppConfig.SaveUserConfig(new Dictionary<string, string> { [AppConfig.MyTicketsJqlKey] = dlg.Jql });
@@ -918,6 +714,9 @@ internal sealed class MainForm : Form, IMessageFilter
         _lastSuggestions = tickets;
         foreach (var s in tickets) _verify[s.Key] = (VState.Valid, s.Summary);
         ClearRows(_suggestions);
+        _suggestionsShownCount = 0;
+        _suggestionsRenderedWidth = _suggestions.Width;
+        _suggestionsRenderedOverflow = false;
         if (tickets.Count == 0)
         {
             SetSuggestionStatus(() => Lang.T("No open tickets found.", "Không có ticket nào đang mở."));
@@ -932,14 +731,19 @@ internal sealed class MainForm : Form, IMessageFilter
         }
 
         _suggestionStatus.Text = "";
-        var rowWidth = _suggestions.ClientSize.Width - 8;
-        if (rowWidth < 100) rowWidth = _suggestions.Width - 12;
-        // Leave room for the vertical scrollbar once the rows overflow the fixed height.
-        if (shown.Count * SuggestionRowPitch > _suggestions.ClientSize.Height)
-            rowWidth -= SystemInformation.VerticalScrollBarWidth;
+        var rowWidth = _suggestions.ClientSize.Width - UiScale.S(8);
+        if (rowWidth < UiScale.S(100)) rowWidth = _suggestions.Width - UiScale.S(12);
+        // Leave room for the vertical scrollbar once the rows overflow the list height.
+        var overflow = shown.Count * SuggestionRowPitch > _suggestions.ClientSize.Height;
+        if (overflow) rowWidth -= SystemInformation.VerticalScrollBarWidth;
+        _suggestionsShownCount = shown.Count;
+        _suggestionsRenderedWidth = _suggestions.Width;
+        _suggestionsRenderedOverflow = overflow;
 
+        _suggestions.SuspendLayout();
         foreach (var t in shown)
             _suggestions.Controls.Add(CreateSuggestionRow(t, rowWidth));
+        _suggestions.ResumeLayout();
     }
 
     // Case-insensitive match on key or summary; a blank query keeps every ticket.
@@ -974,10 +778,10 @@ internal sealed class MainForm : Form, IMessageFilter
     // far out or unset. Because the My-tickets list is sorted by due date, this reads as
     // a hot-at-top, cool-at-bottom gradient.
     private static Color DueColor(string? dueDate)
-        => SampleRamp(Theme.Dark ? HeatDark : HeatLight, DueUrgency(dueDate));
+        => SampleRamp(Theme.Dark ? HeatDark : HeatLight, DueHeat(dueDate));
 
     // 0 = coolest (far out / no due date), 1 = hottest (due today or overdue).
-    private static double DueUrgency(string? dueDate)
+    private static double DueHeat(string? dueDate)
     {
         if (string.IsNullOrWhiteSpace(dueDate)
             || !DateTime.TryParse(dueDate, CultureInfo.InvariantCulture, DateTimeStyles.None, out var due))
@@ -1026,15 +830,16 @@ internal sealed class MainForm : Form, IMessageFilter
             AccessibleName = accessibleName,
         };
 
-        var bar = new Panel { Location = new Point(0, 0), Size = new Size(4, 30), BackColor = color };
+        var labelH = SuggestionRowPitch - 1; // the 1px separator takes the rest
+        var bar = new Panel { Location = new Point(0, 0), Size = new Size(UiScale.S(4), labelH), BackColor = color };
 
-        var keyWidth = TextRenderer.MeasureText(ticket.Key, KeyFont).Width;
+        var keyWidth = Math.Max(RowColumns.KeyWidth(KeyFont), TextRenderer.MeasureText(ticket.Key, KeyFont).Width);
         var key = new Label
         {
             Text = ticket.Key,
             AutoSize = false,
-            Location = new Point(12, 0),
-            Size = new Size(keyWidth, 30),
+            Location = new Point(UiScale.S(12), 0),
+            Size = new Size(keyWidth, labelH),
             TextAlign = ContentAlignment.MiddleLeft,
             Font = KeyFont,
             ForeColor = color,
@@ -1044,15 +849,16 @@ internal sealed class MainForm : Form, IMessageFilter
 
         // Due date sits right-aligned at the row's end; the summary shrinks to leave room.
         var dueText = dueLabel;
-        var dueWidth = dueText.Length == 0 ? 0 : TextRenderer.MeasureText(dueText, SummaryFont).Width + 8;
+        var gap = UiScale.S(8);
+        var dueWidth = dueText.Length == 0 ? 0 : TextRenderer.MeasureText(dueText, SummaryFont).Width + gap;
 
-        var summaryX = 12 + keyWidth + 8;
+        var summaryX = UiScale.S(12) + keyWidth + gap;
         var summary = new Label
         {
             Text = ticket.Summary,
             AutoSize = false,
             Location = new Point(summaryX, 0),
-            Size = new Size(Math.Max(20, width - summaryX - dueWidth - 8), 30),
+            Size = new Size(Math.Max(UiScale.S(20), width - summaryX - dueWidth - gap), labelH),
             TextAlign = ContentAlignment.MiddleLeft,
             AutoEllipsis = true,
             Font = SummaryFont,
@@ -1068,8 +874,8 @@ internal sealed class MainForm : Form, IMessageFilter
             {
                 Text = dueText,
                 AutoSize = false,
-                Location = new Point(width - dueWidth - 8, 0),
-                Size = new Size(dueWidth, 30),
+                Location = new Point(width - dueWidth - gap, 0),
+                Size = new Size(dueWidth, labelH),
                 TextAlign = ContentAlignment.MiddleRight,
                 Font = SummaryFont,
                 ForeColor = Theme.TextSecondary,
@@ -1132,6 +938,7 @@ internal sealed class MainForm : Form, IMessageFilter
     private void SetSuggestionStatus(Func<string> message)
     {
         ClearRows(_suggestions);
+        _suggestionsShownCount = 0;
         _suggestionStatusText = message;
         _suggestionStatus.Text = message();
     }
@@ -1153,11 +960,12 @@ internal sealed class MainForm : Form, IMessageFilter
     private void UpdateWillLog()
     {
         if (_willLogList.IsDisposed) return;
+        _willLogReflowPending = false;
         _willLogList.SuspendLayout();
         ClearRows(_willLogList);
 
         // Leave room for the vertical scrollbar so rows never trigger a horizontal one.
-        var rowWidth = Math.Max(140, _willLogList.ClientSize.Width - 24);
+        var rowWidth = Math.Max(UiScale.S(140), _willLogList.ClientSize.Width - UiScale.S(24));
         var (typed, _) = TicketParser.Parse(_tickets.Text);
         var entries = TicketQueue.Read();
         var composing = typed.Count != 0;
@@ -1305,7 +1113,7 @@ internal sealed class MainForm : Form, IMessageFilter
         Text = text,
         AutoSize = false,
         Width = width,
-        Height = 20,
+        Height = UiScale.S(20),
         Margin = new Padding(0),
         Font = WillLogFont,
         ForeColor = Theme.TextSecondary,
@@ -1475,7 +1283,7 @@ internal sealed class MainForm : Form, IMessageFilter
         _logAllBtn.Enabled = false;
         AppendLog("[log] Logging the whole queued list now...");
         // Sticky until the drain's result notice (always raised for a user drain) replaces it.
-        _toast.ShowNotice(Lang.T("Logging the queue...", "Đang log hàng đợi..."), NoticeKind.Info, sticky: true);
+        BusyChanged?.Invoke(Lang.T("Logging the queue...", "Đang log hàng đợi..."));
         DrainRequested?.Invoke();
     }
 
@@ -1490,13 +1298,15 @@ internal sealed class MainForm : Form, IMessageFilter
             BeginInvoke(new Action(RefreshQueuedView));
             return;
         }
-        UpdateWillLog();
+        // Rebuilding would drop a half-typed hours value; the list's Leave rebuilds instead.
+        if (_willLogList.ContainsFocus) _willLogReflowPending = true;
+        else UpdateWillLog();
         VerifyTicketsAsync();
     }
 
-    // Focus the window on a specific date and put the cursor in the ticket box. Used by
+    // Set a specific date and put the cursor in the ticket box. Used by
     // the Weekly check to jump straight to a day that needs logging. SetDate marks it a
-    // deliberate pick so OnActivated's today-sync will not override it; ValueChanged then
+    // deliberate pick so OnActivatedRefresh's today-sync will not override it; ValueChanged then
     // refreshes the Will log preview.
     internal void PrepareForDate(DateOnly date)
     {
@@ -1597,7 +1407,7 @@ internal sealed class MainForm : Form, IMessageFilter
         if (_service is null) { ShowStatus(Lang.T("Config not loaded; cannot log.", "Chưa có cấu hình; không log được."), false); return; }
 
         var date = DateOnly.FromDateTime(_date.Value.Date);
-        var answer = MessageBox.Show(this,
+        var answer = MessageBox.Show(FindForm(),
             Lang.T($"Write \"{TscCells.OffMarker}\" to TSC for {Lang.LongDate(_date.Value.Date)}?\n\n"
                     + "Anything already in that day's cells will be replaced, and any queued tickets for it dropped.",
                 $"Ghi \"{TscCells.OffMarker}\" vào TSC cho {Lang.LongDate(_date.Value.Date)}?\n\n"
@@ -1619,6 +1429,7 @@ internal sealed class MainForm : Form, IMessageFilter
                     AppendLog($"[off] Removed {queued.Count} queued entr{(queued.Count == 1 ? "y" : "ies")} for {date:yyyy-MM-dd}.");
                 }
                 RefreshQueuedView();
+                QueueChanged?.Invoke();
             }
 
             AppendLog($"[off] {(result.Success ? "OK" : result.Error)}");
@@ -1693,10 +1504,10 @@ internal sealed class MainForm : Form, IMessageFilter
     private void SetBusy(bool busy, string? busyNotice = null)
     {
         _busy = busy;
-        Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
+        UseWaitCursor = busy;
         _logNowBtn.Text = busy ? BusyText : LogNowText;
-        if (busy && busyNotice != null) _toast.ShowNotice(busyNotice, NoticeKind.Info, sticky: true);
-        if (!busy && _toast.IsSticky) _toast.HideNotice();
+        if (busy && busyNotice != null) BusyChanged?.Invoke(busyNotice);
+        if (!busy) BusyChanged?.Invoke(null);
         UpdateActionState();
     }
 
@@ -1736,25 +1547,29 @@ internal sealed class MainForm : Form, IMessageFilter
 
     // Re-read the persisted queue each time the window is focused (e.g. reopened from
     // the tray, or after a scheduled drain happened while it was hidden).
-    protected override void OnActivated(EventArgs e)
+    public void OnActivatedRefresh()
     {
-        base.OnActivated(e);
         _date.SyncToTodayIfAuto();
         RefreshQueuedView();
     }
 
-    // Every time the window is shown, start in the ticket box so you can type right away.
-    protected override void OnVisibleChanged(EventArgs e)
+    // Every time the page is shown, start in the ticket box so you can type right away.
+    public void OnPageShown()
     {
-        base.OnVisibleChanged(e);
-        if (Visible) BeginInvoke(FocusTicketInput);
+        OnActivatedRefresh();
+        BeginInvoke(FocusTicketInput);
     }
 
-    // Esc hides the window to the tray, except while it is clearing a non-empty search.
+    // The date resets to today on reopen, so a half-typed entry would land on the wrong day.
+    public void OnHidden()
+    {
+        _date.ForgetManualPick();
+        _tickets.Clear();
+    }
+
+    // Enter in the search box picks the top match; Esc is handled by the shell.
     protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
     {
-        // Enter in the search box picks the top match; it must never fall through to
-        // AcceptButton and queue whatever is already in the ticket box.
         if (keyData == Keys.Enter && _ticketSearch.Focused)
         {
             var matches = FilterSuggestions(_lastSuggestions, _ticketSearch.Text);
@@ -1765,29 +1580,6 @@ internal sealed class MainForm : Form, IMessageFilter
             }
             return true;
         }
-
-        var clearingSearch = _ticketSearch.Focused && _ticketSearch.TextLength != 0;
-        if (keyData == Keys.Escape && !clearingSearch)
-        {
-            Close(); // OnFormClosing turns a user close into hide-to-tray
-            return true;
-        }
         return base.ProcessCmdKey(ref msg, keyData);
-    }
-
-    // Hide to tray on the user's X click instead of exiting the process.
-    protected override void OnFormClosing(FormClosingEventArgs e)
-    {
-        if (e.CloseReason == CloseReason.UserClosing)
-        {
-            e.Cancel = true;
-            SaveWindowBounds();
-            _date.ForgetManualPick();
-            // The date resets to today on reopen, so a half-typed entry would land on the wrong day.
-            _tickets.Text = string.Empty;
-            Hide();
-            return;
-        }
-        base.OnFormClosing(e);
     }
 }

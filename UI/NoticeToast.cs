@@ -8,10 +8,10 @@ namespace NoisLogTray;
 // action runs. Click to dismiss early.
 internal sealed class NoticeToast : Control
 {
-    private const int Radius = 8;
-    private const int BarW = 4;
-    private const int PadX = 12;
-    private const int PadY = 9;
+    private static readonly int Radius = UiScale.S(8);
+    private static readonly int BarW = UiScale.S(4);
+    private static readonly int PadX = UiScale.S(12);
+    private static readonly int PadY = UiScale.S(9);
     private const int MaxLines = 2; // longer text is cut with "..."; the bell history has it whole
     private const TextFormatFlags WrapFlags =
         TextFormatFlags.WordBreak | TextFormatFlags.EndEllipsis | TextFormatFlags.TextBoxControl | TextFormatFlags.NoPrefix;
@@ -27,7 +27,7 @@ internal sealed class NoticeToast : Control
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
             | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        Font = new Font("Segoe UI", 9F);
+        Font = UiScale.Font("Segoe UI", 9F);
         Cursor = Cursors.Hand;
         Visible = false;
         AccessibleRole = AccessibleRole.Alert;
@@ -63,7 +63,7 @@ internal sealed class NoticeToast : Control
         var textW = Width - BarW - 2 * PadX;
         var textH = TextRenderer.MeasureText(message, Font, new Size(textW, int.MaxValue), WrapFlags).Height;
         var maxTextH = MaxLines * TextRenderer.MeasureText("A", Font).Height;
-        Height = Math.Max(36, Math.Min(textH, maxTextH) + 2 * PadY);
+        Height = Math.Max(UiScale.S(36), Math.Min(textH, maxTextH) + 2 * PadY);
         using (var path = Rounded(new Rectangle(0, 0, Width, Height), Radius))
             Region = new Region(path);
 

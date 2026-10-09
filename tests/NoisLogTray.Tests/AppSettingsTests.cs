@@ -55,4 +55,27 @@ public class AppSettingsTests : IDisposable
         Assert.True(File.Exists(_path + ".bad"));
         Assert.Equal("{ not valid json", File.ReadAllText(_path + ".bad")); // raw content preserved
     }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    [InlineData(null)]
+    public void WindowState_RoundTrips(bool? maximized)
+    {
+        AppSettings.Save(new AppSettings { WindowMaximized = maximized, SidebarCollapsed = true }, _path);
+
+        var read = AppSettings.Load(_path);
+        Assert.Equal(maximized, read.WindowMaximized);
+        Assert.True(read.SidebarCollapsed);
+    }
+
+    [Fact]
+    public void UiZoomPercent_RoundTripsAndDefaultsWhenMissing()
+    {
+        File.WriteAllText(_path, "{ \"dark\": true }");
+        Assert.Equal(UiScale.DefaultZoomPercent, AppSettings.Load(_path).UiZoomPercent);
+
+        AppSettings.Save(new AppSettings { UiZoomPercent = 150 }, _path);
+        Assert.Equal(150, AppSettings.Load(_path).UiZoomPercent);
+    }
 }

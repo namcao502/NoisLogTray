@@ -19,7 +19,7 @@ internal sealed class MacButton : Button
         set { _selected = value; Invalidate(); }
     }
 
-    internal int Radius = 6;
+    internal int Radius = UiScale.S(6);
     internal bool OnWindow; // true = sits on the window body (blend corners to WindowBg)
 
     private MacButton(bool secondary)
@@ -32,7 +32,7 @@ internal sealed class MacButton : Button
         FlatAppearance.MouseOverBackColor = Color.Transparent;
         FlatAppearance.MouseDownBackColor = Color.Transparent;
         BackColor = Color.Transparent;
-        Font = new Font("Segoe UI", 9.5F);
+        Font = UiScale.Font("Segoe UI", 9.5F);
         Cursor = Cursors.Hand;
         Theme.Changed += OnThemeChanged;
     }
@@ -90,9 +90,9 @@ internal sealed class MacButton : Button
         // accent-coloured on the neutral secondary fill.
         if (Focused && Enabled)
         {
-            var focusRect = Rectangle.Inflate(rect, -3, -3);
-            using var focusPath = Rounded(focusRect, Math.Max(2, Radius - 2));
-            using var pen = new Pen(_secondary && !_selected ? Theme.Accent : Color.White, 1.4f) { DashStyle = DashStyle.Dot };
+            var focusRect = Rectangle.Inflate(rect, -UiScale.S(3), -UiScale.S(3));
+            using var focusPath = Rounded(focusRect, Math.Max(UiScale.S(2), Radius - UiScale.S(2)));
+            using var pen = new Pen(_secondary && !_selected ? Theme.Accent : Color.White, UiScale.S(1.4f)) { DashStyle = DashStyle.Dot };
             g.DrawPath(pen, focusPath);
         }
     }

@@ -10,14 +10,16 @@ namespace NoisLogTray;
 // baseline; the [X] is a small owner-drawn child control (CloseButton).
 internal sealed class WillLogRow : Control
 {
-    private static readonly Font KeyFont = new("Segoe UI", 9F, FontStyle.Bold);
-    private static readonly Font TextFont = new("Segoe UI", 9F);
+    private static readonly Font KeyFont = UiScale.Font("Segoe UI", 9F, FontStyle.Bold);
+    private static readonly Font TextFont = UiScale.Font("Segoe UI", 9F);
 
     private const TextFormatFlags LeftFlags =
         TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding;
 
-    private const int RemoveSize = 18; // the [X] button
-    private const int RemovePad = 2;   // gap from the right edge
+    private static readonly int RemoveSize = UiScale.S(18); // the [X] button
+    private static readonly int RemovePad = UiScale.S(2);   // gap from the right edge
+    private static readonly int TextX = UiScale.S(18);      // key text starts right of the dot
+    private static readonly int TextGap = UiScale.S(12);    // between key, slots and summary
 
     private readonly CloseButton _remove = new();
     private readonly SummaryTip _summaryTip = new();
@@ -28,7 +30,7 @@ internal sealed class WillLogRow : Control
     internal string Slots = "";
     internal string Summary = ""; // Jira title; empty until the ticket is verified
 
-    private const int MinSummaryW = 40; // below this a summary is only "..."; skip it
+    private static readonly int MinSummaryW = UiScale.S(40); // below this a summary is only "..."; skip it
 
     // Raised when the row's [X] is clicked (removes this ticket from the queue).
     internal event Action? RemoveClicked;
@@ -37,7 +39,7 @@ internal sealed class WillLogRow : Control
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
             | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
-        Height = 22;
+        Height = UiScale.S(22);
         Margin = new Padding(0);
 
         _remove.Size = new Size(RemoveSize, RemoveSize);
@@ -66,21 +68,22 @@ internal sealed class WillLogRow : Control
         g.Clear(Theme.InputBg);
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
+        var dotSize = UiScale.S(8f);
         using (var dot = new SolidBrush(DotColor))
-            g.FillEllipse(dot, 4, (Height - 8) / 2f, 8, 8);
+            g.FillEllipse(dot, UiScale.S(4f), (Height - dotSize) / 2f, dotSize, dotSize);
 
-        TextRenderer.DrawText(g, Key, KeyFont, new Rectangle(18, 0, Width - 18, Height), KeyColor, LeftFlags);
+        TextRenderer.DrawText(g, Key, KeyFont, new Rectangle(TextX, 0, Width - TextX, Height), KeyColor, LeftFlags);
 
         // Slots sit right after the key; leave room on the right for the [X] button.
-        var keyW = TextRenderer.MeasureText(Key, KeyFont).Width;
-        var slotsX = 18 + keyW + 12;
-        var slotsW = Math.Max(10, Width - slotsX - RemoveSize - RemovePad - 6);
+        var keyW = Math.Max(RowColumns.KeyWidth(KeyFont), TextRenderer.MeasureText(Key, KeyFont).Width);
+        var slotsX = TextX + keyW + TextGap;
+        var slotsW = Math.Max(UiScale.S(10), Width - slotsX - RemoveSize - RemovePad - UiScale.S(6));
         TextRenderer.DrawText(g, Slots, TextFont, new Rectangle(slotsX, 0, slotsW, Height),
             Theme.TextSecondary, LeftFlags);
 
         // The Jira summary fills what is left before the [X], cut with "..." when long.
-        var summaryX = slotsX + TextRenderer.MeasureText(Slots, TextFont).Width + 12;
-        var summaryW = Width - summaryX - RemoveSize - RemovePad - 6;
+        var summaryX = slotsX + Math.Max(RowColumns.SlotsWidth(TextFont), TextRenderer.MeasureText(Slots, TextFont).Width) + TextGap;
+        var summaryW = Width - summaryX - RemoveSize - RemovePad - UiScale.S(6);
         if (Summary.Length != 0 && summaryW > MinSummaryW)
             TextRenderer.DrawText(g, Summary, TextFont, new Rectangle(summaryX, 0, summaryW, Height),
                 Theme.TextPrimary, LeftFlags | TextFormatFlags.EndEllipsis);

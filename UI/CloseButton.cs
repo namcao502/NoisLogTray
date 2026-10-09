@@ -59,13 +59,13 @@ internal sealed class CloseButton : Button
         }
 
         // The X glyph: two diagonal strokes inset from the edges; brighter on hover.
-        var inset = Math.Max(4, Width / 4);
+        var inset = Math.Max(UiScale.S(4), Width / 4);
         var left = inset;
         var right = Width - inset;
         var top = inset;
         var bottom = Height - inset;
         var color = Enabled ? (_hover ? Theme.TextPrimary : Theme.TextSecondary) : Theme.TextSecondary;
-        using (var pen = new Pen(color, 1.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+        using (var pen = new Pen(color, UiScale.S(1.6f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
         {
             g.DrawLine(pen, left, top, right, bottom);
             g.DrawLine(pen, right, top, left, bottom);
@@ -74,7 +74,7 @@ internal sealed class CloseButton : Button
         // Keyboard-focus ring: a dotted accent ellipse just inside the edge.
         if (Focused && Enabled)
         {
-            using var ring = new Pen(Theme.Accent, 1.2f) { DashStyle = DashStyle.Dot };
+            using var ring = new Pen(Theme.Accent, UiScale.S(1.2f)) { DashStyle = DashStyle.Dot };
             g.DrawEllipse(ring, Rectangle.Inflate(rect, -1, -1));
         }
     }

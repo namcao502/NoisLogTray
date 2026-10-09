@@ -15,7 +15,7 @@ internal sealed class RoundedDatePicker : Control
     // "today" only happens while this is false, so a manual pick is not clobbered.
     private bool _userPicked;
 
-    internal int Radius = 8;
+    internal int Radius = UiScale.S(8);
 
     internal event EventHandler? ValueChanged;
 
@@ -26,7 +26,7 @@ internal sealed class RoundedDatePicker : Control
             | ControlStyles.Selectable, true); // Selectable = reachable by Tab / a screen reader
         TabStop = true;
         BackColor = Theme.CardSurface;
-        Font = new Font("Segoe UI", 9.5F);
+        Font = UiScale.Font("Segoe UI", 9.5F);
         Cursor = Cursors.Hand;
         AccessibleRole = AccessibleRole.DropList;
         UpdateAccessibleName();
@@ -127,27 +127,29 @@ internal sealed class RoundedDatePicker : Control
         using (var brush = new SolidBrush(Theme.InputBg)) g.FillPath(brush, path);
         using (var pen = new Pen(Theme.InputBorder)) g.DrawPath(pen, path);
 
-        var textRect = new Rectangle(10, 0, Width - 34, Height);
+        var textRect = new Rectangle(UiScale.S(10), 0, Width - UiScale.S(34), Height);
         TextRenderer.DrawText(g, DateText, Font, textRect, Theme.TextPrimary,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
-        var cx = Width - 18;
+        var cx = Width - UiScale.S(18);
         var cy = Height / 2;
-        using var chevron = new Pen(Theme.TextSecondary, 1.6f);
-        g.DrawLines(chevron, new[] { new Point(cx - 4, cy - 2), new Point(cx, cy + 2), new Point(cx + 4, cy - 2) });
+        var arm = UiScale.S(4);
+        var rise = UiScale.S(2);
+        using var chevron = new Pen(Theme.TextSecondary, UiScale.S(1.6f));
+        g.DrawLines(chevron, new[] { new Point(cx - arm, cy - rise), new Point(cx, cy + rise), new Point(cx + arm, cy - rise) });
 
         // Keyboard-focus ring: a dotted accent outline just inside the field border.
         if (Focused)
         {
-            var focusRect = Rectangle.Inflate(rect, -2, -2);
+            var focusRect = Rectangle.Inflate(rect, -UiScale.S(2), -UiScale.S(2));
             using var path2 = new GraphicsPath();
-            var d2 = Math.Max(2, Radius - 1) * 2;
+            var d2 = Math.Max(UiScale.S(2), Radius - UiScale.S(1)) * 2;
             path2.AddArc(focusRect.X, focusRect.Y, d2, d2, 180, 90);
             path2.AddArc(focusRect.Right - d2, focusRect.Y, d2, d2, 270, 90);
             path2.AddArc(focusRect.Right - d2, focusRect.Bottom - d2, d2, d2, 0, 90);
             path2.AddArc(focusRect.X, focusRect.Bottom - d2, d2, d2, 90, 90);
             path2.CloseFigure();
-            using var pen = new Pen(Theme.Accent, 1.4f) { DashStyle = DashStyle.Dot };
+            using var pen = new Pen(Theme.Accent, UiScale.S(1.4f)) { DashStyle = DashStyle.Dot };
             g.DrawPath(pen, path2);
         }
     }
@@ -164,7 +166,7 @@ internal sealed class RoundedDatePicker : Control
         var popup = new CalendarPopupForm();
         popup.ClientSize = calendar.Size;
         popup.Controls.Add(calendar);
-        popup.Location = PointToScreen(new Point(0, Height + 4));
+        popup.Location = PointToScreen(new Point(0, Height + UiScale.S(4)));
         calendar.DateSelected += (_, date) => { _userPicked = true; Value = date; popup.Close(); };
         popup.Deactivate += (_, _) => popup.Close();
         popup.Show();

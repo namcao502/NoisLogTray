@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 
@@ -16,6 +17,10 @@ internal sealed class ClickableRow : Panel
         TabStop = true;
         AccessibleRole = AccessibleRole.Link;
     }
+
+    // null = Theme.Accent; a row filled with the accent (selected sidebar item) needs white.
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    internal Color? FocusRingColor { get; set; }
 
     protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
     protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
@@ -38,7 +43,7 @@ internal sealed class ClickableRow : Panel
 
         // Dotted accent ring just inside the row edges (children paint over the interior).
         var r = new Rectangle(1, 1, Width - 3, Height - 3);
-        using var pen = new Pen(Theme.Accent, 1.4f) { DashStyle = DashStyle.Dot };
+        using var pen = new Pen(FocusRingColor ?? Theme.Accent, UiScale.S(1.4f)) { DashStyle = DashStyle.Dot };
         e.Graphics.DrawRectangle(pen, r);
     }
 }

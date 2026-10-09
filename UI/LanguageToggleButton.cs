@@ -7,10 +7,10 @@ namespace NoisLogTray;
 // the current language code ("EN" / "VI"); a click calls Lang.Toggle.
 internal sealed class LanguageToggleButton : Control
 {
-    private static readonly Font CodeFont = new("Segoe UI Semibold", 8.5F, FontStyle.Bold);
+    private static readonly Font CodeFont = UiScale.Font("Segoe UI Semibold", 8.5F, FontStyle.Bold);
     private bool _hover;
 
-    internal int Radius = 6;
+    internal int Radius = UiScale.S(6);
 
     internal LanguageToggleButton()
     {

@@ -6,7 +6,7 @@ namespace NoisLogTray;
 // A rounded card surface (theme-aware) on the window body.
 internal sealed class Card : Panel
 {
-    internal int Radius = 12;
+    internal int Radius = UiScale.S(12);
 
     internal Card()
     {

@@ -12,7 +12,7 @@ internal sealed class NotificationBell : Control
     private bool _hover;
     private bool _hasUnread;
 
-    internal int Radius = 6;
+    internal int Radius = UiScale.S(6);
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal bool HasUnread
@@ -58,23 +58,24 @@ internal sealed class NotificationBell : Control
 
         var cx = Width / 2f;
         var cy = Height / 2f;
+        static float S(float logical) => UiScale.S(logical);
         using (var bell = new GraphicsPath())
         using (var brush = new SolidBrush(Theme.SecondaryBtnText))
         {
             // Dome, flared sides, flat rim; then the clapper below the rim.
-            bell.AddArc(cx - 5f, cy - 8f, 10f, 10f, 180, 180);
-            bell.AddLine(cx + 5f, cy - 3f, cx + 7f, cy + 4f);
-            bell.AddLine(cx + 7f, cy + 4f, cx - 7f, cy + 4f);
-            bell.AddLine(cx - 7f, cy + 4f, cx - 5f, cy - 3f);
+            bell.AddArc(cx - S(5f), cy - S(8f), S(10f), S(10f), 180, 180);
+            bell.AddLine(cx + S(5f), cy - S(3f), cx + S(7f), cy + S(4f));
+            bell.AddLine(cx + S(7f), cy + S(4f), cx - S(7f), cy + S(4f));
+            bell.AddLine(cx - S(7f), cy + S(4f), cx - S(5f), cy - S(3f));
             bell.CloseFigure();
             g.FillPath(brush, bell);
-            g.FillEllipse(brush, cx - 2f, cy + 5f, 4f, 4f);
+            g.FillEllipse(brush, cx - S(2f), cy + S(5f), S(4f), S(4f));
         }
 
         if (_hasUnread)
         {
             using var dot = new SolidBrush(DotColor);
-            g.FillEllipse(dot, Width - 12, 4, 7, 7);
+            g.FillEllipse(dot, Width - UiScale.S(12), UiScale.S(4), UiScale.S(7), UiScale.S(7));
         }
     }
 

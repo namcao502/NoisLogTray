@@ -7,13 +7,16 @@ namespace NoisLogTray;
 // broken query is never stored. Returns the entered query in Jql (empty == use default).
 internal sealed class JqlForm : Form
 {
-    private static readonly Font TitleFont = new("Segoe UI Semibold", 13F, FontStyle.Bold);
-    private static readonly Font HelpFont = new("Segoe UI", 8.5F);
-    private static readonly Font CaptionFont = new("Segoe UI", 8.5F, FontStyle.Bold);
-    private static readonly Font InputFont = new("Segoe UI", 9.5F);
+    private static readonly Font TitleFont = UiScale.Font("Segoe UI Semibold", 13F, FontStyle.Bold);
+    private static readonly Font HelpFont = UiScale.Font("Segoe UI", 8.5F);
+    private static readonly Font CaptionFont = UiScale.Font("Segoe UI", 8.5F, FontStyle.Bold);
+    private static readonly Font InputFont = UiScale.Font("Segoe UI", 9.5F);
 
-    private const int Pad = 24;
-    private const int FieldW = 472; // ClientWidth (520) - 2*Pad
+    private static readonly int Pad = UiScale.S(24);
+    private static readonly int FieldW = UiScale.S(472); // ClientWidth (520 logical) - 2*Pad
+    private static readonly int ButtonH = UiScale.S(36);
+    private static readonly int SaveW = UiScale.S(110);
+    private static readonly int FieldH = UiScale.S(110);
 
     private readonly TextBox _box = new();
     private readonly Label _error = new();
@@ -57,7 +60,7 @@ internal sealed class JqlForm : Form
             BackColor = Color.Transparent,
         };
         Controls.Add(title);
-        y += 28;
+        y += UiScale.S(28);
 
         var help = new Label
         {
@@ -67,14 +70,14 @@ internal sealed class JqlForm : Form
                 "JQL này quyết định danh sách \"Ticket của tôi\". Để trống để dùng mặc định có sẵn.\n" +
                 "Sẽ được kiểm tra với Jira khi bạn lưu."),
             AutoSize = false,
-            Size = new Size(FieldW, 34),
+            Size = new Size(FieldW, UiScale.S(34)),
             Location = new Point(Pad, y),
             Font = HelpFont,
             ForeColor = Theme.TextSecondary,
             BackColor = Color.Transparent,
         };
         Controls.Add(help);
-        return y + 42;
+        return y + UiScale.S(42);
     }
 
     private int AddField(int y, string initialJql)
@@ -89,9 +92,9 @@ internal sealed class JqlForm : Form
             BackColor = Color.Transparent,
         };
         Controls.Add(cap);
-        y += 20;
+        y += UiScale.S(20);
 
-        var host = new RoundedHost { Location = new Point(Pad, y), Size = new Size(FieldW, 110) };
+        var host = new RoundedHost { Location = new Point(Pad, y), Size = new Size(FieldW, FieldH) };
         _box.Multiline = true;
         _box.AcceptsReturn = true; // Enter inserts a newline rather than triggering Save
         _box.ScrollBars = ScrollBars.Vertical;
@@ -100,49 +103,50 @@ internal sealed class JqlForm : Form
         _box.BackColor = Theme.InputBg;
         _box.ForeColor = Theme.TextPrimary;
         _box.Text = initialJql;
-        _box.SetBounds(10, 8, host.Width - 20, host.Height - 16);
+        _box.SetBounds(UiScale.S(10), UiScale.S(8), host.Width - UiScale.S(20), host.Height - UiScale.S(16));
         host.Controls.Add(_box);
         Controls.Add(host);
-        return y + 110 + 12;
+        return y + FieldH + UiScale.S(12);
     }
 
     private void AddErrorAndButtons(int y)
     {
         _error.AutoSize = false;
-        _error.Size = new Size(FieldW, 18);
+        _error.Size = new Size(FieldW, UiScale.S(18));
         _error.Location = new Point(Pad, y);
         _error.Font = HelpFont;
         _error.ForeColor = Color.FromArgb(230, 76, 76);
         _error.BackColor = Color.Transparent;
         _error.TextAlign = ContentAlignment.MiddleLeft;
         Controls.Add(_error);
-        y += 24;
+        y += UiScale.S(24);
 
         _reset = MacButton.Secondary(Lang.T("Reset to default", "Về mặc định"));
         _reset.OnWindow = true;
-        _reset.Size = new Size(130, 36);
+        _reset.Size = new Size(UiScale.S(130), ButtonH);
         _reset.Location = new Point(Pad, y);
         _reset.Click += (_, _) => { _box.Text = _defaultJql; _box.Focus(); };
 
         _save = MacButton.Primary(Lang.T("Save", "Lưu"));
         _save.OnWindow = true;
-        _save.Size = new Size(110, 36);
-        _save.Location = new Point(Pad + FieldW - 110, y);
+        _save.Size = new Size(SaveW, ButtonH);
+        _save.Location = new Point(Pad + FieldW - SaveW, y);
         _save.Click += OnSave;
 
         _cancel = MacButton.Secondary(Lang.T("Cancel", "Hủy"));
         _cancel.OnWindow = true;
-        _cancel.Size = new Size(100, 36);
-        _cancel.Location = new Point(Pad + FieldW - 110 - 12 - 100, y);
+        var cancelW = UiScale.S(100);
+        _cancel.Size = new Size(cancelW, ButtonH);
+        _cancel.Location = new Point(Pad + FieldW - SaveW - UiScale.S(12) - cancelW, y);
         _cancel.Click += (_, _) => { DialogResult = DialogResult.Cancel; Close(); };
 
         Controls.Add(_reset);
         Controls.Add(_save);
         Controls.Add(_cancel);
-        y += 36 + Pad;
+        y += ButtonH + Pad;
 
         CancelButton = _cancel; // Esc closes; Enter is left to the multiline box
-        ClientSize = new Size(520, y);
+        ClientSize = new Size(FieldW + 2 * Pad, y);
     }
 
     private async void OnSave(object? sender, EventArgs e)

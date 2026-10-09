@@ -227,11 +227,10 @@ internal static class GraphTscClient
         }
     }
 
-    // Read the ticket text present in the target cells for each date (for the weekly
-    // coverage check). Returns a per-date map: the first non-empty target cell's text,
-    // or null when the day is empty, the sheet's date cell (B) does not match, or a read
-    // fails. One persistent workbook session for the whole batch.
-    internal static async Task<IReadOnlyDictionary<DateOnly, string?>> ReadTicketsAsync(
+    // Read each date's ticket text (first non-empty target cell) for the coverage check, in one
+    // workbook session. Returns null when the read failed; an empty cell maps to null, a date whose
+    // column B did not match is absent from the map.
+    internal static async Task<IReadOnlyDictionary<DateOnly, string?>?> ReadTicketsAsync(
         IReadOnlyList<DateOnly> dates,
         string token,
         GraphTscOptions options,
@@ -240,7 +239,6 @@ internal static class GraphTscClient
     {
         void Emit(string line) => onLog?.Invoke(line);
         var result = new Dictionary<DateOnly, string?>();
-        foreach (var d in dates) result[d] = null;
 
         if (string.IsNullOrWhiteSpace(token) || dates.Count == 0) return result;
 
@@ -286,6 +284,7 @@ internal static class GraphTscClient
         catch (Exception e)
         {
             Emit($"[tsc-check] Error: {e.Message}");
+            return null;
         }
         return result;
     }

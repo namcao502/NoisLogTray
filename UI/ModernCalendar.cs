@@ -14,13 +14,14 @@ internal sealed class ModernCalendar : Control
     private DateTime _month = new(DateTime.Today.Year, DateTime.Today.Month, 1);
     private int _hoverDay = -1;
 
-    private const int Pad = 12;
-    private const int HeaderH = 36;
-    private const int WeekH = 24;
-    private const int CellW = 30;
-    private const int CellH = 30;
-    private const int GridLeft = 15;
-    private const int GridTop = Pad + HeaderH + WeekH; // 72
+    private static readonly int Pad = UiScale.S(12);
+    private static readonly int HeaderH = UiScale.S(36);
+    private static readonly int WeekH = UiScale.S(24);
+    private static readonly int CellW = UiScale.S(30);
+    private static readonly int CellH = UiScale.S(30);
+    private static readonly int GridLeft = UiScale.S(15);
+    private static readonly int GridTop = Pad + HeaderH + WeekH; // 72 logical
+    private static readonly int ArrowW = UiScale.S(28);
 
     internal event EventHandler<DateTime>? DateSelected;
 
@@ -29,8 +30,9 @@ internal sealed class ModernCalendar : Control
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
             | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         BackColor = Theme.CardSurface;
-        Font = new Font("Segoe UI", 9F);
-        Size = new Size(240, GridTop + CellH * 6 + Pad); // 240 x 264
+        Font = UiScale.Font("Segoe UI", 9F);
+        // Width from the scaled parts, not S(240), so the grid stays centered after rounding.
+        Size = new Size(2 * GridLeft + 7 * CellW, GridTop + CellH * 6 + Pad); // 240 x 264 logical
     }
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
@@ -45,8 +47,8 @@ internal sealed class ModernCalendar : Control
         }
     }
 
-    private Rectangle PrevArrow => new(Pad, Pad, 28, HeaderH);
-    private Rectangle NextArrow => new(Width - Pad - 28, Pad, 28, HeaderH);
+    private Rectangle PrevArrow => new(Pad, Pad, ArrowW, HeaderH);
+    private Rectangle NextArrow => new(Width - Pad - ArrowW, Pad, ArrowW, HeaderH);
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -56,12 +58,12 @@ internal sealed class ModernCalendar : Control
         g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
         using (var pen = new Pen(Theme.CardBorder))
-        using (var border = Rounded(new Rectangle(0, 0, Width - 1, Height - 1), 8))
+        using (var border = Rounded(new Rectangle(0, 0, Width - 1, Height - 1), UiScale.S(8)))
             g.DrawPath(pen, border);
 
-        using (var headFont = new Font("Segoe UI Semibold", 10.5F, FontStyle.Bold))
+        using (var headFont = UiScale.Font("Segoe UI Semibold", 10.5F, FontStyle.Bold))
         {
-            var header = new Rectangle(Pad + 28, Pad, Width - 2 * (Pad + 28), HeaderH);
+            var header = new Rectangle(Pad + ArrowW, Pad, Width - 2 * (Pad + ArrowW), HeaderH);
             TextRenderer.DrawText(g, _month.ToString("MMMM yyyy", Lang.Culture), headFont, header, Theme.TextPrimary,
                 TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
         }
@@ -71,7 +73,7 @@ internal sealed class ModernCalendar : Control
         var days = Lang.Vietnamese
             ? new[] { "CN", "T2", "T3", "T4", "T5", "T6", "T7" }
             : new[] { "Su", "Mo", "Tu", "We", "Th", "Fr", "Sa" };
-        using (var weekFont = new Font("Segoe UI", 8F, FontStyle.Bold))
+        using (var weekFont = UiScale.Font("Segoe UI", 8F, FontStyle.Bold))
             for (var c = 0; c < 7; c++)
             {
                 var r = new Rectangle(GridLeft + c * CellW, Pad + HeaderH, CellW, WeekH);
@@ -88,7 +90,7 @@ internal sealed class ModernCalendar : Control
             var index = startCol + (d - 1);
             var cell = new Rectangle(GridLeft + index % 7 * CellW, GridTop + index / 7 * CellH, CellW, CellH);
             var date = new DateTime(_month.Year, _month.Month, d);
-            var circle = Rectangle.Inflate(cell, -3, -3);
+            var circle = Rectangle.Inflate(cell, -UiScale.S(3), -UiScale.S(3));
 
             if (date == _value)
             {
@@ -102,7 +104,7 @@ internal sealed class ModernCalendar : Control
             }
             else if (date == today)
             {
-                using var pen = new Pen(Theme.Accent, 1.4f);
+                using var pen = new Pen(Theme.Accent, UiScale.S(1.4f));
                 g.DrawEllipse(pen, circle);
             }
 
@@ -115,10 +117,12 @@ internal sealed class ModernCalendar : Control
     {
         var cx = area.X + area.Width / 2;
         var cy = area.Y + area.Height / 2;
-        using var pen = new Pen(Theme.TextSecondary, 1.8f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        var dx = UiScale.S(3);
+        var dy = UiScale.S(5);
+        using var pen = new Pen(Theme.TextSecondary, UiScale.S(1.8f)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
         g.DrawLines(pen, left
-            ? new[] { new Point(cx + 3, cy - 5), new Point(cx - 3, cy), new Point(cx + 3, cy + 5) }
-            : new[] { new Point(cx - 3, cy - 5), new Point(cx + 3, cy), new Point(cx - 3, cy + 5) });
+            ? new[] { new Point(cx + dx, cy - dy), new Point(cx - dx, cy), new Point(cx + dx, cy + dy) }
+            : new[] { new Point(cx - dx, cy - dy), new Point(cx + dx, cy), new Point(cx - dx, cy + dy) });
     }
 
     protected override void OnMouseMove(MouseEventArgs e)
@@ -198,7 +202,7 @@ internal sealed class CalendarPopupForm : Form
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        const int d = 16;
+        var d = UiScale.S(16);
         var w = ClientSize.Width;
         var h = ClientSize.Height;
         using var path = new GraphicsPath();

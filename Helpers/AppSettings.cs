@@ -16,6 +16,9 @@ internal sealed class AppSettings
     public int? WindowY { get; set; }
     public int? WindowWidth { get; set; }
     public int? WindowHeight { get; set; }
+    public bool? WindowMaximized { get; set; } // null = never saved -> open maximized
+    public bool SidebarCollapsed { get; set; }
+    public int UiZoomPercent { get; set; } = UiScale.DefaultZoomPercent; // read once at startup
     public Dictionary<string, string> Config { get; set; } = new();
 
     private static readonly JsonSerializerOptions Options = new()

@@ -1,4 +1,4 @@
-# NOIS Daily Log
+# NOIS Workday
 
 A Windows system-tray app that automates your daily work-log entries from a single
 tray icon. It writes each day's tickets to two destinations:

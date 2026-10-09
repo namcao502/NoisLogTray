@@ -12,6 +12,7 @@ internal static class TicketQueue
     private static readonly Regex TicketPattern = new(@"^MDP-\d+$", RegexOptions.Compiled);
     private static readonly Regex DatePattern = new(@"^\d{4}-\d{2}-\d{2}$", RegexOptions.Compiled);
     private static readonly object Gate = new();
+    private static readonly TimeOnly HrmTodayOpensAt = new(18, 0);
 
     internal static IReadOnlyList<QueueEntry> Read(string? path = null)
     {
@@ -85,6 +86,39 @@ internal static class TicketQueue
             mergedMinutes?.Add(newMins[i]);
         }
         return new QueueEntry(existing.Date, mergedTickets, mergedMinutes);
+    }
+
+    // Queue a just-Started ticket for today under the lock. Refuses whenever the drain could
+    // overwrite the TSC cell with a partial list (see the per-rule comments).
+    internal static QueueAddResult AddStartedTicket(string ticket, DateTimeOffset nowHcm, TimeOnly logTime,
+        bool isTodayWritten, string? path = null)
+    {
+        // Sanitize drops non-MDP keys on read, so they would silently vanish from the queue.
+        if (!TicketPattern.IsMatch(ticket)) return QueueAddResult.Unsupported;
+        // An even-split weekend entry would log a full HRM day at the next drain.
+        if (nowHcm.DayOfWeek == DayOfWeek.Saturday || nowHcm.DayOfWeek == DayOfWeek.Sunday) return QueueAddResult.Weekend;
+        // Today can be drained from min(18:00, LOG_TIME); a ticket merged mid-drain would survive alone and overwrite the cell.
+        if (TimeOnly.FromDateTime(nowHcm.DateTime) >= (logTime < HrmTodayOpensAt ? logTime : HrmTodayOpensAt)) return QueueAddResult.TooLate;
+        var date = Hcm.ApiDate(DateOnly.FromDateTime(nowHcm.DateTime));
+        var queuePath = path ?? AppPaths.QueuePath;
+        lock (Gate)
+        {
+            var entries = ReadUnlocked(queuePath).ToList();
+            var index = entries.FindIndex(qe => qe.Date == date);
+            if (index < 0)
+            {
+                if (isTodayWritten) return QueueAddResult.AlreadyLogged;
+                entries.Add(new QueueEntry(date, new[] { ticket }));
+            }
+            else
+            {
+                if (entries[index].Tickets.Contains(ticket)) return QueueAddResult.AlreadyQueued;
+                if (entries[index].Minutes != null) return QueueAddResult.CustomHours;
+                entries[index] = MergeInto(entries[index], new[] { ticket }, null);
+            }
+            WriteUnlocked(entries.OrderBy(qe => qe.Date).ToList(), queuePath);
+            return QueueAddResult.Added;
+        }
     }
 
     // Effective logged minutes for a day: a custom entry's actual sum, or a full workday
