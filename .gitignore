@@ -20,3 +20,6 @@ coverage*.xml
 # Local secrets (copied from the old app; never commit)
 .env
 .env.local
+
+# Working docs (plans, reviews, notes) -- kept local for now
+docs/
