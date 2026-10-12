@@ -12,6 +12,13 @@ internal sealed class PseudoConsoleSession : IDisposable
     private const uint ExtendedStartupInfoPresent = 0x00080000;
     private const uint CreateUnicodeEnvironment = 0x00000400;
     private const int ProcThreadAttributePseudoConsole = 0x00020016;
+    private const int StartfUseStdHandles = 0x00000100;
+
+    // Microsoft's redistributable ConPTY when it was copied beside the exe (see the csproj), else the inbox one. The
+    // inbox ConPTY of Windows 10 re-renders the screen, which shifts claude's input line and drops mouse modes.
+    internal static readonly bool UsesBundledConpty = RuntimeInformation.ProcessArchitecture == Architecture.X64
+        && File.Exists(Path.Combine(AppContext.BaseDirectory, "conpty.dll"))
+        && File.Exists(Path.Combine(AppContext.BaseDirectory, "x64", "OpenConsole.exe"));
 
     private IntPtr _pseudoConsole;
     private IntPtr _attributeList;
@@ -32,14 +39,19 @@ internal sealed class PseudoConsoleSession : IDisposable
         _inputWrite = inputWrite;
         _outputRead = outputRead;
 
-        var result = CreatePseudoConsole(new Coord(columns, rows), inputRead, outputWrite, 0, out _pseudoConsole);
+        var result = UsesBundledConpty
+            ? ConptyCreatePseudoConsole(new Coord(columns, rows), inputRead, outputWrite, 0, out _pseudoConsole)
+            : CreatePseudoConsole(new Coord(columns, rows), inputRead, outputWrite, 0, out _pseudoConsole);
         // The console holds its own copies; closing ours lets the read loop see EOF when it exits.
         inputRead.Dispose();
         outputWrite.Dispose();
         if (result != 0) throw new Win32Exception(result);
+        AppLogger.Info($"[pty] session on the {(UsesBundledConpty ? "bundled" : "inbox")} ConPTY");
 
         var startupInfo = new StartupInfoEx();
         startupInfo.StartupInfo.cb = Marshal.SizeOf<StartupInfoEx>();
+        // Null std handles: without this the child inherits a redirected parent's stdin/stdout and bypasses the console.
+        startupInfo.StartupInfo.dwFlags = StartfUseStdHandles;
         var size = IntPtr.Zero;
         InitializeProcThreadAttributeList(IntPtr.Zero, 1, 0, ref size);
         _attributeList = Marshal.AllocHGlobal(size);
@@ -73,6 +85,9 @@ internal sealed class PseudoConsoleSession : IDisposable
         var entries = variables.Cast<DictionaryEntry>()
             .Select(de => (Name: (string)de.Key, Value: de.Value as string ?? ""))
             .Where(ev => !TicketLauncher.IsClaudeSessionVariable(ev.Name))
+            // The mouse never reaches claude's fullscreen renderer here (no wheel scroll, no selection), even with
+            // "tui": "fullscreen" in the user's settings; the classic one leaves both to xterm.js.
+            .Append((Name: "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", Value: "1"))
             .OrderBy(ev => ev.Name, StringComparer.OrdinalIgnoreCase)
             .Select(ev => $"{ev.Name}={ev.Value}\0");
         return string.Concat(entries) + "\0";
@@ -95,7 +110,8 @@ internal sealed class PseudoConsoleSession : IDisposable
     internal void Resize(short columns, short rows)
     {
         if (_disposed || columns <= 0 || rows <= 0) return;
-        ResizePseudoConsole(_pseudoConsole, new Coord(columns, rows));
+        if (UsesBundledConpty) ConptyResizePseudoConsole(_pseudoConsole, new Coord(columns, rows));
+        else ResizePseudoConsole(_pseudoConsole, new Coord(columns, rows));
     }
 
     private void ReadLoop()
@@ -128,7 +144,8 @@ internal sealed class PseudoConsoleSession : IDisposable
         if (_pseudoConsole != IntPtr.Zero)
         {
             // Closing the console ends the child's console session and breaks the output pipe.
-            ClosePseudoConsole(_pseudoConsole);
+            if (UsesBundledConpty) ConptyClosePseudoConsole(_pseudoConsole);
+            else ClosePseudoConsole(_pseudoConsole);
             _pseudoConsole = IntPtr.Zero;
         }
         if (_process.hProcess != IntPtr.Zero)
@@ -210,6 +227,15 @@ internal sealed class PseudoConsoleSession : IDisposable
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern void ClosePseudoConsole(IntPtr hPC);
+
+    [DllImport("conpty.dll")]
+    private static extern int ConptyCreatePseudoConsole(Coord size, SafeFileHandle hInput, SafeFileHandle hOutput, uint dwFlags, out IntPtr phPC);
+
+    [DllImport("conpty.dll")]
+    private static extern int ConptyResizePseudoConsole(IntPtr hPC, Coord size);
+
+    [DllImport("conpty.dll")]
+    private static extern void ConptyClosePseudoConsole(IntPtr hPC);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool InitializeProcThreadAttributeList(IntPtr lpAttributeList, int dwAttributeCount, int dwFlags, ref IntPtr lpSize);

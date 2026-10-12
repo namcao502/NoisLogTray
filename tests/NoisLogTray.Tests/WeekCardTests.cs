@@ -1,7 +1,7 @@
 namespace NoisLogTray.Tests;
 
 // Text is checked in either language: Lang is static UI state another test class may flip.
-public class WeekPageTests
+public class WeekCardTests
 {
     private static readonly DateOnly Day = new(2026, 10, 6);
 
@@ -13,9 +13,9 @@ public class WeekPageTests
     {
         var c = new DayCoverage(Day, 8, null, TscState: TscReadState.Failed);
 
-        var (color, text) = WeekPage.TscStatus(c, false);
+        var (color, text) = WeekCard.TscStatus(c, false);
 
-        Assert.Equal(WeekPage.Gray, color);
+        Assert.Equal(WeekCard.Gray, color);
         AssertText(text, "not read", "không đọc được");
     }
 
@@ -24,9 +24,9 @@ public class WeekPageTests
     {
         var c = new DayCoverage(Day, null, null, IsOff: true, TscState: TscReadState.NoToken);
 
-        var (color, text) = WeekPage.TscStatus(c, false);
+        var (color, text) = WeekCard.TscStatus(c, false);
 
-        Assert.Equal(WeekPage.Gray, color);
+        Assert.Equal(WeekCard.Gray, color);
         AssertText(text, "not read", "không đọc được");
     }
 
@@ -35,9 +35,9 @@ public class WeekPageTests
     {
         var c = new DayCoverage(Day, null, null, IsOff: true, TscState: TscReadState.NotDue);
 
-        var (color, text) = WeekPage.TscStatus(c, true);
+        var (color, text) = WeekCard.TscStatus(c, true);
 
-        Assert.Equal(WeekPage.Amber, color);
+        Assert.Equal(WeekCard.Amber, color);
         AssertText(text, "off - not marked", "nghỉ - chưa đánh dấu");
     }
 
@@ -46,9 +46,9 @@ public class WeekPageTests
     {
         var c = new DayCoverage(Day, null, null, TscState: TscReadState.NotDue);
 
-        var (color, text) = WeekPage.TscStatus(c, true);
+        var (color, text) = WeekCard.TscStatus(c, true);
 
-        Assert.Equal(WeekPage.Gray, color);
+        Assert.Equal(WeekCard.Gray, color);
         AssertText(text, "pending", "chưa tới");
     }
 
@@ -58,7 +58,7 @@ public class WeekPageTests
         // HRM is fully logged, so only an unread TSC cell could make the row clickable.
         var c = new DayCoverage(Day, 8, null, TscState: TscReadState.Failed);
 
-        Assert.False(WeekPage.IsActionable(c, false));
+        Assert.False(WeekCard.IsActionable(c, false));
     }
 
     [Fact]
@@ -66,7 +66,7 @@ public class WeekPageTests
     {
         var c = new DayCoverage(Day, null, null, IsOff: true, TscState: TscReadState.Failed);
 
-        Assert.False(WeekPage.IsActionable(c, false));
+        Assert.False(WeekCard.IsActionable(c, false));
     }
 
     [Fact]
@@ -74,6 +74,6 @@ public class WeekPageTests
     {
         var c = new DayCoverage(Day, null, null, IsOff: true, TscState: TscReadState.NotDue);
 
-        Assert.True(WeekPage.IsActionable(c, true));
+        Assert.True(WeekCard.IsActionable(c, true));
     }
 }

@@ -25,6 +25,10 @@ internal sealed class AppSettings
     public List<string> RecentClaudeDirectories { get; set; } = new(); // most recent first
     public Dictionary<string, string> ClaudeSessionIds { get; set; } = new(); // folder -> the Claude page's last session there
     public Dictionary<string, DateTimeOffset> TeamsPostedAt { get; set; } = new(); // ticket key -> when its Teams post was sent
+    public bool TicketHeaderCollapsed { get; set; } // the Ticket tab header shows only its key line
+    public double? DiffListWidthEm { get; set; } // the Changes file list width in the diff page's em; null = default
+    public bool DiffListHidden { get; set; }
+    public bool DiffInline { get; set; } // the Changes diff in one column instead of two
 
     private static readonly JsonSerializerOptions Options = new()
     {

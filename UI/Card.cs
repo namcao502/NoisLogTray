@@ -4,7 +4,7 @@ using System.Drawing.Drawing2D;
 namespace NoisLogTray;
 
 // A rounded card surface (theme-aware) on the window body.
-internal sealed class Card : Panel
+internal class Card : Panel
 {
     internal int Radius = UiScale.S(12);
 

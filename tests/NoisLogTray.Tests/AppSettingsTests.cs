@@ -119,6 +119,18 @@ public class AppSettingsTests : IDisposable
     }
 
     [Fact]
+    public void TicketViewLayout_RoundTrips()
+    {
+        AppSettings.Save(new AppSettings { TicketHeaderCollapsed = true, DiffListWidthEm = 31.5, DiffListHidden = true, DiffInline = true }, _path);
+
+        var read = AppSettings.Load(_path);
+        Assert.True(read.TicketHeaderCollapsed);
+        Assert.Equal(31.5, read.DiffListWidthEm);
+        Assert.True(read.DiffListHidden);
+        Assert.True(read.DiffInline);
+    }
+
+    [Fact]
     public void TeamsPostedAt_RoundTrips()
     {
         var postedAt = new DateTimeOffset(2026, 10, 12, 14, 30, 0, TimeSpan.FromHours(7));

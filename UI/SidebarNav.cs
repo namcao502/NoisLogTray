@@ -41,7 +41,6 @@ internal sealed class SidebarNav : Panel
         AddItem(ShellPage.Dashboard, "", () => PageLabel(ShellPage.Dashboard));
         AddItem(ShellPage.Log, "", () => PageLabel(ShellPage.Log));
         AddItem(ShellPage.Tasks, "", () => PageLabel(ShellPage.Tasks));
-        AddItem(ShellPage.Week, "", () => PageLabel(ShellPage.Week));
         AddItem(ShellPage.Claude, "", () => PageLabel(ShellPage.Claude));
         AddItem(ShellPage.Ticket, "", () => PageLabel(ShellPage.Ticket));
         AddItem(ShellPage.Settings, "", () => PageLabel(ShellPage.Settings));
@@ -67,7 +66,6 @@ internal sealed class SidebarNav : Panel
         ShellPage.Dashboard => "Dashboard",
         ShellPage.Log => "Log",
         ShellPage.Tasks => "Tasks",
-        ShellPage.Week => Lang.T("Week", "Tuần"),
         ShellPage.Claude => "Claude",
         ShellPage.Ticket => "Ticket",
         ShellPage.Settings => Lang.T("Settings", "Cài đặt"),

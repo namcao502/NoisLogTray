@@ -31,6 +31,11 @@ internal static class Theme
     internal static readonly Color AccentHover = Color.FromArgb(20, 132, 255);
     internal static readonly Color Badge = Color.FromArgb(230, 76, 76);
 
+    // Ticket action buttons (Tasks + Dashboard): one fill per action, white text; Open uses Accent.
+    internal static readonly Color ActionStart = Color.FromArgb(34, 139, 76);
+    internal static readonly Color ActionDone = Color.FromArgb(0, 128, 128); // teal: tells Done from Start at a glance
+    internal static readonly Color ActionReadyToTest = Color.FromArgb(124, 77, 255);
+
     // Load the persisted choice (defaults to dark when there is no saved setting).
     internal static void Load() => Dark = AppSettings.Load().Dark;
 

@@ -49,6 +49,9 @@ internal static class ClaudeAttention
         };
     }
 
+    // Looking at a finished turn is enough; a permission prompt or a question still blocks claude until answered.
+    internal static bool ClearsWhenSeen(ClaudeWaitReason reason) => reason == ClaudeWaitReason.Finished;
+
     internal static string NoticeText(string sessionLabel, ClaudeWaitReason reason) => reason switch
     {
         ClaudeWaitReason.Permission => Lang.T($"{sessionLabel}: Claude needs your permission.", $"{sessionLabel}: Claude cần bạn cấp quyền."),

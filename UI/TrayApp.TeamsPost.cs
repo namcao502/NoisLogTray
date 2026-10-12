@@ -1,21 +1,29 @@
 namespace NoisLogTray;
 
-// The ticket tab's "Post to Teams..." button: a draft in TeamsPostForm, sent as the user through their workflow.
+// The ticket tab's Teams view: a draft sent as the user through their workflow.
 internal sealed partial class TrayApp
 {
     private static readonly TimeSpan TeamsPostedAtKeep = TimeSpan.FromDays(180);
 
-    private void OpenTeamsPost(string ticketKey)
+    // Null (with a notice) until the workflow URL is set, so the tab stays on its current view.
+    private TeamsPostView? CreateTeamsPostView(string ticketKey)
     {
         if (!_teams.CanPostAsUser)
         {
             Notify(Lang.T("Set the Teams post workflow URL in Settings first.", "Hãy nhập URL Workflow đăng Teams trong Settings trước."), ToolTipIcon.Warning);
-            return;
+            return null;
         }
-        var draft = TeamsPost.ReadDraft(DevRepoPath, BackendWorktreePath(ticketKey), ticketKey) ?? BuildTeamsDraft(ticketKey);
-        var postedAt = AppSettings.Load().TeamsPostedAt.TryGetValue(ticketKey, out var at) ? at : (DateTimeOffset?)null;
-        using var form = new TeamsPostForm(ticketKey, draft, postedAt, _teams.PostAsUserAsync);
-        if (form.ShowDialog(_shell) != DialogResult.OK) return;
+        // _teams is read at send time: a Settings save replaces it.
+        var view = new TeamsPostView(ticketKey,
+            () => TeamsPost.ReadDraft(DevRepoPath, BackendWorktreePath(ticketKey), ticketKey) ?? BuildTeamsDraft(ticketKey),
+            () => AppSettings.Load().TeamsPostedAt.TryGetValue(ticketKey, out var postedAt) ? postedAt : null,
+            (text, cancellationToken) => _teams.PostAsUserAsync(text, cancellationToken));
+        view.Posted += () => RecordTeamsPost(ticketKey);
+        return view;
+    }
+
+    private void RecordTeamsPost(string ticketKey)
+    {
         // Entries older than TeamsPostedAtKeep are dropped, so the map stays small.
         var settings = AppSettings.Load();
         var now = Hcm.Now();

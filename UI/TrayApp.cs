@@ -23,7 +23,6 @@ internal sealed partial class TrayApp : ApplicationContext
     private DashboardPage? _dashboardPage;
     private LogPage? _logPage;
     private TasksPage? _tasksPage; // null when Tasks is disabled this session
-    private WeekPage? _weekPage;
     private ClaudePage? _claudePage;
     private ClaudeSessionHost? _claudeHost;
     private TicketWorkspacePage? _ticketPage;
@@ -172,7 +171,6 @@ internal sealed partial class TrayApp : ApplicationContext
         _dashboardPage = null;
         _logPage = null;
         _tasksPage = null;
-        _weekPage = null;
         _claudePage = null;
         _ticketPage = null;
         _settingsPage = null;
@@ -239,6 +237,7 @@ internal sealed partial class TrayApp : ApplicationContext
             _logPage = new LogPage(_service, _configError);
             _shell.AddPage(ShellPage.Log, _logPage);
             // Only Tasks can be missing (its page is not added when the state setup failed); any other page stays silent.
+            _shell.PageViewed += AcknowledgeSeenWaits;
             _shell.PageUnavailable += unavailablePage =>
             {
                 if (unavailablePage == ShellPage.Tasks) Notify(Lang.T(TasksDisabledEnglish, TasksDisabledVietnamese), ToolTipIcon.Warning);
@@ -263,19 +262,15 @@ internal sealed partial class TrayApp : ApplicationContext
                 _tasksPage.Reload(); // after subscribing, so the badge has a value right away
             }
             PruneTicketTabs();
-            _ticketPage = new TicketWorkspacePage(_ticketStore, _service?.JiraBaseUrl ?? AppConfig.DefaultJiraBaseUrl, () => DevRepoPath, SessionFor);
+            _ticketPage = new TicketWorkspacePage(_ticketStore, _service?.JiraBaseUrl ?? AppConfig.DefaultJiraBaseUrl, () => DevRepoPath, SessionFor, CreateTeamsPostView);
             _shell.AddPage(ShellPage.Ticket, _ticketPage);
             // Deferred: the x button is on the Click stack and SetTabs disposes it.
             _ticketPage.CloseRequested += ticketKey => shell.BeginInvoke(() => CloseTicketTab(ticketKey));
             _ticketPage.VsCodeRequested += OpenInVsCode;
-            _ticketPage.TeamsPostRequested += OpenTeamsPost;
-            _ticketPage.SelectionChanged += ticketKey => _selectedTicket = ticketKey; // only stores: SetTabs raises this itself
+            // Only stores and clears a seen dot: SetTabs raises this itself, so it must not call SetTabs.
+            _ticketPage.SelectionChanged += ticketKey => { _selectedTicket = ticketKey; AcknowledgeSeenWaits(); };
             _ticketPage.PageRequested += ShowShell;
             _ticketPage.SetTabs(_openTickets, _selectedTicket); // before the page is shown, so HasOpenTabs is right for Esc
-            _weekPage = new WeekPage(_service);
-            _shell.AddPage(ShellPage.Week, _weekPage);
-            // Clicking an under-logged day opens the Log page on that date.
-            _weekPage.LogDayRequested += date => { ShowShell(ShellPage.Log); _logPage?.PrepareForDate(date); };
             // The session lives in TrayApp so a rebuilt window (Settings save) reattaches instead of killing it.
             if (_claudeHost == null)
             {
@@ -315,11 +310,12 @@ internal sealed partial class TrayApp : ApplicationContext
         else ShowShell(ShellPage.Dashboard);
     }
 
-    // Tray "Weekly check...": the window on the Week page.
+    // Tray "Weekly check...": the Log page, scrolled to its week card.
     private void ShowWeeklyCheck()
     {
         if (_service == null) { Notify(Lang.T("Config not loaded; set up credentials first.", "Chưa có cấu hình; hãy thiết lập thông tin đăng nhập trước."), ToolTipIcon.Warning); return; }
-        ShowShell(ShellPage.Week);
+        ShowShell(ShellPage.Log);
+        _logPage?.RevealWeek();
     }
 
     // Tray "Tasks...": the window on the Tasks page.
@@ -762,7 +758,7 @@ internal sealed partial class TrayApp : ApplicationContext
     // UI thread only. Coverage re-reads without a sniff: the drain's Graph token is still cached.
     private void RefreshAfterDrain(bool hadToday)
     {
-        if (_logPage != null && !_logPage.IsDisposed) _logPage.RefreshQueuedView();
+        if (_logPage != null && !_logPage.IsDisposed) { _logPage.RefreshQueuedView(); _logPage.ReloadWeekIfLoaded(); }
         if (_dashboardPage == null || _dashboardPage.IsDisposed) return;
         _dashboardPage.Reload();
         if (hadToday && _dashboardPage.CoverageLoaded) _dashboardPage.ReloadCoverage(allowSniff: false);

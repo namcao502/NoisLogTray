@@ -29,6 +29,8 @@ internal sealed partial class TrayApp
         if (sessionName == ClaudeAttention.GeneralSessionName) RememberClaudeSessionId(hookEvent.SessionId);
         ClaudeWaitReason? current = _claudeWaits.TryGetValue(sessionName, out var reason) ? reason : null;
         var next = ClaudeAttention.Next(current, hookEvent);
+        // A turn that finishes while the user looks at that session needs no dot.
+        if (next != null && ClaudeAttention.ClearsWhenSeen(next.Value) && IsWatching(sessionName)) next = null;
         if (next == current) return;
         AppLogger.Info($"[hooks] {sessionName}: {current?.ToString() ?? "none"} -> {next?.ToString() ?? "none"} ({hookEvent.EventName})");
         if (next == null) _claudeWaits.Remove(sessionName);
@@ -45,6 +47,19 @@ internal sealed partial class TrayApp
     {
         if (!_claudeWaits.Remove(sessionName, out var reason)) return;
         AppLogger.Info($"[hooks] {sessionName}: {reason} -> none (session started, ended or closed)");
+        RefreshClaudeAttention();
+    }
+
+    // Run when the user may now be looking at another session (page switch, tab switch, window activated).
+    private void AcknowledgeSeenWaits()
+    {
+        var seen = _claudeWaits.Where(cw => ClaudeAttention.ClearsWhenSeen(cw.Value) && IsWatching(cw.Key)).Select(cw => cw.Key).ToList();
+        if (seen.Count == 0) return;
+        foreach (var sessionName in seen)
+        {
+            _claudeWaits.Remove(sessionName);
+            AppLogger.Info($"[hooks] {sessionName}: Finished -> none (seen)");
+        }
         RefreshClaudeAttention();
     }
 

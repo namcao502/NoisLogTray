@@ -21,6 +21,8 @@
     fontSize: Number(params.get("fontSize") || 14),
     cursorBlink: true,
     scrollback: 5000,
+    // claude picks its text colors for a dark background; this lifts any too faint for the theme (mostly light).
+    minimumContrastRatio: 4.5,
     allowProposedApi: true,
     theme: { background: "#1e1e1e" },
   });
@@ -34,10 +36,10 @@
     post({ type: "resize", cols: term.cols, rows: term.rows });
   };
 
-  // Ctrl+1..6 switch app pages (the host never sees keys typed in here).
+  // Ctrl+1..5 switch app pages (the host never sees keys typed in here).
   // Ctrl+C copies when text is selected; with no selection it still sends ^C to the CLI.
   term.attachCustomKeyEventHandler((event) => {
-    if (event.ctrlKey && !event.shiftKey && !event.altKey && /^(Digit|Numpad)[1-6]$/.test(event.code)) {
+    if (event.ctrlKey && !event.shiftKey && !event.altKey && /^(Digit|Numpad)[1-5]$/.test(event.code)) {
       if (event.type === "keydown") post({ type: "page", index: Number(event.code.slice(-1)) });
       return false;
     }
@@ -47,6 +49,16 @@
       return false;
     }
     return true;
+  });
+
+  // A mouse selection (drag or double-click) is copied when the button is released; a right-click pastes.
+  // On the document: a drag released past the terminal box still ends a selection.
+  document.addEventListener("mouseup", () => {
+    if (term.hasSelection()) navigator.clipboard.writeText(term.getSelection());
+  });
+  term.element.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    post({ type: "pasteRequest" });
   });
 
   term.onData((data) => post({ type: "input", data }));
@@ -62,6 +74,8 @@
       document.body.style.background = message.theme.background;
     } else if (message.type === "reset") {
       term.reset();
+    } else if (message.type === "paste") {
+      term.paste(message.text);
     } else if (message.type === "focus") {
       term.focus();
     } else if (message.type === "fit") {

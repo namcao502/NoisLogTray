@@ -2,8 +2,8 @@ using System.Drawing;
 
 namespace NoisLogTray;
 
-// One open ticket: a header over its TerminalView or ChangesView; the ChangesView is created on the first
-// Changes click, then both stay alive while the tab is open.
+// One open ticket: a header over its TerminalView, ChangesView or TeamsPostView; the last two are created on their
+// first click, then every view stays alive while the tab is open.
 internal sealed class TicketWorkspaceView : UserControl
 {
     private static readonly int Pad = UiScale.S(12);
@@ -17,11 +17,9 @@ internal sealed class TicketWorkspaceView : UserControl
     private static readonly Font SummaryFont = UiScale.Font("Segoe UI", 10F);
     private static readonly Font PrFont = UiScale.Font("Segoe UI", 8.5F);
 
-    private const string TeamsLabelEnglish = "Post to Teams...";
-    private const string TeamsLabelVietnamese = "Đăng Teams...";
-
     private readonly string _jiraBaseUrl;
     private readonly Func<IReadOnlyList<TicketWorktree>> _worktrees;
+    private readonly Func<TeamsPostView?> _createTeamsPost;
     private readonly Panel _header = new() { Dock = DockStyle.Top };
     private readonly Panel _divider = new() { Dock = DockStyle.Bottom, Height = 1 };
     private readonly Panel _body = new() { Dock = DockStyle.Fill };
@@ -32,26 +30,30 @@ internal sealed class TicketWorkspaceView : UserControl
     private readonly MacButton _claudeButton = MacButton.Secondary("Claude");
     private readonly MacButton _changesButton = MacButton.Secondary(string.Empty);
     private readonly MacButton _vsCodeButton = MacButton.Secondary("VS Code");
-    private readonly MacButton _teamsButton = MacButton.Secondary(string.Empty);
+    private readonly MacButton _teamsButton = MacButton.Secondary("Teams");
+    private readonly MacButton _collapseButton = MacButton.Secondary(string.Empty);
     private readonly TerminalView _terminal;
     private ChangesView? _changes;
-    private bool _showingChanges;
+    private TeamsPostView? _teamsPost;
+    private BodyView _bodyView = BodyView.Claude;
     private (JiraTicket Ticket, TicketSection Section)? _found;
     private IReadOnlyList<TicketPr> _prs = new List<TicketPr>();
+    private bool _headerCollapsed;
 
     // Ctrl+digit typed inside either view.
     internal event Action<ShellPage>? PageRequested;
     internal event Action<string>? VsCodeRequested;
-    internal event Action<string>? TeamsPostRequested;
+    internal event Action? HeaderCollapseToggled;
 
     internal string TicketKey { get; }
 
     internal TicketWorkspaceView(string ticketKey, string jiraBaseUrl, ClaudeSessionHost session,
-        Func<IReadOnlyList<TicketWorktree>> worktrees)
+        Func<IReadOnlyList<TicketWorktree>> worktrees, Func<TeamsPostView?> createTeamsPost)
     {
         TicketKey = ticketKey;
         _jiraBaseUrl = jiraBaseUrl;
         _worktrees = worktrees;
+        _createTeamsPost = createTeamsPost;
         BackColor = Theme.WindowBg;
 
         _terminal = new TerminalView(session) { Dock = DockStyle.Fill };
@@ -91,10 +93,26 @@ internal sealed class TicketWorkspaceView : UserControl
         return null;
     }
 
+    private enum BodyView
+    {
+        Claude,
+        Changes,
+        Teams,
+    }
+
     internal void Activate()
     {
-        if (_showingChanges && _changes != null) _changes.Activate();
+        if (_bodyView == BodyView.Changes && _changes != null) _changes.Activate();
+        else if (_bodyView == BodyView.Teams && _teamsPost != null) _teamsPost.Activate();
         else _terminal.Activate();
+    }
+
+    // Collapsed, the header keeps only its key line (and the view buttons) to leave the room to the views.
+    internal void SetHeaderCollapsed(bool collapsed)
+    {
+        _headerCollapsed = collapsed;
+        UpdateCollapseButton();
+        LayoutHeader();
     }
 
     internal void ShowInfo((JiraTicket Ticket, TicketSection Section)? found, IReadOnlyList<TicketPr> prs)
@@ -133,32 +151,33 @@ internal sealed class TicketWorkspaceView : UserControl
 
         _claudeButton.AccessibleName = "Claude";
         _vsCodeButton.AccessibleName = "VS Code";
-        foreach (var button in new[] { _claudeButton, _changesButton, _vsCodeButton, _teamsButton })
+        foreach (var button in new[] { _claudeButton, _changesButton, _teamsButton, _vsCodeButton })
         {
             button.OnWindow = true;
             button.Size = new Size(ButtonWidths.ToolbarWidth(button.Font), ButtonH);
         }
-        // Fits both labels, so a language switch never resizes it.
-        _teamsButton.Width = Math.Max(_teamsButton.Width, new[] { TeamsLabelEnglish, TeamsLabelVietnamese }
-            .Max(label => TextRenderer.MeasureText(label, _teamsButton.Font).Width) + UiScale.S(24));
-        _claudeButton.Click += (_, _) => ShowTerminal();
-        _changesButton.Click += (_, _) => ShowChanges();
+        _claudeButton.Click += (_, _) => ShowBody(BodyView.Claude);
+        _changesButton.Click += (_, _) => ShowBody(BodyView.Changes);
+        _teamsButton.Click += (_, _) => ShowBody(BodyView.Teams);
         _vsCodeButton.Click += (_, _) => VsCodeRequested?.Invoke(TicketKey);
-        _teamsButton.Click += (_, _) => TeamsPostRequested?.Invoke(TicketKey);
+        _collapseButton.OnWindow = true;
+        _collapseButton.Size = new Size(ButtonH, ButtonH);
+        _collapseButton.Click += (_, _) => HeaderCollapseToggled?.Invoke();
         UpdateViewButtons();
+        UpdateCollapseButton();
 
         _header.Controls.Add(_divider);
-        _header.Controls.AddRange(new Control[] { _keyLink, _summary, _facts, _prLinks, _claudeButton, _changesButton, _vsCodeButton, _teamsButton });
+        _header.Controls.AddRange(new Control[] { _keyLink, _summary, _facts, _prLinks, _claudeButton, _changesButton, _teamsButton, _vsCodeButton, _collapseButton });
         _header.Resize += (_, _) => LayoutHeader();
         LayoutHeader();
     }
 
-    // Row 1: key, summary and the four buttons at the right; then the facts and the PR links, each wrapping.
+    // Row 1: key, summary and the buttons at the right; then the facts and the PR links, each wrapping (hidden collapsed).
     private void LayoutHeader()
     {
         var width = _header.ClientSize.Width;
         var buttonX = width - RightPad;
-        foreach (var button in new[] { _teamsButton, _vsCodeButton, _changesButton, _claudeButton })
+        foreach (var button in new[] { _collapseButton, _vsCodeButton, _teamsButton, _changesButton, _claudeButton })
         {
             buttonX -= button.Width;
             button.SetBounds(buttonX, TopPad, button.Width, ButtonH);
@@ -174,7 +193,9 @@ internal sealed class TicketWorkspaceView : UserControl
         var prLinksHeight = _prLinks.GetPreferredSize(new Size(rowWidth, 0)).Height;
         _prLinks.SetBounds(Pad, _facts.Bottom + RowGap, rowWidth, prLinksHeight);
 
-        var height = _prLinks.Bottom + TopPad;
+        _facts.Visible = !_headerCollapsed;
+        _prLinks.Visible = !_headerCollapsed;
+        var height = _headerCollapsed ? TopPad + ButtonH + TopPad : _prLinks.Bottom + TopPad;
         if (_header.Height != height) _header.Height = height;
     }
 
@@ -229,34 +250,42 @@ internal sealed class TicketWorkspaceView : UserControl
         row.Controls.AddRange(items.ToArray());
     }
 
-    private void ShowTerminal()
+    private void ShowBody(BodyView bodyView)
     {
-        _showingChanges = false;
-        if (_changes != null) _changes.Visible = false;
-        _terminal.Visible = true;
-        UpdateViewButtons();
-        _terminal.Activate();
-    }
-
-    private void ShowChanges()
-    {
-        if (_changes == null)
+        if (bodyView == BodyView.Changes && _changes == null)
         {
             _changes = new ChangesView(TicketKey, _worktrees) { Dock = DockStyle.Fill };
             _changes.PageRequested += OnViewPageRequested;
             _body.Controls.Add(_changes);
         }
-        _showingChanges = true;
-        _terminal.Visible = false;
-        _changes.Visible = true;
+        if (bodyView == BodyView.Teams && _teamsPost == null)
+        {
+            _teamsPost = _createTeamsPost();
+            if (_teamsPost == null) return; // no workflow URL yet: TrayApp has said so
+            _teamsPost.Dock = DockStyle.Fill;
+            _body.Controls.Add(_teamsPost);
+        }
+        _bodyView = bodyView;
+        _terminal.Visible = bodyView == BodyView.Claude;
+        if (_changes != null) _changes.Visible = bodyView == BodyView.Changes;
+        if (_teamsPost != null) _teamsPost.Visible = bodyView == BodyView.Teams;
         UpdateViewButtons();
-        _changes.Activate();
+        Activate();
     }
 
     private void UpdateViewButtons()
     {
-        _claudeButton.Selected = !_showingChanges;
-        _changesButton.Selected = _showingChanges;
+        _claudeButton.Selected = _bodyView == BodyView.Claude;
+        _changesButton.Selected = _bodyView == BodyView.Changes;
+        _teamsButton.Selected = _bodyView == BodyView.Teams;
+    }
+
+    private void UpdateCollapseButton()
+    {
+        _collapseButton.Text = _headerCollapsed ? "▾" : "▴";
+        _collapseButton.AccessibleName = _headerCollapsed
+            ? Lang.T("Show the ticket details", "Hiện chi tiết ticket")
+            : Lang.T("Hide the ticket details", "Ẩn chi tiết ticket");
     }
 
     private void OnViewPageRequested(ShellPage page)
@@ -279,8 +308,8 @@ internal sealed class TicketWorkspaceView : UserControl
     {
         _changesButton.Text = Lang.T("Changes", "Thay đổi");
         _changesButton.AccessibleName = _changesButton.Text;
-        _teamsButton.Text = Lang.T(TeamsLabelEnglish, TeamsLabelVietnamese);
-        _teamsButton.AccessibleName = _teamsButton.Text;
+        _teamsButton.AccessibleName = Lang.T("Post to Teams", "Đăng Teams");
+        UpdateCollapseButton();
         RenderInfo();
     }
 }

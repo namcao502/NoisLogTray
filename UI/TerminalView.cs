@@ -233,6 +233,9 @@ internal sealed class TerminalView : UserControl
                 }
                 _host.Write(Encoding.UTF8.GetBytes(data));
                 break;
+            case "pasteRequest":
+                PasteClipboard();
+                break;
             case "page":
                 var page = PageForShortcut(root.GetProperty("index").GetInt32());
                 if (page != null) PageRequested?.Invoke(page.Value);
@@ -245,9 +248,8 @@ internal sealed class TerminalView : UserControl
         1 => ShellPage.Dashboard,
         2 => ShellPage.Log,
         3 => ShellPage.Tasks,
-        4 => ShellPage.Week,
-        5 => ShellPage.Claude,
-        6 => ShellPage.Ticket,
+        4 => ShellPage.Claude,
+        5 => ShellPage.Ticket,
         _ => null,
     };
 
@@ -328,6 +330,21 @@ internal sealed class TerminalView : UserControl
             UpdateDirectory();
             PostText(Lang.T("Claude exited. Press Enter to start again.", "Claude đã thoát. Nhấn Enter để mở lại."));
         });
+    }
+
+    // A right-click in the terminal: the clipboard is read here, since the page would need a clipboard-read
+    // permission; the page pastes it so xterm.js applies bracketed paste.
+    private void PasteClipboard()
+    {
+        try
+        {
+            var text = Clipboard.ContainsText() ? Clipboard.GetText() : "";
+            if (text.Length != 0) _webView.CoreWebView2?.PostWebMessageAsString(JsonSerializer.Serialize(new { type = "paste", text }));
+        }
+        catch (ExternalException ex)
+        {
+            AppLogger.Error($"[claude] reading the clipboard failed: {ex.Message}");
+        }
     }
 
     private void PostText(string text)

@@ -3,11 +3,12 @@ using System.Drawing.Drawing2D;
 
 namespace NoisLogTray;
 
-// Flat rounded button in the macOS idiom, theme-aware: primary = system blue,
+// Flat rounded button in the macOS idiom, theme-aware: primary = system blue, tinted = its own fill,
 // secondary = neutral. Fully owner-drawn.
 internal sealed class MacButton : Button
 {
     private readonly bool _secondary;
+    private readonly Color? _tint;
     private bool _hover;
     private bool _selected;
     private bool _showDot;
@@ -31,9 +32,10 @@ internal sealed class MacButton : Button
     internal int Radius = UiScale.S(6);
     internal bool OnWindow; // true = sits on the window body (blend corners to WindowBg)
 
-    private MacButton(bool secondary)
+    private MacButton(bool secondary, Color? tint = null)
     {
         _secondary = secondary;
+        _tint = tint;
         SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint
             | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         FlatStyle = FlatStyle.Flat;
@@ -48,6 +50,9 @@ internal sealed class MacButton : Button
 
     internal static MacButton Primary(string text) => new(false) { Text = text };
     internal static MacButton Secondary(string text) => new(true) { Text = text };
+    internal static MacButton Tinted(string text, Color tint) => new(false, tint) { Text = text };
+
+    internal Color? Tint => _tint;
 
     private void OnThemeChanged() => Invalidate();
 
@@ -87,7 +92,7 @@ internal sealed class MacButton : Button
         }
         else
         {
-            fill = _hover ? Theme.AccentHover : Theme.Accent;
+            fill = _tint == null ? (_hover ? Theme.AccentHover : Theme.Accent) : (_hover ? Lighten(_tint.Value) : _tint.Value);
             textColor = Color.White;
         }
 
@@ -102,7 +107,7 @@ internal sealed class MacButton : Button
             g.FillEllipse(dotBrush, rect.Right - dotDiameter - UiScale.S(3), UiScale.S(3), dotDiameter, dotDiameter);
         }
 
-        // Keyboard-focus ring: a dotted inset outline, white on the blue primary fill,
+        // Keyboard-focus ring: a dotted inset outline, white on a primary or tinted fill,
         // accent-coloured on the neutral secondary fill.
         if (Focused && Enabled)
         {
@@ -112,6 +117,10 @@ internal sealed class MacButton : Button
             g.DrawPath(pen, focusPath);
         }
     }
+
+    // Hover: 8% toward white, as AccentHover is to Accent.
+    private static Color Lighten(Color color) => Color.FromArgb(
+        color.R + (255 - color.R) * 8 / 100, color.G + (255 - color.G) * 8 / 100, color.B + (255 - color.B) * 8 / 100);
 
     private static GraphicsPath Rounded(Rectangle r, int radius)
     {

@@ -10,11 +10,10 @@ internal static class ShellLayout
 
     internal static int LogColumns(int pageWidth) => pageWidth >= TwoColumnMinWidth ? 2 : 1;
 
-    // Card bounds for the Log page; heights are the built card heights. One column stacks
-    // the cards; two columns put New entry + Queue left and a full-height My tickets right (the long list
-    // gets the tall column; the queue usually holds only a few tickets).
-    internal static (Rectangle NewEntry, Rectangle Queue, Rectangle MyTickets) LogCardBounds(
-        int width, int height, int newEntryH, int queueH, int myTicketsMinH)
+    // Card bounds for the Log page; heights are the built ones. One column stacks New entry, Queue, Week and My tickets
+    // (at least its built height; the page scrolls past the bottom). Two columns: New entry + Queue left, Week + My tickets right.
+    internal static (Rectangle NewEntry, Rectangle Queue, Rectangle Week, Rectangle MyTickets) LogCardBounds(
+        int width, int height, int newEntryH, int queueH, int weekH, int myTicketsH, int myTicketsMinH)
     {
         const int margin = 20;
         const int top = 14;
@@ -25,16 +24,21 @@ internal static class ShellLayout
             var colW = width - 2 * margin;
             var newEntry = new Rectangle(margin, top, colW, newEntryH);
             var queue = new Rectangle(margin, newEntry.Bottom + gap, colW, queueH);
-            var ticketsY = queue.Bottom + gap;
-            return (newEntry, queue, new Rectangle(margin, ticketsY, colW, Math.Max(height - ticketsY - margin, myTicketsMinH)));
+            var week = new Rectangle(margin, queue.Bottom + gap, colW, weekH);
+            var ticketsY = week.Bottom + gap;
+            return (newEntry, queue, week, new Rectangle(margin, ticketsY, colW, Math.Max(height - ticketsY - margin, myTicketsH)));
         }
 
         var halfW = (width - 3 * margin) / 2;
+        var rightX = 2 * margin + halfW;
         var left = new Rectangle(margin, top, halfW, newEntryH);
         var queueY = left.Bottom + gap;
+        var rightWeek = new Rectangle(rightX, top, halfW, weekH);
+        var rightTicketsY = rightWeek.Bottom + gap;
         return (left,
             new Rectangle(margin, queueY, halfW, Math.Max(height - queueY - margin, queueH)),
-            new Rectangle(2 * margin + halfW, top, halfW, Math.Max(height - top - margin, myTicketsMinH)));
+            rightWeek,
+            new Rectangle(rightX, rightTicketsY, halfW, Math.Max(height - rightTicketsY - margin, myTicketsMinH)));
     }
 
     internal const int DashboardTodayHeight = 168;   // header 44 + 3 lines x 28 + 40 padding

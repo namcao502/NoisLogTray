@@ -6,7 +6,6 @@ internal enum ShellPage
     Dashboard,
     Log,
     Tasks,
-    Week,
     Claude,
     Ticket,
     Settings,

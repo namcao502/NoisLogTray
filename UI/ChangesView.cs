@@ -1,4 +1,5 @@
 using System.Drawing;
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
@@ -71,8 +72,10 @@ internal sealed class ChangesView : UserControl
             core.WebMessageReceived += OnWebMessage;
             var fontSize = (int)Math.Round(13 * UiScale.Factor);
             var loading = Uri.EscapeDataString(Lang.T("Reading the changes...", "Đang đọc thay đổi..."));
-            var refresh = Uri.EscapeDataString(Lang.T("Refresh", "Làm mới"));
-            core.Navigate(WebViewSetup.PageUrl($"diff/index.html?fontSize={fontSize}&loading={loading}&refresh={refresh}"));
+            var settings = AppSettings.Load();
+            var listWidth = settings.DiffListWidthEm?.ToString(CultureInfo.InvariantCulture) ?? "";
+            core.Navigate(WebViewSetup.PageUrl($"diff/index.html?fontSize={fontSize}&loading={loading}&listWidth={listWidth}"
+                + $"&listHidden={(settings.DiffListHidden ? 1 : 0)}&inline={(settings.DiffInline ? 1 : 0)}"));
             _webView.Visible = true;
             _status.Visible = false;
         }
@@ -94,7 +97,16 @@ internal sealed class ChangesView : UserControl
             case "ready":
                 _ready = true;
                 ApplyTheme();
+                PostLabels();
                 _ = RefreshAsync();
+                break;
+            case "layout":
+                // One changed setting per message, kept across restarts; a tab opened later starts from it.
+                var settings = AppSettings.Load();
+                if (root.TryGetProperty("listWidth", out var listWidth)) settings.DiffListWidthEm = listWidth.GetDouble();
+                if (root.TryGetProperty("listHidden", out var listHidden)) settings.DiffListHidden = listHidden.GetBoolean();
+                if (root.TryGetProperty("inline", out var inline)) settings.DiffInline = inline.GetBoolean();
+                AppSettings.Save(settings);
                 break;
             case "refresh":
                 _ = RefreshAsync();
@@ -115,10 +127,28 @@ internal sealed class ChangesView : UserControl
         }
     }
 
-    // The strings in the file list follow the language, so a switch lists again.
+    // The strings in the toolbar and the file list follow the language, so a switch relabels and lists again.
     private void OnLanguageChanged()
     {
+        PostLabels();
         _ = RefreshAsync();
+    }
+
+    private void PostLabels()
+    {
+        if (!_ready || _webView.CoreWebView2 == null) return;
+        Post(new
+        {
+            type = "labels",
+            refresh = Lang.T("Refresh", "Làm mới"),
+            files = Lang.T("Show or hide the file list", "Ẩn / hiện danh sách file"),
+            inline = Lang.T("Inline", "Gộp 1 cột"),
+            inlineTitle = Lang.T("One column instead of old | new side by side", "Một cột thay vì cũ | mới hai bên"),
+            previousChange = Lang.T("Previous change (Shift+F7)", "Thay đổi trước (Shift+F7)"),
+            nextChange = Lang.T("Next change (F7)", "Thay đổi kế (F7)"),
+            previousFile = Lang.T("Previous file (Alt+Up)", "File trước (Alt+↑)"),
+            nextFile = Lang.T("Next file (Alt+Down)", "File kế (Alt+↓)"),
+        });
     }
 
     private async Task RefreshAsync()
@@ -186,7 +216,6 @@ internal sealed class ChangesView : UserControl
             type = "files",
             groups,
             emptyText = Lang.T("No worktree for this ticket.", "Ticket này chưa có worktree."),
-            refreshText = Lang.T("Refresh", "Làm mới"),
         });
     }
 

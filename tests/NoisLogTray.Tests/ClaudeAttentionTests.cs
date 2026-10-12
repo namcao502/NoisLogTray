@@ -90,6 +90,15 @@ public class ClaudeAttentionTests
         Assert.Equal(ClaudeWaitReason.Permission, ClaudeAttention.Next(null, hookEvent));
     }
 
+    [Theory]
+    [InlineData("Finished", true)]
+    [InlineData("Permission", false)]
+    [InlineData("Question", false)]
+    public void ClearsWhenSeen_OnlyForAFinishedTurn(string waitReasonName, bool expected)
+    {
+        Assert.Equal(expected, ClaudeAttention.ClearsWhenSeen(ParseWaitReason(waitReasonName)!.Value));
+    }
+
     private static ClaudeWaitReason? ParseWaitReason(string? waitReasonName) =>
         waitReasonName == null ? null : Enum.Parse<ClaudeWaitReason>(waitReasonName);
 }

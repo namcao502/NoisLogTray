@@ -16,6 +16,7 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     private readonly string _jiraBaseUrl;
     private readonly Func<string> _devRepoPath;
     private readonly Func<string, ClaudeSessionHost> _sessionFor;
+    private readonly Func<string, TeamsPostView?> _teamsPostFor;
     private readonly Panel _tabStrip = new() { Dock = DockStyle.Top, AutoScroll = true };
     private readonly Panel _viewHost = new() { Dock = DockStyle.Fill };
     private readonly Label _empty = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
@@ -25,23 +26,24 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     private HashSet<string> _waiting = new();
     private int _tabsWidth;
     private string? _selected;
+    private bool _headerCollapsed = AppSettings.Load().TicketHeaderCollapsed;
 
     // Raised from the × button's Click: defer the SetTabs it leads to, since SetTabs disposes that button.
     internal event Action<string>? CloseRequested;
     internal event Action<string>? VsCodeRequested;
-    internal event Action<string>? TeamsPostRequested;
 
     // A tab click or SetTabs moved the selection; TrayApp remembers it (and must not call SetTabs from here).
     internal event Action<string?>? SelectionChanged;
     internal event Action<ShellPage>? PageRequested;
 
     internal TicketWorkspacePage(TicketStore? store, string jiraBaseUrl, Func<string> devRepoPath,
-        Func<string, ClaudeSessionHost> sessionFor)
+        Func<string, ClaudeSessionHost> sessionFor, Func<string, TeamsPostView?> teamsPostFor)
     {
         _store = store;
         _jiraBaseUrl = jiraBaseUrl;
         _devRepoPath = devRepoPath;
         _sessionFor = sessionFor;
+        _teamsPostFor = teamsPostFor;
 
         _empty.Font = UiScale.Font("Segoe UI", 10F);
         _empty.UseMnemonic = false;
@@ -79,7 +81,7 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
             _views.Remove(removedKey);
             view.PageRequested -= OnViewPageRequested;
             view.VsCodeRequested -= OnViewVsCodeRequested;
-            view.TeamsPostRequested -= OnViewTeamsPostRequested;
+            view.HeaderCollapseToggled -= OnHeaderCollapseToggled;
             view.Dispose();
         }
         var created = false;
@@ -138,14 +140,15 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     private void CreateView(string key)
     {
         var view = new TicketWorkspaceView(key, _jiraBaseUrl, _sessionFor(key),
-            () => TicketWorktrees.Find(_devRepoPath(), key))
+            () => TicketWorktrees.Find(_devRepoPath(), key), () => _teamsPostFor(key))
         {
             Dock = DockStyle.Fill,
             Visible = false,
         };
         view.PageRequested += OnViewPageRequested;
         view.VsCodeRequested += OnViewVsCodeRequested;
-        view.TeamsPostRequested += OnViewTeamsPostRequested;
+        view.HeaderCollapseToggled += OnHeaderCollapseToggled;
+        view.SetHeaderCollapsed(_headerCollapsed);
         _viewHost.Controls.Add(view);
         _views[key] = view;
     }
@@ -243,9 +246,14 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
         VsCodeRequested?.Invoke(key);
     }
 
-    private void OnViewTeamsPostRequested(string key)
+    // One setting for every tab, kept across restarts: collapsing one header collapses them all.
+    private void OnHeaderCollapseToggled()
     {
-        TeamsPostRequested?.Invoke(key);
+        _headerCollapsed = !_headerCollapsed;
+        foreach (var view in _views.Values) view.SetHeaderCollapsed(_headerCollapsed);
+        var settings = AppSettings.Load();
+        settings.TicketHeaderCollapsed = _headerCollapsed;
+        AppSettings.Save(settings);
     }
 
     private void ApplyTheme()

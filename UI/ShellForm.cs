@@ -53,6 +53,8 @@ internal sealed class ShellForm : Form
 
     // Raised for navigation (sidebar or hotkey) to a page that was never added.
     internal event Action<ShellPage>? PageUnavailable;
+    // The user may now be looking at another page: a page switch, the window shown or activated.
+    internal event Action? PageViewed;
 
     // Static: the shell is rebuilt on every Settings save, and a Label does not own its Font.
     private static readonly Font TitleFont = UiScale.Font("Segoe UI Semibold", 13F, FontStyle.Bold);
@@ -225,6 +227,7 @@ internal sealed class ShellForm : Form
         _sidebar.Selected = page;
         if (IsHandleCreated && Visible) (content as IShellPage)?.OnPageShown();
         _pageHost.ResumeLayout();
+        PageViewed?.Invoke();
         if (redrawOff)
         {
             SendMessage(_pageHost.Handle, 0x000B /* WM_SETREDRAW */, (IntPtr)1, IntPtr.Zero);
@@ -242,12 +245,14 @@ internal sealed class ShellForm : Form
     {
         base.OnVisibleChanged(e);
         if (Visible) CurrentShellPage?.OnPageShown();
+        if (Visible) PageViewed?.Invoke();
     }
 
     protected override void OnActivated(EventArgs e)
     {
         base.OnActivated(e);
         CurrentShellPage?.OnActivatedRefresh();
+        PageViewed?.Invoke();
     }
 
     // Wide enough for the open sidebar and the widest page, whatever the sidebar state.
@@ -499,14 +504,10 @@ internal sealed class ShellForm : Form
                 return true;
             case Keys.Control | Keys.D4:
             case Keys.Control | Keys.NumPad4:
-                ShowPage(ShellPage.Week);
+                ShowPage(ShellPage.Claude);
                 return true;
             case Keys.Control | Keys.D5:
             case Keys.Control | Keys.NumPad5:
-                ShowPage(ShellPage.Claude);
-                return true;
-            case Keys.Control | Keys.D6:
-            case Keys.Control | Keys.NumPad6:
                 ShowPage(ShellPage.Ticket);
                 return true;
         }

@@ -3,8 +3,8 @@ using System.Globalization;
 
 namespace NoisLogTray;
 
-// The Log page of the shell: stacked cards -- "New entry" (date/ticket + actions),
-// "Will log" (preview + queue), and "My tickets".
+// The Log page of the shell: four cards -- "New entry" (date/ticket + actions),
+// "Will log" (preview + queue), the week (WeekCard) and "My tickets".
 internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
 {
     private static readonly Font TicketsFont = UiScale.Font("Segoe UI", 9.5F);
@@ -183,15 +183,18 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
 
     private const int WmLButtonDown = 0x0201;
 
-    // How much shorter than the built layout the page may get; only My tickets shrinks. Logical px.
+    // How far below the built height (week card aside) the page may shrink, in logical px:
+    // two columns shrink My tickets, one column scrolls.
     private const int MinHeightSlack = 100;
 
     // Placed by LayoutCards on every resize; the heights are the built ones, in logical px.
     private Card? _newEntryCard;
     private Card? _willLogCard;
+    private WeekCard? _weekCard;
     private Card? _myTicketsCard;
     private int _newEntryH;
     private int _willLogH;
+    private int _weekH;
     private int _myTicketsMinH;
 
     private bool _suggestionsRenderPosted;
@@ -230,7 +233,8 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         BackColor = Theme.WindowBg;
         _body.Dock = DockStyle.Fill;
         _body.BackColor = Theme.WindowBg;
-        _body.AutoScroll = false; // the page never scrolls
+        _body.AutoScroll = true; // one column with the week card can run past the bottom: it scrolls
+        _body.AutoScrollMargin = UiScale.S(new Size(0, 14)); // the top margin, kept under the last card too
 
         // Summed in logical px and scaled once, exactly as LayoutCards scales ShellLayout's bounds.
         const int left = 20;
@@ -251,6 +255,14 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _willLogH = WillLogCardH;
         y += WillLogCardH + 12;
 
+        var week = new WeekCard(_service);
+        week.Location = UiScale.S(new Point(left, y));
+        week.DayRequested += PrepareForDate;
+        _body.Controls.Add(week);
+        _weekCard = week;
+        _weekH = WeekCard.BuiltHeight;
+        y += WeekCard.BuiltHeight + 12;
+
         var myTickets = BuildMyTicketsCard();
         myTickets.Location = UiScale.S(new Point(left, y));
         _body.Controls.Add(myTickets);
@@ -258,10 +270,11 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _myTicketsMinH = MyTicketsCardH - MinHeightSlack;
         var builtH = y + MyTicketsCardH + 20;
 
-        // Cards and heights are stored above so the OnSizeChanged this Size triggers
-        // reproduces the built bounds; anchoring (below) must come after it.
-        Size = UiScale.S(new Size(600, builtH));
-        MinimumSize = UiScale.S(new Size(600, builtH - MinHeightSlack));
+        // Cards and heights are stored above so the OnSizeChanged this Size triggers reproduces the built
+        // bounds (LayoutCards takes the overflow off again); anchoring (below) must come after it.
+        Size = new Size(UiScale.S(600) + ScrollBarOverflow, UiScale.S(builtH));
+        // One column scrolls, so the week card does not raise the window's minimum height.
+        MinimumSize = UiScale.S(new Size(600, builtH - MinHeightSlack - WeekCard.BuiltHeight - 12));
         Controls.Add(_body);
 
         AnchorForResize();
@@ -273,19 +286,32 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         LayoutCards();
     }
 
-    // One column stacks the cards; a wide page puts the Queue in its own right column.
+    // How far the vertical scroll bar reaches past the 20px right margin (plus 1px for rounding): usually 0.
+    private int ScrollBarOverflow => Math.Max(0, SystemInformation.GetVerticalScrollBarWidthForDpi(DeviceDpi) + 1 - UiScale.S(20));
+
+    // Child bounds are relative to the scrolled view, so a card is placed at its layout bounds plus the scroll.
+    private static Rectangle Scrolled(Rectangle bounds, Point scroll) =>
+        new(bounds.X + scroll.X, bounds.Y + scroll.Y, bounds.Width, bounds.Height);
+
+    // One column stacks the cards and scrolls; a wide page puts Week + My tickets in a right column.
     // Only Bounds change, so nothing is rebuilt and typed text stays.
     private void LayoutCards()
     {
-        if (_newEntryCard == null || _willLogCard == null || _myTicketsCard == null || _newEntryH == 0 || _willLogH == 0 || _myTicketsMinH == 0) return;
+        if (_newEntryCard == null || _willLogCard == null || _weekCard == null || _myTicketsCard == null
+            || _newEntryH == 0 || _willLogH == 0 || _weekH == 0 || _myTicketsMinH == 0) return;
 
         // ShellLayout works in logical px: convert the page size in, scale the bounds back out.
-        var (newEntry, queue, myTickets) = ShellLayout.LogCardBounds(
-            UiScale.Logical(ClientSize.Width), UiScale.Logical(ClientSize.Height), _newEntryH, _willLogH, _myTicketsMinH);
+        // One column may scroll, so its cards stay clear of the scroll bar.
+        var width = UiScale.Logical(ClientSize.Width);
+        if (ShellLayout.LogColumns(width) == 1) width = UiScale.Logical(ClientSize.Width - ScrollBarOverflow);
+        var (newEntry, queue, week, myTickets) = ShellLayout.LogCardBounds(width,
+            UiScale.Logical(ClientSize.Height), _newEntryH, _willLogH, _weekH, MyTicketsCardH, _myTicketsMinH);
+        var scroll = _body.AutoScrollPosition;
         _body.SuspendLayout();
-        _newEntryCard.Bounds = UiScale.S(newEntry);
-        _willLogCard.Bounds = UiScale.S(queue);
-        _myTicketsCard.Bounds = UiScale.S(myTickets);
+        _newEntryCard.Bounds = Scrolled(UiScale.S(newEntry), scroll);
+        _willLogCard.Bounds = Scrolled(UiScale.S(queue), scroll);
+        _weekCard.Bounds = Scrolled(UiScale.S(week), scroll);
+        _myTicketsCard.Bounds = Scrolled(UiScale.S(myTickets), scroll);
         _body.ResumeLayout();
     }
 
@@ -929,8 +955,10 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         FocusTicketInput();
     }
 
+    // New entry sits at the top; scrolling there first shows the whole card, not just the box.
     private void FocusTicketInput()
     {
+        _body.AutoScrollPosition = Point.Empty;
         _tickets.Focus();
         _tickets.SelectionStart = _tickets.TextLength;
     }
@@ -1305,7 +1333,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     }
 
     // Set a specific date and put the cursor in the ticket box. Used by
-    // the Weekly check to jump straight to a day that needs logging. SetDate marks it a
+    // the week card to jump straight to a day that needs logging. SetDate marks it a
     // deliberate pick so OnActivatedRefresh's today-sync will not override it; ValueChanged then
     // refreshes the Will log preview.
     internal void PrepareForDate(DateOnly date)
@@ -1317,6 +1345,14 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         }
         _date.SetDate(date);
         FocusTicketInput();
+    }
+
+    internal void ReloadWeekIfLoaded() => _weekCard?.ReloadIfLoaded();
+
+    // Tray "Weekly check...": posted after OnPageShown's focus, which scrolls to the ticket box.
+    internal void RevealWeek()
+    {
+        if (IsHandleCreated) BeginInvoke(() => { if (_weekCard != null) _body.ScrollControlIntoView(_weekCard); });
     }
 
     private async void OnLogNow(object? sender, EventArgs e)
@@ -1349,7 +1385,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
             AppendLog($"[log] Error: {ex.Message}");
             ShowStatus(Lang.T($"Log failed: {ex.Message}", $"Log thất bại: {ex.Message}"), false);
         }
-        finally { SetBusy(false); }
+        finally { SetBusy(false); _weekCard?.ReloadIfLoaded(); }
     }
 
     private async void OnLogTsc(object? sender, EventArgs e)
@@ -1370,7 +1406,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
             AppendLog($"[tsc] Error: {ex.Message}");
             ShowStatus(Lang.T($"TSC failed: {ex.Message}", $"TSC lỗi: {ex.Message}"), false);
         }
-        finally { SetBusy(false); }
+        finally { SetBusy(false); _weekCard?.ReloadIfLoaded(); }
     }
 
     private async void OnLogHrm(object? sender, EventArgs e)
@@ -1397,7 +1433,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
             AppendLog($"[hrm] Error: {ex.Message}");
             ShowStatus(Lang.T($"HRM failed: {ex.Message}", $"HRM lỗi: {ex.Message}"), false);
         }
-        finally { SetBusy(false); }
+        finally { SetBusy(false); _weekCard?.ReloadIfLoaded(); }
     }
 
     // The only path that overwrites, hence the confirm: one click, no other input, on a
@@ -1443,7 +1479,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
             AppendLog($"[off] Error: {ex.Message}");
             ShowStatus(Lang.T($"Log OFF failed: {ex.Message}", $"Đánh dấu nghỉ lỗi: {ex.Message}"), false);
         }
-        finally { SetBusy(false); }
+        finally { SetBusy(false); _weekCard?.ReloadIfLoaded(); }
     }
 
     private async void OnCheckTsc(object? sender, EventArgs e)
@@ -1558,6 +1594,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     {
         OnActivatedRefresh();
         BeginInvoke(FocusTicketInput);
+        _weekCard?.LoadIfNeeded();
     }
 
     // The date resets to today on reopen, so a half-typed entry would land on the wrong day.
@@ -1565,6 +1602,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     {
         _date.ForgetManualPick();
         _tickets.Clear();
+        _weekCard?.Reset();
     }
 
     // Enter in the search box picks the top match; Esc is handled by the shell.

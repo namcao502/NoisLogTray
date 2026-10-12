@@ -6,7 +6,7 @@ namespace NoisLogTray;
 // date start at the same x on every row whatever the key or date length. Measured once per font.
 internal static class RowColumns
 {
-    private static readonly string[] DueSamples = { "Due: Sep 30", "Hạn: 30/09", "Due: -", "Hạn: -" };
+    private static readonly string[] DueSamples = { "Due Sep 30", "Hạn 30/09", "Due -", "Hạn -" };
 
     // Keyed by font: each row type has its own (static) key font.
     private static readonly Dictionary<Font, int> KeyWidths = new();

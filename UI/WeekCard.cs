@@ -2,39 +2,38 @@ using System.Drawing;
 
 namespace NoisLogTray;
 
-// Weekly coverage check: for the selected week's weekdays, read back HRM hours and the
-// TSC workbook ticket and show whether each day is logged. Read-only; reuses
-// LoggingService.CheckWeekAsync. Prev/next navigate weeks; Refresh re-reads live.
-internal sealed class WeekPage : UserControl, IShellPage
+// The Log page's week: per weekday HRM hours and the TSC ticket, via LoggingService.CheckWeekAsync.
+// An under-logged past weekday (or an unmarked day off) is clickable.
+internal sealed class WeekCard : Card
 {
     private const double FullDayHours = 8.0;
-    private static readonly int W = UiScale.S(540);
-    private static readonly int H = UiScale.S(400);
-    private static readonly int Inner = UiScale.S(500); // card width
-    private static readonly int RowH = UiScale.S(42);
+    private const int RowHLogical = 30;
+    private const int RowsY = 64;
+    private const int StatusY = RowsY + 5 * RowHLogical + 4;
+    internal const int BuiltHeight = StatusY + 18 + 10; // logical px, at LogPage.CardW wide
+    private static readonly int RowH = UiScale.S(RowHLogical);
 
     internal static readonly Color Green = Color.FromArgb(46, 160, 80);
     internal static readonly Color Amber = Color.FromArgb(217, 164, 0);
     internal static readonly Color Red = Color.FromArgb(230, 76, 76);
     internal static readonly Color Gray = Color.FromArgb(150, 150, 156);
 
-    private static readonly Font TitleFont = UiScale.Font("Segoe UI Semibold", 15F, FontStyle.Bold);
     private static readonly Font LabelFont = UiScale.Font("Segoe UI", 9F);
     private static readonly Font DayFont = UiScale.Font("Segoe UI", 9.5F, FontStyle.Bold);
     private static readonly Font SectionFont = UiScale.Font("Segoe UI", 8.5F, FontStyle.Bold);
 
-    // Raised when the user clicks an under-logged weekday, asking the host to open the
-    // Log page on that date. TrayApp owns the wiring (it owns both pages).
-    internal event Action<DateOnly>? LogDayRequested;
+    internal event Action<DateOnly>? DayRequested;
 
     private readonly LoggingService? _service;
     private DateOnly _weekMonday;
     private IReadOnlyList<DayCoverage> _last = Array.Empty<DayCoverage>();
     private bool _busy;
-    private bool _loaded; // the first OnPageShown since the window was shown loads; page switches keep the week
+    private bool _loaded; // the first LoadIfNeeded since the window was shown reads; page switches keep the week
+    private bool _reloadPending;
+    private Func<string>? _statusText; // the finished read's status, reworded on a language switch
     private int _renderedRowsWidth;
 
-    private readonly Label _title = new();
+    private readonly Label _sectionLabel = new();
     private readonly Label _weekLabel = new();
     private readonly Label _status = new();
     private readonly Label _dayHeader = new();
@@ -43,10 +42,9 @@ internal sealed class WeekPage : UserControl, IShellPage
     private readonly MacButton _prev = MacButton.Secondary("<");
     private readonly MacButton _next = MacButton.Secondary(">");
     private readonly MacButton _refresh = MacButton.Secondary(Lang.T("Refresh", "Làm mới"));
-    private readonly Card _card = new();
     private readonly FlowLayoutPanel _rows = new();
 
-    internal WeekPage(LoggingService? service)
+    internal WeekCard(LoggingService? service)
     {
         _service = service;
         _weekMonday = Hcm.MondayOf(Hcm.Today());
@@ -66,97 +64,82 @@ internal sealed class WeekPage : UserControl, IShellPage
         base.Dispose(disposing);
     }
 
-    public void OnPageShown()
+    // The first show after the window was shown reads without Chrome (a cached or override Graph token only),
+    // so a background sniff never takes the browser from Log now; only Refresh may launch it.
+    internal void LoadIfNeeded()
     {
         if (_loaded) return;
         _loaded = true;
-        LoadWeekAsync();
+        if (_busy) _reloadPending = true; // a read from before the hide is still running
+        else LoadWeekAsync(allowSniff: false);
     }
 
-    public void OnActivatedRefresh()
+    // After a log run: HRM is re-read, and TSC with the Graph token still cached (a lapsed one reads "not read").
+    // A read already running may predate the write, so it is followed by one more.
+    internal void ReloadIfLoaded()
     {
+        if (!_loaded || IsDisposed) return; // a Settings save may have disposed this card mid-log
+        if (_busy) _reloadPending = true;
+        else LoadWeekAsync(allowSniff: false);
     }
 
     // The shell lives for days; the next show starts again from the current week.
-    public void OnHidden()
+    internal void Reset()
     {
-        if (_busy) return;
         _loaded = false;
+        _reloadPending = false;
         _weekMonday = Hcm.MondayOf(Hcm.Today());
     }
 
     private void BuildLayout()
     {
-        BackColor = Theme.WindowBg;
-
-        _title.Text = Lang.T("Weekly check", "Kiểm tra tuần");
-        _title.AutoSize = true;
-        _title.Location = UiScale.S(new Point(20, 16));
-        _title.Font = TitleFont;
-        _title.ForeColor = Theme.TextPrimary;
-        _title.BackColor = Color.Transparent;
-
+        Controls.Add(SectionHeader(_sectionLabel, Lang.T("THIS WEEK", "TUẦN NÀY"), UiScale.S(16), UiScale.S(14)));
+        // The week range starts after the wider title, so a language switch never overlaps it.
+        var titleWidth = Math.Max(TextRenderer.MeasureText("THIS WEEK", SectionFont).Width, TextRenderer.MeasureText("TUẦN NÀY", SectionFont).Width);
         _weekLabel.AutoSize = true;
-        _weekLabel.Location = UiScale.S(new Point(22, 48));
+        _weekLabel.Location = new Point(UiScale.S(24) + titleWidth, UiScale.S(13));
         _weekLabel.Font = LabelFont;
         _weekLabel.ForeColor = Theme.TextSecondary;
         _weekLabel.BackColor = Color.Transparent;
 
-        var refreshW = ButtonWidths.ToolbarWidth(_refresh.Font);
-        var refreshX = UiScale.S(520) - refreshW;
-        var buttonY = UiScale.S(18);
+        var buttonY = UiScale.S(7);
         var buttonH = UiScale.S(30);
+        _refresh.Size = new Size(ButtonWidths.ToolbarWidth(_refresh.Font), buttonH);
+        _refresh.Location = new Point(UiScale.S(16 + 528) - _refresh.Width, buttonY);
+        _refresh.Click += (_, _) => LoadWeekAsync(allowSniff: true);
+        _next.Size = new Size(UiScale.S(34), buttonH);
+        _next.Location = new Point(_refresh.Left - UiScale.S(8) - _next.Width, buttonY);
+        _next.Click += (_, _) => Shift(7);
         _prev.Size = new Size(UiScale.S(34), buttonH);
-        _prev.Location = new Point(refreshX - UiScale.S(80), buttonY);
+        _prev.Location = new Point(_next.Left - UiScale.S(4) - _prev.Width, buttonY);
         _prev.Click += (_, _) => Shift(-7);
 
-        _next.Size = new Size(UiScale.S(34), buttonH);
-        _next.Location = new Point(refreshX - UiScale.S(40), buttonY);
-        _next.Click += (_, _) => Shift(7);
+        Controls.Add(SectionHeader(_dayHeader, Lang.T("DAY", "NGÀY"), UiScale.S(24), UiScale.S(46)));
+        Controls.Add(SectionHeader(_hrmHeader, Lang.T("HRM (HOURS)", "HRM (GIỜ)"), UiScale.S(166), UiScale.S(46)));
+        Controls.Add(SectionHeader(_tscHeader, "TSC (TICKET)", UiScale.S(316), UiScale.S(46)));
 
-        _refresh.Size = new Size(refreshW, buttonH);
-        _refresh.Location = new Point(refreshX, buttonY);
-        _refresh.Click += (_, _) => LoadWeekAsync();
-
-        _card.Size = new Size(Inner, UiScale.S(266));
-        _card.Location = UiScale.S(new Point(20, 84));
-        _card.Controls.Add(SectionHeader(_dayHeader, Lang.T("DAY", "NGÀY"), UiScale.S(24)));
-        _card.Controls.Add(SectionHeader(_hrmHeader, Lang.T("HRM (HOURS)", "HRM (GIỜ)"), UiScale.S(166)));
-        _card.Controls.Add(SectionHeader(_tscHeader, "TSC (TICKET)", UiScale.S(316)));
-
-        _rows.Location = UiScale.S(new Point(16, 44));
-        _rows.Size = new Size(Inner - UiScale.S(32), UiScale.S(210));
+        _rows.Location = UiScale.S(new Point(16, RowsY));
+        _rows.Size = new Size(UiScale.S(528), 5 * RowH); // each row is RowH tall: scaled per row, not as one sum
         _rows.FlowDirection = FlowDirection.TopDown;
         _rows.WrapContents = false;
         _rows.AutoScroll = false;
         _rows.Padding = new Padding(0);
         _rows.BackColor = Theme.CardSurface;
-        _card.Controls.Add(_rows);
 
         _status.AutoSize = false;
-        _status.Location = UiScale.S(new Point(20, 360));
-        _status.Size = new Size(Inner, UiScale.S(20));
+        _status.AutoEllipsis = true;
+        _status.Location = UiScale.S(new Point(16, StatusY));
+        _status.Size = UiScale.S(new Size(528, 18));
         _status.Font = LabelFont;
         _status.ForeColor = Theme.TextSecondary;
         _status.BackColor = Color.Transparent;
 
-        Controls.Add(_title);
-        Controls.Add(_weekLabel);
-        Controls.Add(_prev);
-        Controls.Add(_next);
-        Controls.Add(_refresh);
-        Controls.Add(_card);
-        Controls.Add(_status);
-
+        Controls.AddRange(new Control[] { _weekLabel, _prev, _next, _refresh, _rows, _status });
         // Sized before anchoring: WinForms records each anchor's edge distances when Anchor is set.
-        Size = new Size(W, H);
-        MinimumSize = Size;
-        _card.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-        _rows.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-        _prev.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        _next.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        _refresh.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        _status.Anchor = AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        Size = UiScale.S(new Size(LogPage.CardW, BuiltHeight));
+        _rows.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        _status.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        _prev.Anchor = _next.Anchor = _refresh.Anchor = AnchorStyles.Top | AnchorStyles.Right;
     }
 
     // Rows are built at the list's width; posted like LogPage so it runs after the layout pass.
@@ -169,11 +152,11 @@ internal sealed class WeekPage : UserControl, IShellPage
         };
     }
 
-    private static Label SectionHeader(Label label, string text, int x)
+    private static Label SectionHeader(Label label, string text, int x, int y)
     {
         label.Text = text;
         label.AutoSize = true;
-        label.Location = new Point(x, UiScale.S(14));
+        label.Location = new Point(x, y);
         label.Font = SectionFont;
         label.ForeColor = Theme.TextSecondary;
         label.BackColor = Color.Transparent;
@@ -182,25 +165,23 @@ internal sealed class WeekPage : UserControl, IShellPage
 
     private void ApplyTheme()
     {
-        BackColor = Theme.WindowBg;
-        _title.ForeColor = Theme.TextPrimary;
         _weekLabel.ForeColor = Theme.TextSecondary;
         _status.ForeColor = Theme.TextSecondary;
         _rows.BackColor = Theme.CardSurface;
-        foreach (var h in new[] { _dayHeader, _hrmHeader, _tscHeader }) h.ForeColor = Theme.TextSecondary;
+        foreach (var h in new[] { _sectionLabel, _dayHeader, _hrmHeader, _tscHeader }) h.ForeColor = Theme.TextSecondary;
         RenderRows(_last);
         Invalidate(true);
     }
 
     private void ApplyLanguage()
     {
-        _title.Text = Lang.T("Weekly check", "Kiểm tra tuần");
+        _sectionLabel.Text = Lang.T("THIS WEEK", "TUẦN NÀY");
         _dayHeader.Text = Lang.T("DAY", "NGÀY");
         _hrmHeader.Text = Lang.T("HRM (HOURS)", "HRM (GIỜ)");
         _refresh.Text = Lang.T("Refresh", "Làm mới");
         _weekLabel.Text = WeekLabelText();
-        // A finished run's status was worded in the old language; a running one is replaced as it progresses.
-        if (!_busy) _status.Text = string.Empty;
+        // A finished run's status is reworded in the new language; a running one is replaced as it progresses.
+        if (!_busy) _status.Text = _statusText?.Invoke() ?? string.Empty;
         RenderRows(_last);
     }
 
@@ -208,8 +189,15 @@ internal sealed class WeekPage : UserControl, IShellPage
     {
         if (_busy) return;
         _weekMonday = _weekMonday.AddDays(days);
-        LoadWeekAsync();
+        LoadWeekAsync(allowSniff: false);
     }
+
+    // The legend, or how to read TSC when this read had no Graph token.
+    private static string StatusText(IReadOnlyList<DayCoverage> coverage) =>
+        coverage.Any(dc => dc.TscState == TscReadState.NoToken)
+            ? Lang.T("TSC not read yet: Refresh reads it (Chrome runs in the background).", "Chưa đọc TSC: bấm Làm mới để đọc (Chrome chạy ngầm).")
+            : Lang.T("Green = logged, amber = partial, red = missing, gray = not due / off / not read.",
+                "Xanh = đã log, vàng = thiếu, đỏ = chưa log, xám = chưa tới / nghỉ / không đọc được.");
 
     private static IReadOnlyList<DateOnly> Weekdays(DateOnly monday)
     {
@@ -226,31 +214,42 @@ internal sealed class WeekPage : UserControl, IShellPage
             : $"{days[0].ToString("MMM d", Lang.Culture)} - {days[^1].ToString("MMM d, yyyy", Lang.Culture)}").ToUpperInvariant();
     }
 
-    private async void LoadWeekAsync()
+    private async void LoadWeekAsync(bool allowSniff)
     {
         var days = Weekdays(_weekMonday);
         _weekLabel.Text = WeekLabelText();
 
-        if (_service is null) { SetStatus(Lang.T("Config not loaded; set up credentials first.", "Chưa có cấu hình; hãy thiết lập thông tin đăng nhập trước.")); return; }
+        if (_service is null)
+        {
+            _statusText = () => Lang.T("Config not loaded; set up credentials first.", "Chưa có cấu hình; hãy thiết lập thông tin đăng nhập trước.");
+            SetStatus(_statusText());
+            return;
+        }
 
         SetBusy(true);
         SetStatus(Lang.T("Reading TSC + HRM ...", "Đang đọc TSC + HRM ..."));
         try
         {
-            var coverage = await _service.CheckWeekAsync(days, AppendLog);
+            var coverage = await _service.CheckWeekAsync(days, AppendLog, allowSniff: allowSniff);
             if (IsDisposed) return; // a Settings save rebuilt the shell mid-load
             RenderRows(coverage);
-            SetStatus(Lang.T("Done. (Green = logged, amber = partial, red = missing, gray = pending/unknown/off/not read.)",
-                "Xong. (Xanh = đã log, vàng = thiếu một phần, đỏ = chưa log, xám = chưa tới/không rõ/nghỉ/không đọc được.)"));
+            _statusText = () => StatusText(coverage);
+            SetStatus(_statusText());
         }
         catch (Exception ex)
         {
             if (IsDisposed) return;
-            SetStatus(Lang.T($"Failed: {ex.Message}", $"Lỗi: {ex.Message}"));
+            _statusText = () => Lang.T($"Failed: {ex.Message}", $"Lỗi: {ex.Message}");
+            SetStatus(_statusText());
         }
         finally
         {
             SetBusy(false);
+            if (_reloadPending && !IsDisposed)
+            {
+                _reloadPending = false;
+                LoadWeekAsync(allowSniff: false);
+            }
         }
     }
 
@@ -322,7 +321,7 @@ internal sealed class WeekPage : UserControl, IShellPage
     private void WireRowActions(Panel row, DateOnly date)
     {
         row.Cursor = Cursors.Hand;
-        void Fire(object? s, EventArgs e) => LogDayRequested?.Invoke(date);
+        void Fire(object? s, EventArgs e) => DayRequested?.Invoke(date);
         void Enter(object? s, EventArgs e) => row.BackColor = Theme.Hover;
         void Leave(object? s, EventArgs e)
         {

@@ -5,31 +5,49 @@
 <style>
   :root { --bg: #1e1e1e; --fg: #ececf0; --muted: #96969e; --line: #3e3e42; --selection: #3a5a8c; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Segoe UI", sans-serif; }
-  body { display: flex; }
-  #list { flex: none; width: 23em; overflow-y: auto; border-right: 1px solid var(--line); box-sizing: border-box; }
+  body { display: flex; flex-direction: column; }
+  #tools { flex: none; display: flex; align-items: center; gap: 0.4em; padding: 0.35em 0.5em; border-bottom: 1px solid var(--line); }
+  #tools button { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 0.15em 0.7em; cursor: pointer; }
+  #tools button:hover, #tools button.on { background: var(--selection); }
+  #current { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); padding: 0 0.4em; }
+  #current b { color: var(--fg); }
+  #content { flex: 1; min-height: 0; display: flex; }
+  #list { flex: none; width: 23em; max-width: 70%; overflow: auto; box-sizing: border-box; }
+  #splitter { flex: none; width: 5px; cursor: col-resize; border-left: 1px solid var(--line); }
+  #splitter:hover, #splitter.dragging { background: var(--selection); }
+  #list.hidden, #splitter.hidden { display: none; }
   #editor { flex: 1; min-width: 0; }
-  #bar { position: sticky; top: 0; padding: 0.5em; background: var(--bg); border-bottom: 1px solid var(--line); }
-  #refresh { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 0.2em 0.9em; cursor: pointer; }
-  #refresh:hover { background: var(--selection); }
   .empty { padding: 0.8em; color: var(--muted); }
   .group { padding: 0.7em 0.8em 0.3em; font-weight: 600; }
   .error { padding: 0.2em 0.8em; color: #f85149; }
-  .file { display: flex; gap: 0.6em; padding: 0.25em 0.8em; cursor: pointer; }
-  .file:hover { background: var(--line); }
+  .folder, .file { display: flex; gap: 0.4em; padding: 0.2em 0.8em; cursor: pointer; white-space: nowrap; }
+  .folder { color: var(--muted); }
+  .folder:hover, .file:hover { background: var(--line); }
   .file.selected { background: var(--selection); }
-  .file .status { flex: none; width: 1em; font-weight: 600; }
-  .file .path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .twisty { flex: none; width: 0.8em; }
+  .status { flex: none; width: 1em; font-weight: 600; }
+  .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .file.A { color: #3fb950; }
   .file.M { color: #d29922; }
   .file.D { color: #f85149; }
 </style>
 </head>
 <body>
-<div id="list">
-  <div id="bar"><button id="refresh"></button></div>
-  <div id="groups"><div class="empty" id="loading"></div></div>
+<div id="tools">
+  <button id="toggleList">☰</button>
+  <button id="refresh"></button>
+  <div id="current"></div>
+  <button id="previousChange">◀</button>
+  <button id="nextChange">▶</button>
+  <button id="previousFile">▲</button>
+  <button id="nextFile">▼</button>
+  <button id="inline"></button>
 </div>
-<div id="editor"></div>
+<div id="content">
+  <div id="list"><div id="groups"><div class="empty" id="loading"></div></div></div>
+  <div id="splitter"></div>
+  <div id="editor"></div>
+</div>
 <script src="../monaco/vs/loader.js"></script>
 <script>
   const params = new URLSearchParams(location.search);
@@ -37,12 +55,11 @@
   document.body.style.fontSize = fontSize + "px";
   // Shown until the first listing arrives (git can take a few seconds per worktree).
   document.getElementById("loading").textContent = params.get("loading") || "";
-  document.getElementById("refresh").textContent = params.get("refresh") || "";
 
   const post = (m) => window.chrome.webview.postMessage(JSON.stringify(m));
-  // Ctrl+1..6 switch app pages, as in the terminal (WebView2 keeps keys from the form).
+  // Ctrl+1..5 switch app pages, as in the terminal (WebView2 keeps keys from the form).
   window.addEventListener("keydown", (e) => {
-    if (!e.ctrlKey || e.shiftKey || e.altKey || !/^(Digit|Numpad)[1-6]$/.test(e.code)) return;
+    if (!e.ctrlKey || e.shiftKey || e.altKey || !/^(Digit|Numpad)[1-5]$/.test(e.code)) return;
     e.preventDefault(); e.stopPropagation(); post({ type: "page", index: Number(e.code.slice(-1)) });
   }, true);
 
@@ -69,9 +86,20 @@
     for (const css of [monaco.languages.css.cssDefaults, monaco.languages.css.scssDefaults, monaco.languages.css.lessDefaults])
       css.setOptions({ validate: false });
 
-    // Two columns even in a narrow window (Monaco goes inline below 900px by default).
-    const diff = monaco.editor.createDiffEditor(document.getElementById("editor"),
-      { readOnly: true, automaticLayout: true, minimap: { enabled: false }, fontSize, useInlineViewWhenSpaceIsLimited: false });
+    // The layout the host saved: file list width (em) and visibility, one or two columns.
+    const layout = {
+      listWidth: Number(params.get("listWidth")) || 23,
+      listHidden: params.get("listHidden") === "1",
+      inline: params.get("inline") === "1",
+    };
+    // Only the setting that changed: another tab's page may hold older values for the others.
+    const saveLayout = (name) => post({ type: "layout", [name]: layout[name] });
+
+    // Two columns even in a narrow window (Monaco goes inline below 900px by default); inline only when asked.
+    const diff = monaco.editor.createDiffEditor(document.getElementById("editor"), {
+      readOnly: true, automaticLayout: true, minimap: { enabled: false }, fontSize,
+      useInlineViewWhenSpaceIsLimited: false, renderSideBySide: !layout.inline,
+    });
 
     const clear = () => {
       const old = diff.getModel(); diff.setModel(null);
@@ -92,45 +120,190 @@
       });
     };
 
-    const refresh = document.getElementById("refresh");
+    const list = document.getElementById("list");
+    const splitter = document.getElementById("splitter");
     const groups = document.getElementById("groups");
+    const current = document.getElementById("current");
+    const inlineButton = document.getElementById("inline");
     let selected = null; // { repository, path }
+    let fileRows = []; // { row, repository, path, label } in list order
+    const collapsed = new Set(); // "<repository>|<folder path>" of the folders the user closed, kept across re-lists
 
-    refresh.addEventListener("click", () => post({ type: "refresh" }));
+    const applyLayout = () => {
+      list.style.width = layout.listWidth + "em";
+      list.classList.toggle("hidden", layout.listHidden);
+      splitter.classList.toggle("hidden", layout.listHidden);
+      inlineButton.classList.toggle("on", layout.inline);
+      diff.updateOptions({ renderSideBySide: !layout.inline });
+    };
+    applyLayout();
+
+    // The file being viewed, above the diff: "<repo label>  folder/" then the name in bold.
+    const showCurrent = (entry) => {
+      current.replaceChildren();
+      current.title = "";
+      if (!entry) return;
+      const slash = entry.path.lastIndexOf("/");
+      current.append(entry.label + "  " + entry.path.slice(0, slash + 1));
+      const name = document.createElement("b");
+      name.textContent = entry.path.slice(slash + 1);
+      current.append(name);
+      current.title = entry.label + "  " + entry.path;
+    };
+
+    const select = (entry) => {
+      for (const other of groups.querySelectorAll(".file.selected")) other.classList.remove("selected");
+      entry.row.classList.add("selected");
+      entry.row.scrollIntoView({ block: "nearest" });
+      selected = { repository: entry.repository, path: entry.path };
+      showCurrent(entry);
+      post({ type: "select", repository: entry.repository, path: entry.path });
+    };
+
+    // Alt+Up/Down skip the rows of closed folders (a [hidden] ancestor), even while the whole list is hidden.
+    const stepFile = (direction) => {
+      const index = selected ? fileRows.findIndex((fr) => fr.repository === selected.repository && fr.path === selected.path) : -1;
+      let next = index < 0 ? (direction > 0 ? -1 : fileRows.length) : index;
+      do next += direction;
+      while (next >= 0 && next < fileRows.length && fileRows[next].row.closest("[hidden]") !== null);
+      if (next >= 0 && next < fileRows.length) select(fileRows[next]);
+    };
+
+    const indent = (depth) => (0.8 + depth * 1.1) + "em";
+
+    // One repository's files as a folder tree, Azure DevOps style: folders first, then files, by name; a folder
+    // holding only one subfolder is merged into it ("src/Services/Portal"), so deep paths do not cost a row per level.
+    const renderTree = (parent, files, repository, label) => {
+      const root = { folders: new Map(), files: [] };
+      for (const file of files) {
+        const parts = file.path.split("/");
+        let node = root;
+        for (const part of parts.slice(0, -1)) {
+          if (!node.folders.has(part)) node.folders.set(part, { folders: new Map(), files: [] });
+          node = node.folders.get(part);
+        }
+        node.files.push({ name: parts[parts.length - 1], file });
+      }
+
+      const renderNode = (container, node, prefix, depth) => {
+        for (const [folderName, folder] of [...node.folders].sort(([a], [b]) => a.localeCompare(b))) {
+          let name = folderName;
+          let path = prefix + folderName;
+          let child = folder;
+          while (child.files.length === 0 && child.folders.size === 1) {
+            const [subName, sub] = [...child.folders][0];
+            name += "/" + subName;
+            path += "/" + subName;
+            child = sub;
+          }
+          const key = repository + "|" + path;
+          const row = addText(container, "folder", "");
+          row.style.paddingLeft = indent(depth);
+          const twisty = addText(row, "twisty", collapsed.has(key) ? "▸" : "▾");
+          addText(row, "name", name);
+          row.title = path;
+          const children = document.createElement("div");
+          children.hidden = collapsed.has(key);
+          container.append(children);
+          row.addEventListener("click", () => {
+            children.hidden = !children.hidden;
+            twisty.textContent = children.hidden ? "▸" : "▾";
+            if (children.hidden) collapsed.add(key); else collapsed.delete(key);
+          });
+          renderNode(children, child, path + "/", depth + 1);
+        }
+        for (const { name, file } of node.files.sort((a, b) => a.name.localeCompare(b.name))) {
+          const row = addText(container, "file " + file.status, "");
+          row.style.paddingLeft = indent(depth);
+          addText(row, "twisty", "");
+          addText(row, "status", file.status);
+          addText(row, "name", name);
+          row.title = file.path;
+          const entry = { row, repository, path: file.path, label };
+          fileRows.push(entry);
+          if (selected && selected.repository === repository && selected.path === file.path) {
+            row.classList.add("selected");
+            showCurrent(entry);
+          }
+          row.addEventListener("click", () => select(entry));
+        }
+      };
+      renderNode(parent, root, "", 0);
+    };
 
     // Keeps the selected file if it is still listed (and asks for its diff again); otherwise empties the editor.
     const renderFiles = (m) => {
-      refresh.textContent = m.refreshText;
       groups.replaceChildren();
+      fileRows = [];
       if (m.groups.length === 0) addText(groups, "empty", m.emptyText);
-      let stillListed = false;
       for (const group of m.groups) {
         addText(groups, "group", group.label);
         if (group.error) addText(groups, "error", group.error);
-        for (const file of group.files) {
-          const row = addText(groups, "file " + file.status, "");
-          addText(row, "status", file.status);
-          addText(row, "path", file.path);
-          row.title = file.path;
-          if (selected && selected.repository === group.repository && selected.path === file.path) {
-            row.classList.add("selected");
-            stillListed = true;
-          }
-          row.addEventListener("click", () => {
-            for (const other of groups.querySelectorAll(".file.selected")) other.classList.remove("selected");
-            row.classList.add("selected");
-            selected = { repository: group.repository, path: file.path };
-            post({ type: "select", repository: group.repository, path: file.path });
-          });
-        }
+        renderTree(groups, group.files, group.repository, group.label);
       }
-      if (selected && stillListed) post({ type: "select", repository: selected.repository, path: selected.path });
-      else if (selected) { selected = null; shown = null; clear(); }
+      const stillListed = selected && fileRows.some((fr) => fr.repository === selected.repository && fr.path === selected.path);
+      if (stillListed) post({ type: "select", repository: selected.repository, path: selected.path });
+      else if (selected) { selected = null; shown = null; clear(); showCurrent(null); }
     };
+
+    const applyLabels = (m) => {
+      const titles = { toggleList: m.files, previousChange: m.previousChange, nextChange: m.nextChange,
+        previousFile: m.previousFile, nextFile: m.nextFile, inline: m.inlineTitle, refresh: m.refresh };
+      for (const [id, title] of Object.entries(titles)) document.getElementById(id).title = title;
+      document.getElementById("refresh").textContent = m.refresh;
+      inlineButton.textContent = m.inline;
+    };
+
+    document.getElementById("refresh").addEventListener("click", () => post({ type: "refresh" }));
+    document.getElementById("toggleList").addEventListener("click", () => {
+      layout.listHidden = !layout.listHidden;
+      applyLayout();
+      saveLayout("listHidden");
+    });
+    inlineButton.addEventListener("click", () => {
+      layout.inline = !layout.inline;
+      applyLayout();
+      saveLayout("inline");
+    });
+    document.getElementById("previousChange").addEventListener("click", () => diff.goToDiff("previous"));
+    document.getElementById("nextChange").addEventListener("click", () => diff.goToDiff("next"));
+    document.getElementById("previousFile").addEventListener("click", () => stepFile(-1));
+    document.getElementById("nextFile").addEventListener("click", () => stepFile(1));
+
+    // Drag the list's right edge; the width is kept in em so it follows the font size.
+    splitter.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      splitter.classList.add("dragging");
+      const move = (moveEvent) => {
+        const width = Math.min(Math.max(moveEvent.clientX - list.getBoundingClientRect().left, 8 * fontSize), window.innerWidth * 0.7);
+        layout.listWidth = Math.round(width / fontSize * 10) / 10;
+        list.style.width = layout.listWidth + "em";
+      };
+      const up = () => {
+        splitter.classList.remove("dragging");
+        window.removeEventListener("mousemove", move);
+        window.removeEventListener("mouseup", up);
+        saveLayout("listWidth");
+      };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+    });
+
+    // Alt+Up/Down move between files, F7 / Shift+F7 between the changes of the file (before Monaco sees the keys).
+    window.addEventListener("keydown", (e) => {
+      if (e.altKey && !e.ctrlKey && !e.shiftKey && (e.key === "ArrowUp" || e.key === "ArrowDown")) {
+        e.preventDefault(); e.stopPropagation();
+        stepFile(e.key === "ArrowDown" ? 1 : -1);
+      } else if (e.key === "F7" && !e.ctrlKey && !e.altKey) {
+        e.preventDefault(); e.stopPropagation();
+        diff.goToDiff(e.shiftKey ? "previous" : "next");
+      }
+    }, true);
 
     window.chrome.webview.addEventListener("message", (event) => {
       const m = JSON.parse(event.data);
       if (m.type === "files") renderFiles(m);
+      else if (m.type === "labels") applyLabels(m);
       else if (m.type === "diff" && selected && selected.repository === m.repository && selected.path === m.path)
         show(m.repository, m.path, m.original, m.modified);
       else if (m.type === "theme") { setColors(m.colors); monaco.editor.setTheme(m.dark ? "vs-dark" : "vs"); }

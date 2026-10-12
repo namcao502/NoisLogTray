@@ -590,40 +590,40 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         if (_service == null)
         {
             var noConfig = Lang.T("config not loaded", "chưa có cấu hình");
-            SetStatus(_tscDot, _tscStatus, WeekPage.Gray, noConfig);
-            SetStatus(_hrmDot, _hrmStatus, WeekPage.Gray, noConfig);
+            SetStatus(_tscDot, _tscStatus, WeekCard.Gray, noConfig);
+            SetStatus(_hrmDot, _hrmStatus, WeekCard.Gray, noConfig);
             return;
         }
         if (_coverageReading)
         {
             var reading = Lang.T("Reading...", "Đang đọc...");
-            SetStatus(_tscDot, _tscStatus, WeekPage.Gray, reading);
-            SetStatus(_hrmDot, _hrmStatus, WeekPage.Gray, reading);
+            SetStatus(_tscDot, _tscStatus, WeekCard.Gray, reading);
+            SetStatus(_hrmDot, _hrmStatus, WeekCard.Gray, reading);
             return;
         }
         if (_coverageFailed || _coverage == null)
         {
             var text = _coverageFailed ? Lang.T("not read", "không đọc được") : "-";
-            SetStatus(_tscDot, _tscStatus, WeekPage.Gray, text);
-            SetStatus(_hrmDot, _hrmStatus, WeekPage.Gray, text);
+            SetStatus(_tscDot, _tscStatus, WeekCard.Gray, text);
+            SetStatus(_hrmDot, _hrmStatus, WeekCard.Gray, text);
             return;
         }
 
         var (tscColor, tscText) = TodayTscStatus(_coverage);
         SetStatus(_tscDot, _tscStatus, tscColor, tscText);
 
-        var (hrmColor, hrmText) = WeekPage.HrmStatus(_coverage, future: false);
+        var (hrmColor, hrmText) = WeekCard.HrmStatus(_coverage, future: false);
         if (!_coverage.IsOff && _coverage.HrmHours != null)
             hrmText += $" / {FullDayHours:0}h";
         SetStatus(_hrmDot, _hrmStatus, hrmColor, hrmText);
     }
 
-    // WeekPage's TSC rule with two exceptions: a background read without a token, and an empty
+    // WeekCard's TSC rule with two exceptions: a background read without a token, and an empty
     // cell that today's queued entry has not reached yet.
     private (Color Color, string Text) TodayTscStatus(DayCoverage coverage)
     {
         if (coverage.TscState == TscReadState.NoToken)
-            return (WeekPage.Gray, Lang.T("not read (click Re-check)", "chưa đọc (bấm Kiểm tra lại)"));
+            return (WeekCard.Gray, Lang.T("not read (click Re-check)", "chưa đọc (bấm Kiểm tra lại)"));
 
         var queuedToday = _data != null && _data.TodayQueuedCount != 0;
         var waitingForLog = coverage.TscState == TscReadState.Read
@@ -632,9 +632,9 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
             && UntilLogTime().HasValue
             && queuedToday;
         if (waitingForLog)
-            return (WeekPage.Gray, Lang.T($"waiting to log at {LogTimeText()}", $"chờ log lúc {LogTimeText()}"));
+            return (WeekCard.Gray, Lang.T($"waiting to log at {LogTimeText()}", $"chờ log lúc {LogTimeText()}"));
 
-        return WeekPage.TscStatus(coverage, future: false);
+        return WeekCard.TscStatus(coverage, future: false);
     }
 
     private static void SetStatus(Panel dot, Label status, Color color, string text)

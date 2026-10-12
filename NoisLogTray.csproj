@@ -47,6 +47,17 @@
     <None Include="Assets\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
+  <!-- Microsoft's redistributable ConPTY (MIT): conpty.dll beside the exe, which starts x64\OpenConsole.exe. The inbox
+       ConPTY on Windows 10 re-renders the screen, shifting claude's input line and dropping mouse modes. Copied by
+       hand (the package's own targets only cover a fixed PlatformTarget) and kept out of the single-file bundle. -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Windows.Console.ConPTY" Version="1.25.260930003" GeneratePathProperty="true" ExcludeAssets="all" PrivateAssets="all" />
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\runtimes\win-x64\native\conpty.dll" Link="conpty.dll"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" Visible="false" />
+    <None Include="$(PkgMicrosoft_Windows_Console_ConPTY)\build\native\runtimes\x64\OpenConsole.exe" Link="x64\OpenConsole.exe"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" Visible="false" />
+  </ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Microsoft.Playwright" Version="1.61.0" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4258.31" />

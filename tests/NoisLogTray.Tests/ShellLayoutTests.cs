@@ -37,32 +37,40 @@ public class ShellLayoutTests
     [Fact]
     public void LogCardBounds_OneColumn_StacksCards()
     {
-        var (newEntry, queue, myTickets) = ShellLayout.LogCardBounds(1100, 900, 142, 162, 164);
+        var (newEntry, queue, week, myTickets) = ShellLayout.LogCardBounds(1100, 900, 142, 162, 246, 264, 164);
 
         Assert.Equal(new Rectangle(20, 14, 1060, 142), newEntry);
         Assert.Equal(new Rectangle(20, 14 + 142 + 12, 1060, 162), queue);
-        Assert.Equal(new Rectangle(20, queue.Bottom + 12, 1060, 900 - 20 - (queue.Bottom + 12)), myTickets);
+        Assert.Equal(new Rectangle(20, 342, 1060, 246), week);
+        Assert.Equal(new Rectangle(20, 600, 1060, 280), myTickets);
     }
 
     [Fact]
     public void LogCardBounds_OneColumn_ReproducesBuiltLayout()
     {
-        var (newEntry, queue, myTickets) = ShellLayout.LogCardBounds(600, 626, 142, 162, 164);
+        var (newEntry, queue, week, myTickets) = ShellLayout.LogCardBounds(600, 884, 142, 162, 246, 264, 164);
 
         Assert.Equal(new Rectangle(20, 14, 560, 142), newEntry);
         Assert.Equal(new Rectangle(20, 168, 560, 162), queue);
-        Assert.Equal(new Rectangle(20, 342, 560, 264), myTickets);
+        Assert.Equal(new Rectangle(20, 342, 560, 246), week);
+        Assert.Equal(new Rectangle(20, 600, 560, 264), myTickets);
     }
 
     [Fact]
-    public void LogCardBounds_TwoColumns_MyTicketsFillsRightColumn()
+    public void LogCardBounds_TwoColumns_WeekAndMyTicketsShareTheRightColumn()
     {
-        var (newEntry, queue, myTickets) = ShellLayout.LogCardBounds(1400, 900, 142, 162, 164);
-        var colW = (1400 - 60) / 2;
+        var (newEntry, queue, week, myTickets) = ShellLayout.LogCardBounds(1400, 900, 142, 162, 246, 264, 164);
 
-        Assert.Equal(new Rectangle(20, 14, colW, 142), newEntry);
-        Assert.Equal(new Rectangle(20, 14 + 142 + 12, colW, 900 - 20 - (14 + 142 + 12)), queue);
-        Assert.Equal(new Rectangle(40 + colW, 14, colW, 900 - 34), myTickets);
+        Assert.Equal(new Rectangle(20, 14, 670, 142), newEntry);
+        Assert.Equal(new Rectangle(20, 168, 670, 712), queue);
+        Assert.Equal(new Rectangle(710, 14, 670, 246), week);
+        Assert.Equal(new Rectangle(710, 272, 670, 608), myTickets);
+    }
+
+    [Fact]
+    public void WeekCard_BuiltHeight_Is246()
+    {
+        Assert.Equal(246, WeekCard.BuiltHeight);
     }
 
     [Fact]
@@ -104,11 +112,11 @@ public class ShellLayoutTests
     }
 
     [Fact]
-    public void LogCardBounds_OneColumn_MyTicketsKeepsMinHeight()
+    public void LogCardBounds_OneColumn_MyTicketsKeepsItsBuiltHeight()
     {
-        var (_, _, myTickets) = ShellLayout.LogCardBounds(600, 400, 142, 162, 164);
+        var (_, _, _, myTickets) = ShellLayout.LogCardBounds(600, 400, 142, 162, 246, 264, 164);
 
-        Assert.Equal(164, myTickets.Height);
+        Assert.Equal(new Rectangle(20, 600, 560, 264), myTickets);
     }
 
     [Fact]
