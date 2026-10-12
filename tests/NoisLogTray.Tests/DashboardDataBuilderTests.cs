@@ -166,4 +166,43 @@ public class DashboardDataBuilderTests
 
         Assert.Equal(string.Empty, DashboardDataBuilder.PrSummary("MDP-1", prs));
     }
+
+    [Fact]
+    public void LatestPrs_KeepsNewestPerRepoAndBranch_BackendFirst()
+    {
+        // Inserted out of order, and "Admin-Repo" sorts before "BE", so only the BE-first rule puts BE on top.
+        var prs = new Dictionary<string, TrackedPr>
+        {
+            ["MDP-1|dev|9"] = new("active", 4, "Portal-Angular"),
+            ["MDP-1|dev|3"] = new("active", 0, "Admin-Repo"),
+            ["MDP-1|dev|5"] = new("completed", 1, "Backend-DotNet"),
+            ["MDP-1|dev|7"] = new("active", 2, "Backend-DotNet"),
+            ["MDP-1|main|6"] = new("completed", 3),
+            ["MDP-2|dev|8"] = new("active", 5, "Backend-DotNet"),
+        };
+
+        var latest = DashboardDataBuilder.LatestPrs("MDP-1", prs);
+
+        Assert.Equal(
+            new[]
+            {
+                new TicketPr("Backend-DotNet", "main", 6, "completed", 3),
+                new TicketPr("Backend-DotNet", "dev", 7, "active", 2),
+                new TicketPr("Admin-Repo", "dev", 3, "active", 0),
+                new TicketPr("Portal-Angular", "dev", 9, "active", 4),
+            },
+            latest);
+    }
+
+    [Fact]
+    public void PrSummary_TwoFrontendReposOnOneBranch_ShowTheNewestOnce()
+    {
+        var prs = new Dictionary<string, TrackedPr>
+        {
+            ["MDP-1|dev|5"] = new("completed", 0, "Portal-Angular"),
+            ["MDP-1|dev|8"] = new("active", 0, "WebApp-Angular"),
+        };
+
+        Assert.Equal("FE dev ●", DashboardDataBuilder.PrSummary("MDP-1", prs));
+    }
 }

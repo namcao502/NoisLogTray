@@ -95,23 +95,37 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   board: `TicketStore` (JSON state files), `TicketBoard` (section logic), `TicketPoller` (Jira poll),
   `AzureDevOpsClient` + `PrTracker` + `PrUpdateChecker` (PR tracking), `TeamsNotifier`
   (Teams webhook cards), `JiraStatusFlow` (the walk to Ready to Test); the Claude terminal:
-  `PseudoConsoleSession` (one child process on a Windows ConPTY, P/Invoke) and `ClaudeSessionHost`
-  (owns that session for the tray's lifetime plus a ~1MB replay buffer).
+  `PseudoConsoleSession` (one child process on a Windows ConPTY, P/Invoke; its environment drops
+  `CLAUDE*`/`ANTHROPIC*` via `BuildEnvironmentBlock`, so a tray started from a Claude Code session
+  does not make the embedded claude a child session with transcripts off), `ClaudeSessionHost`
+  (owns that session for the tray's lifetime plus a ~1MB replay buffer; built from a working
+  directory, an optional argument, `fallBackToProfile` and an optional `settingsFile` (the hook
+  settings), and raises `Starting` (first line of `Start`, on the calling thread, before `Stop`) and
+  `Started`) and `ClaudeHookServer` (a localhost `HttpListener` for the sessions' Claude hooks, see
+  "Claude hook bridge" below); the Ticket workspace: `WorktreeService` (fetch + `git worktree add` off `origin/main`), `GitCommand` (one
+  `git` run, stdout + stderr as UTF-8, a timeout that kills the process tree; `WorktreeService` and
+  `GitChanges` go through it), `GitChanges` (a worktree's changed files and the two sides of each,
+  see `ChangesView` below), `TicketWorktrees` (a ticket's backend worktree path and its sibling
+  `*-Angular` worktrees) and `TicketLauncher` (the `--continue` lookup for a worktree and the VS Code
+  launch).
 - `Helpers/` - utilities: `TicketParser` (incl. `TryParseKey` for a key or Jira link), `TicketSearch`, `TimeSlots`, `TscCells`, `Timesheet`, `Leave`,
   `Hcm`, `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppSettings`,
   `AppIcon`, `TicketSort` (earliest due first, undated last, then key; Tasks + Dashboard),
   `PrCommentAlerts` (pure edits of the unseen-PR-comment map), `DashboardDataBuilder` (Dashboard data),
+  `ClaudeAttention` (pure: parses a hook payload, maps it to the session's wait, words the notice),
   `Retry` (transient-transport-failure retry with backoff, used by the Jira/Graph/HRM clients).
 - `Models/` - record types (+ the `CredentialCheck` and `NoticeKind` enums): `QueueEntry`,
   `JiraSuggestion`/`JiraVerifyResult`, `DrainResult`/`EntryLogResult`/`OffWriteResult`,
   `GraphTscOptions`, `TimeSlot`, `ToolEnvelope`, `CredentialCheck`, `UpdateInfo`; Tasks: `JiraTicket`, `DismissedTicket`,
   `TicketSection`, `DueUrgency`, `DevPriorityLevel`, `TicketPollResult`, `PrStatus`, `TrackedPr`,
   `PrNotification`, `PrCheckResult`, `StartStage`, `QueueAddResult`, `PrLookupResult`, `PrCommentAlert`;
-  Dashboard: `DashboardData`, `AttentionItem`, `AttentionKind`; coverage: `DayCoverage`, `TscReadState`;
+  Ticket page: `TicketPr`, `TicketWorktree`, `ChangeSet`, `FileChange`, `FileChangeStatus`;
+  Claude hooks: `ClaudeHookEvent`, `ClaudeWaitReason`; Dashboard: `DashboardData`, `AttentionItem`, `AttentionKind`; coverage: `DayCoverage`, `TscReadState`;
   shell: `ShellPage`.
 - `Interface/` - abstractions (`IJiraClient`, implemented by `JiraClient`; `IAzureDevOpsClient`, by
   `AzureDevOpsClient`; `IShellPage`, implemented by the shell's pages).
-- `UI/` - WinForms. `Theme` is a central light/dark palette; controls read it at paint
+- `UI/` - WinForms. `Theme` is a central light/dark palette (`Theme.Badge` is the red of the
+  sidebar badges and the tab dots); controls read it at paint
   time and subscribe to `Theme.Changed` to repaint (the header's Dark/Light button calls
   `Theme.Toggle`; `ShellForm`'s and each page's `ApplyTheme` re-color native controls). It defaults to dark
   and persists the choice through `AppSettings` (`Theme.Load` runs in `Program.Main`;
@@ -124,7 +138,8 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   other dialogs read the language when opened. Logs and code stay English. Also `TrayApp`,
   `ShellForm` + `SidebarNav` + `ShellLayout` (the one app window, see below), the pages
   `DashboardPage` (with `DashboardRow`, see below), `LogPage`, `TasksPage` (with `TaskRow`),
-  `ClaudePage` (see below) and `WeekPage` (weekly coverage: HRM hours + TSC
+  `ClaudePage` and `TicketWorkspacePage` (with `TicketWorkspaceView`; both below, built on the web
+  views `TerminalView`, `ChangesView` and `WebViewSetup`) and `WeekPage` (weekly coverage: HRM hours + TSC
   ticket per weekday; an under-logged past weekday is a clickable `ClickableRow` that raises
   `LogDayRequested` -> `TrayApp` shows the Log page on that date via `LogPage.PrepareForDate`.
   An approved day off (`DayCoverage.IsOff`) reads gray "off"
@@ -141,7 +156,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `WindowGlyphButton` (header menu / minimize / maximize-restore glyphs),
   `ThemedMenuRenderer` (themed `ContextMenuStrip`s, opened right-aligned under their button
   so they stay inside the window; the bell history also cuts each line to fit), `MacButton`
-  (rounded button), `Card` (rounded card surface), `RoundedHost` (rounded border
+  (rounded button; `ShowDot` paints a `Theme.Badge` attention dot in its top-right corner), `Card` (rounded card surface), `RoundedHost` (rounded border
   around native controls like the list/textbox), `RoundedDatePicker` (rounded date
   field with a custom `ModernCalendar` popup in a rounded `CalendarPopupForm`, replacing
   the native `DateTimePicker`/`MonthCalendar`), `WillLogRow` (one owner-drawn Will Log
@@ -174,10 +189,12 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   window is hidden or not built yet, and keep the current page when it is already on screen; the
   18:00 reminder and a Week day click still open the Log page. Logging and TSC session actions live
   only in the window, so they are not duplicated there. `ShowShell(page)` builds the shell and its
-  pages lazily (`_shell`, `_dashboardPage`, `_logPage`, `_tasksPage`, `_weekPage`, `_claudePage`, `_settingsPage`) and shows the
+  pages lazily (`_shell`, `_dashboardPage`, `_logPage`, `_tasksPage`, `_weekPage`, `_claudePage`, `_ticketPage`, `_settingsPage`) and shows the
   requested page. `_claudeHost` (the Claude session) is created once and outlives every shell
-  rebuild; Quit and `Dispose` end it. Ticket state changes refresh both ticket views via `RefreshTicketViews`
-  (Tasks + Dashboard); launch stages and the checking state are pushed to both pages.
+  rebuild, as do the per-ticket sessions (`_ticketSessions`); Quit and `Dispose` end them (Quit asks
+  Yes/No first, default No, while a ticket's Claude is running). Ticket state changes refresh
+  the ticket views via `RefreshTicketViews` (Tasks + Dashboard + the Ticket page headers); launch stages and the
+  checking state are pushed to the Tasks and Dashboard pages.
   A page Save (`SettingsPage.SaveRequested` -> `OnSettingsSaved`) writes the per-user config into
   `settings.json` (an IO/permission failure is logged and noticed), then - deferred via
   `BeginInvoke`, since the panel's click is still on the stack - rebuilds `_service` via
@@ -189,7 +206,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   blocked. A successful TSC re-auth (from the window, via the `ReauthSucceeded` event)
   calls `CatchUpIfDue` to retry any queue entries that were waiting on sign-in.
 - **`ShellForm`** - the single app window (title "NOIS Workday"): a `SidebarNav` on the left
-  (one row per `ShellPage` - Dashboard, Log, Tasks, Week, Claude, and Settings pinned at the bottom), and on the right a
+  (one row per `ShellPage` - Dashboard, Log, Tasks, Week, Claude, Ticket, and Settings pinned at the bottom), and on the right a
   header (menu button that collapses the sidebar to glyphs, page title, bell, theme toggle, EN/VI
   language toggle, then minimize / maximize-restore / close) over the current page. Pages are
   `UserControl`s added with `AddPage`; they may implement `IShellPage` (`OnPageShown` when the page
@@ -210,11 +227,12 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   under the cursor. The sidebar's collapsed state persists as `AppSettings.SidebarCollapsed`. The
   Tasks row shows a red **badge** with `TasksPage.AttentionCount` (In progress / Done tickets with
   a Ready to Test button, or In progress ones already Done in Jira), raised via `AttentionChanged`
-  on every `Reload`.
-  **Keys:** Ctrl+1 .. Ctrl+5 switch to Dashboard / Log / Tasks / Week / Claude (Settings
+  on every `Reload`; the Claude and Ticket rows get badges from the Claude hook bridge (below).
+  **Keys:** Ctrl+1 .. Ctrl+6 switch to Dashboard / Log / Tasks / Week / Claude / Ticket (Settings
   has no shortcut). Esc clears a non-empty input
   box (one with a placeholder, so not the inline hours field), otherwise hides to tray - except on
-  the Claude page, where Esc goes to the CLI (it interrupts a running turn); the
+  the Claude page and on the Ticket page while it has open tabs, where Esc goes to the CLI (it
+  interrupts a running turn); the
   header's close button and Alt+F4 also **hide to tray**; `TrayApp` owns exit.
   **Notices:** every user-facing message goes through `TrayApp.Notify`, which records
   it in the bell history (`ShellForm.PostNotice`, last 20, session-only; the
@@ -317,16 +335,20 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   lines by `ButtonLines`, so the larger buttons at high DPI are never clipped in a narrow column.
   `TrayApp` polls
   Jira every 5 min via `TicketPoller` and notifies new assignments and In-progress tickets that
-  turned Done in Jira. A row's **Start** (`TrayApp.StartTicketAsync`) runs
-  `TicketLauncher.StartNewTicket` off the UI thread: create the worktree
-  `<DEV_REPO_PATH>\.claude\worktrees\<KEY>` (`WorktreeService`), drop a one-shot VS Code
-  folderOpen task running `ship <KEY>`, and open VS Code (a worktree that already exists gets an
-  idle Claude instead; a failed worktree opens the main repo without ship). It then moves the
-  ticket to In progress and queues it for today via `TicketQueue.AddStartedTicket`. **Open**
-  (`OpenExistingTicket`) reopens the worktree with an idle Claude and touches neither board nor
-  queue. The row shows the `StartStage` while it runs; `TrayApp._launchStages` holds the in-flight
+  turned Done in Jira. A row's **Start** (`TrayApp.StartTicketAsync`, in `TrayApp.TicketTabs.cs`) opens
+  the ticket's workspace tab (see the Ticket page); Start no longer launches VS Code or writes
+  `.vscode/tasks.json`. A missing worktree `<DEV_REPO_PATH>\.claude\worktrees\<KEY>` is created off the
+  UI thread by `WorktreeService.TryCreate` and the key joins `_shipPending`, so the tab's first Claude
+  session runs `ship <KEY>` (it waits until that session actually starts); an existing worktree just
+  opens, and its session runs `--continue` when the worktree already has a Claude session. A missing
+  dev repo or a failed worktree is a notice and opens no tab. Then, always in this order: `TicketBoard.Start` (In progress), `RefreshTicketViews`, the tab
+  (only when the worktree is ready) and the queue for today via `TicketQueue.AddStartedTicket`.
+  **Open** (`TrayApp.OpenTicketAsync`) opens the tab on an existing worktree and clears the ticket's
+  unseen-PR-comment alert; a missing worktree is a notice naming its path, and it touches neither
+  board nor queue. While Start makes a worktree the row shows the `StartStage` (`Fetching`, then
+  `CreatingWorktree`; `UpdatingJira` is Ready to Test's); `TrayApp._launchStages` holds the in-flight
   stages (so a rebuilt `TasksPage` is seeded from it, and a second click on a busy ticket is
-  ignored) and the `finally` always clears the stage.
+  ignored, Open included) and the `finally` always clears the stage.
   The same 5-min check also runs **PR tracking** when `AZURE_DEVOPS_PAT` is set, even if the Jira
   poll failed: `PrUpdateChecker` reads the Azure DevOps PRs of every Started ticket (and Done ones
   with an open PR) and notifies merges and new comments. The very first run only records a baseline
@@ -345,21 +367,96 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   first `OnPageShown` after the window was shown (switching pages keeps the week on screen);
   hiding to tray resets it, so reopening reloads the current week. Refresh re-reads it.
   Icons come from the embedded `app.ico` via `AppIcon.Load(size)`.
-- **`ClaudePage`** - an interactive `claude` CLI inside the window. `ClaudeSessionHost` (owned by
-  `TrayApp`) runs `%UserProfile%\.local\bin\claude.exe` (else `claude.exe` on PATH) under ConPTY in
-  `DEV_REPO_PATH` (the user profile if missing); the page draws it with **xterm.js** in a **WebView2**
-  (`Assets/terminal/`: `index.html` + vendored xterm 6 and addon-fit, MIT, copied to the output and
-  served through the virtual host `noislogtray.terminal`; WebView2 data in `%AppData%\NoisLogTray\WebView2`).
-  The WebView2 starts on the page's first show. Messages are JSON: page -> host `ready` / `resize` /
-  `input` / `page` (Ctrl+1..5 typed in the terminal, which WebView2 keeps from the form's
-  `ProcessCmdKey`; mapped by `ClaudePage.PageForShortcut`), host -> page `output` (base64 bytes, so
-  split UTF-8 survives) / `theme` / `focus` / `reset`. Output is coalesced and flushed at most every
-  16ms. A rebuilt page (Settings save) `Attach`es to the running session and replays its buffered
+- **`ClaudePage`** - a thin `IShellPage` around one `TerminalView`, an interactive `claude` CLI
+  inside the window. `ClaudeSessionHost` (owned by `TrayApp`) runs `%UserProfile%\.local\bin\claude.exe`
+  (else `claude.exe` on PATH) under ConPTY in `DEV_REPO_PATH` (the user profile if missing). The
+  command line is built by `ClaudeSessionHost.BuildCommandLine`: `--settings "<file>"` (the hook
+  settings, always quoted) comes first, then the argument - flags such as `--continue` go bare,
+  prompts such as `ship <KEY>` are quoted.
+- **`TerminalView`** - the reusable terminal (extracted from `ClaudePage`): it draws a session host with
+  **xterm.js** in a **WebView2** (`Assets/terminal/`: `index.html` + vendored xterm 6 and addon-fit,
+  MIT). **`WebViewSetup`** creates the one shared WebView2 environment (data in
+  `%AppData%\NoisLogTray\WebView2`) and serves `<exe>\Assets` to every web view through the virtual
+  host `noislogtray.assets`; it also sets `DefaultBackgroundColor` to the window background (no white
+  flash in dark mode) and blocks popups and navigation away from that host. A view starts its
+  WebView2 on its first `Activate()`; later calls re-fit with a `fit` message (the window may have
+  been resized while hidden). Messages are JSON: page -> host `ready` / `resize` /
+  `input` / `page` (Ctrl+1..6 typed in the terminal, which WebView2 keeps from the form's
+  `ProcessCmdKey`; mapped by `TerminalView.PageForShortcut`), host -> page `output` (base64 bytes, so
+  split UTF-8 survives) / `theme` / `focus` / `reset` / `fit`. Output is coalesced and flushed at most every
+  16ms. A rebuilt view (Settings save) `Attach`es to the running session and replays its buffered
   output, then resizes to nudge a repaint. Ctrl+C copies a selection, else sends ^C. When the CLI
-  exits the page says so and Enter starts a new session; the top bar shows the working directory
+  exits the view says so and Enter starts a new session; the top bar shows the working directory
   and a Restart button (stop, clear the screen, start again). The csproj's `DropWebView2Wpf`
   target (also in the test project) removes the package's WPF wrapper reference, which otherwise
   clashes with WinForms' `WindowsBase` (MSB3277).
+- **`TicketWorkspacePage`** (with `TicketWorkspaceView`) - the Ticket page (`ShellPage.Ticket`, the
+  sidebar row after Claude, Ctrl+6): a tab strip (a `MacButton` plus an "x" per ticket, an
+  empty-state label when none is open, `HasOpenTabs`; events `CloseRequested` / `VsCodeRequested` /
+  `SelectionChanged` / `PageRequested`) over the selected ticket's `TicketWorkspaceView`. The view
+  has a header - the Jira key link, the summary, `TaskRow.Facts`, the PR links
+  (`DashboardDataBuilder.LatestPrs` -> `TicketPr`, `Url` from `AzureDevOpsClient.PullRequestUrl`)
+  and the Claude / Changes / VS Code buttons - over a `TerminalView` or a `ChangesView` (created on
+  the first Changes click; both live while the tab is open). VS Code opens only the backend worktree
+  folder (`TicketLauncher.OpenVsCode`), with no Claude inside it.
+  **Tabs and sessions** live in `TrayApp.TicketTabs.cs`, not in the page, so a shell rebuild
+  reattaches: `_ticketSessions` holds one `ClaudeSessionHost` per open ticket, created with
+  `fallBackToProfile: false` (a vanished worktree must not silently run Claude elsewhere) and the
+  argument `ship <KEY>` while the key is in `_shipPending`, else `TicketLauncher.GetIdlePrompt`
+  (`--continue` when the worktree already has a Claude session, else none); `Started` clears the
+  pending flag, so a failed start keeps `ship` for the next try. The open keys persist in
+  `settings.json` as `openTicketTabs` (on load only keys shaped like `ABC-123` are kept, since keys
+  end up in paths, git refs and a cmd.exe line). `PruneTicketTabs`, run when the shell
+  is built, drops a tab whose backend worktree is gone and whose session is not running (skipped
+  while the dev repo itself is missing, so a mistyped path in Settings does not lose the tabs).
+  Closing a tab asks Yes/No (default No) while Claude still runs, then stops the session; the
+  dialog is raised via `BeginInvoke` because the "x" is on the Click stack of a button `SetTabs`
+  disposes.
+- **Claude hook bridge** (`ClaudeHookServer`, `ClaudeAttention`, `TrayApp.ClaudeAttention.cs`) - tells
+  the window when a Claude session waits for the user. `TrayApp` starts the server in its ctor: an
+  `HttpListener` on a free `localhost` port under a random per-run token path
+  (`http://localhost:<port>/<token>/<session>`; http.sys answers 404 outside that prefix, so the
+  token check is free). Every session's `ClaudeSessionHost` gets a `settingsFile`
+  (`HookSettingsFor`, resolved at each start) = `%AppData%\NoisLogTray\claude-hooks\<session>.json`,
+  whose HTTP hooks (UserPromptSubmit / PreToolUse / PostToolUse / Notification / Stop) POST to that
+  session's URL; claude merges them with the user's own hooks and the server always answers `200 {}`,
+  so it never blocks or alters a turn. The `/hooks` menu does not list `--settings` hooks even though
+  they run; to check them, look for the `[hooks] <session>: ...` log lines. The session name is `ClaudeAttention.GeneralSessionName`
+  (`claude`) for the Claude page, else the ticket key. No free port or an unwritable settings file
+  only means that session starts without hooks, as before.
+  **Waiting rules** (`ClaudeAttention.Next`): Stop -> `Finished`; a `permission_prompt` /
+  `worker_permission_prompt` Notification -> `Permission` (2.1.284 draws AskUserQuestion as a
+  permission dialog, so its prompt stays `Question`; the prompt only comes after the dialog is open 6s);
+  `elicitation_dialog` / `elicitation_url_dialog` / `agent_needs_input` or a PreToolUse of
+  AskUserQuestion -> `Question`; UserPromptSubmit and any other
+  tool event end the wait; `idle_prompt` changes nothing. A subagent's tool event (payload has
+  `agent_id`) ends only a `Permission` wait, because background agents keep running after a Stop.
+  **Badges and notices:** `TrayApp.OnClaudeHook` (marshaled from the pool thread) keeps
+  `_claudeWaits` (session -> reason) and logs each change as `[hooks]`. A (re)starting session (`Starting`), an ended one (`Exited`) and a closed or pruned tab
+  clear their wait (`Dispose` raises no `Exited`). `RefreshClaudeAttention` (also run when the shell
+  is built) sets a `1` badge on the Claude row while the general session waits, a count badge on the
+  Ticket row, and a dot on each waiting ticket tab (`TicketWorkspacePage.SetWaiting` ->
+  `MacButton.ShowDot`). A new wait is also a `Notify` ("MDP-1: Claude is done - your turn." /
+  needs permission / is asking; the general session is labelled "Claude page") unless `IsWatching`: the
+  window is the foreground one and already on that session (the Claude page, or the Ticket page with
+  that ticket selected, even while its Changes view is open). A hook for a closed tab or an ended
+  session is ignored.
+- **`ChangesView`** - the ticket's changes as a read-only diff. `TicketWorktrees.Find` lists the
+  backend worktree first, then every sibling `*-Angular` repo that has a
+  `.claude\worktrees\<KEY>`; `GitChanges.List(worktree, ticketKey)` runs per worktree. The file list
+  on the left is grouped `"BE - Backend-DotNet"` / `"FE - Portal-Angular"`; the right is a two-column
+  **Monaco** diff (`Assets/diff/index.html`, inline view disabled, language validation off). It
+  re-lists on every `Activate`, Refresh and language switch; CRLF is normalized, and a binary or
+  over-1MB file shows a placeholder. `GitChanges` computes the base as
+  `merge-base refs/heads/<KEY> origin/main` - the ticket branch is `<KEY>`, with `<KEY>-dev` for the
+  dev PR. If HEAD is on `<KEY>` it is the working-tree diff against that base, untracked files
+  included; otherwise (e.g. `<KEY>-dev`, after git-cp merged development into it) only the committed
+  `base..<KEY>` diff, so the development merge never shows. `src/docker-compose.yml` is excluded
+  (a local-only edit the worktree skill carries), every git call passes `--no-optional-locks`, and
+  `ReadOriginal` / `ReadModified` check the size first (`cat-file -s` for a blob, the file length on
+  disk), so nothing over 1MB is read whole. Monaco is vendored
+  under `Assets/monaco` (monaco-editor **0.52.2** `min/vs`, the last AMD build; nls files removed,
+  ~12MB; `LICENSE-monaco.txt`) and copied to the output with the rest of `Assets/`.
 - **`LoggingService`** - orchestrator over both destinations plus Jira. `DrainQueueAsync`
   is the core: sniff one Graph token, log every queued entry to both destinations
   (`LogEntryAsync` runs TSC + HRM in parallel), and remove only entries that fully
@@ -503,10 +600,12 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 ## Per-user data
 
 Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
-(the pending log queue), `settings.json` (theme, window position, **and** the `Config`
-key/value map of secrets/settings written from Settings, via `AppSettings`), and
-`logs/app-yyyy-MM-dd.log` (one file per day), plus `WebView2/` (the Claude terminal's browser
-data). A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
+(the pending log queue), `settings.json` (theme, window position, the open Ticket tabs
+(`openTicketTabs`), **and** the `Config` key/value map of secrets/settings written from Settings,
+via `AppSettings`), and `logs/app-yyyy-MM-dd.log` (one file per day), plus `WebView2/` (the web
+views' browser data: terminal and diff) and `claude-hooks/` (one `<session>.json` hook settings
+file per Claude session, rewritten at every session start since it holds the run's port and token).
+A legacy `.env` (`AppPaths.EnvPath`) is migrated into `settings.json` on
 first load and removed. A missing or malformed `queue.json` yields an empty queue by
 design so the 18:00 runner never throws; `AppSettings` likewise falls back to defaults on
 a missing/bad `settings.json` (preserving the bad copy as `settings.json.bad`). `AppLogger`

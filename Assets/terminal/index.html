@@ -34,10 +34,10 @@
     post({ type: "resize", cols: term.cols, rows: term.rows });
   };
 
-  // Ctrl+1..5 switch app pages (the host never sees keys typed in here).
+  // Ctrl+1..6 switch app pages (the host never sees keys typed in here).
   // Ctrl+C copies when text is selected; with no selection it still sends ^C to the CLI.
   term.attachCustomKeyEventHandler((event) => {
-    if (event.ctrlKey && !event.shiftKey && !event.altKey && /^(Digit|Numpad)[1-5]$/.test(event.code)) {
+    if (event.ctrlKey && !event.shiftKey && !event.altKey && /^(Digit|Numpad)[1-6]$/.test(event.code)) {
       if (event.type === "keydown") post({ type: "page", index: Number(event.code.slice(-1)) });
       return false;
     }
@@ -64,6 +64,8 @@
       term.reset();
     } else if (message.type === "focus") {
       term.focus();
+    } else if (message.type === "fit") {
+      sendSize();
     }
   });
 

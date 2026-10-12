@@ -42,9 +42,9 @@
     <None Update=".env.example" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
-  <!-- xterm.js (MIT) for the in-app Claude terminal, served to WebView2 from the output folder. -->
+  <!-- WebView2 pages (xterm.js and Monaco, both MIT: the Claude terminals and the Changes diff), served from the output folder. -->
   <ItemGroup>
-    <None Include="Assets\terminal\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="Assets\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

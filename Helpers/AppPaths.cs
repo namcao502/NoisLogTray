@@ -22,6 +22,8 @@ internal static class AppPaths
 
     internal static string TicketsDirectory => Path.Combine(DataDirectory, "tasks");
 
+    internal static string ClaudeHooksDirectory => Path.Combine(DataDirectory, "claude-hooks");
+
     // Where the standalone TaskWatcher app keeps its state; imported once by TicketStore.
     internal static string TaskWatcherStateDirectory => Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "TaskWatcher", "state");

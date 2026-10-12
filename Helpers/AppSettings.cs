@@ -20,6 +20,7 @@ internal sealed class AppSettings
     public bool SidebarCollapsed { get; set; }
     public int UiZoomPercent { get; set; } = UiScale.DefaultZoomPercent; // read once at startup
     public Dictionary<string, string> Config { get; set; } = new();
+    public List<string> OpenTicketTabs { get; set; } = new(); // ticket keys, in tab order
 
     private static readonly JsonSerializerOptions Options = new()
     {
@@ -45,6 +46,7 @@ internal sealed class AppSettings
             if (parsed != null)
             {
                 parsed.Config ??= new();
+                parsed.OpenTicketTabs ??= new();
                 return parsed;
             }
         }

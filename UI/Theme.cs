@@ -29,6 +29,7 @@ internal static class Theme
 
     internal static readonly Color Accent = Color.FromArgb(0, 122, 255);
     internal static readonly Color AccentHover = Color.FromArgb(20, 132, 255);
+    internal static readonly Color Badge = Color.FromArgb(230, 76, 76);
 
     // Load the persisted choice (defaults to dark when there is no saved setting).
     internal static void Load() => Dark = AppSettings.Load().Dark;

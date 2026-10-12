@@ -142,7 +142,7 @@ internal sealed class TaskRow : Panel
             BackColor = Color.Transparent,
             UseMnemonic = false,
         };
-        keyLink.LinkClicked += (_, _) => OpenTicket(jiraBaseUrl, ticket.Key);
+        keyLink.LinkClicked += (_, _) => OpenUrl($"{jiraBaseUrl}/browse/{ticket.Key}");
         Controls.Add(keyLink);
         _keyLink = keyLink;
 
@@ -245,7 +245,7 @@ internal sealed class TaskRow : Panel
         return buttons;
     }
 
-    private static IEnumerable<(string Text, Color Color)> Facts(JiraTicket ticket, TicketSection section)
+    internal static IEnumerable<(string Text, Color Color)> Facts(JiraTicket ticket, TicketSection section)
     {
         var dueColor = ticket.GetDueUrgency(Hcm.Today()) switch
         {
@@ -278,7 +278,7 @@ internal sealed class TaskRow : Panel
         yield return ($"{Lang.T("Logged", "Đã log")}: {JiraTicket.FormatTimeSpent(ticket.TimeSpentSeconds)}", loggedColor);
     }
 
-    private static Label Fact(string text, Color color) => new()
+    internal static Label Fact(string text, Color color) => new()
     {
         Text = text,
         AutoSize = true,
@@ -289,16 +289,15 @@ internal sealed class TaskRow : Panel
         UseMnemonic = false,
     };
 
-    private static void OpenTicket(string jiraBaseUrl, string key)
+    internal static void OpenUrl(string url)
     {
-        var url = $"{jiraBaseUrl}/browse/{key}";
         try
         {
             Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
         }
         catch (Exception ex)
         {
-            AppLogger.Error($"[tasks] Could not open {url}: {ex.Message}");
+            AppLogger.Error($"[ui] Could not open {url}: {ex.Message}");
         }
     }
 }

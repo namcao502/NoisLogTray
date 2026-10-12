@@ -10,6 +10,7 @@ internal sealed class MacButton : Button
     private readonly bool _secondary;
     private bool _hover;
     private bool _selected;
+    private bool _showDot;
 
     // A secondary button drawn as primary while selected: the chosen pill in an option group.
     [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
@@ -17,6 +18,14 @@ internal sealed class MacButton : Button
     {
         get => _selected;
         set { _selected = value; Invalidate(); }
+    }
+
+    // A small attention dot in the top-right corner.
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    internal bool ShowDot
+    {
+        get => _showDot;
+        set { _showDot = value; Invalidate(); }
     }
 
     internal int Radius = UiScale.S(6);
@@ -85,6 +94,13 @@ internal sealed class MacButton : Button
         using (var brush = new SolidBrush(fill)) g.FillPath(brush, path);
         TextRenderer.DrawText(g, Text, Font, rect, textColor,
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+
+        if (_showDot)
+        {
+            var dotDiameter = UiScale.S(8);
+            using var dotBrush = new SolidBrush(Theme.Badge);
+            g.FillEllipse(dotBrush, rect.Right - dotDiameter - UiScale.S(3), UiScale.S(3), dotDiameter, dotDiameter);
+        }
 
         // Keyboard-focus ring: a dotted inset outline, white on the blue primary fill,
         // accent-coloured on the neutral secondary fill.

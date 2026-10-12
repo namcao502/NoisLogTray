@@ -2,7 +2,7 @@ using NoisLogTray;
 
 namespace NoisLogTray.Tests;
 
-public class ClaudePageTests
+public class TerminalViewTests
 {
     [Theory]
     [InlineData(1, (int)ShellPage.Dashboard)]
@@ -10,16 +10,17 @@ public class ClaudePageTests
     [InlineData(3, (int)ShellPage.Tasks)]
     [InlineData(4, (int)ShellPage.Week)]
     [InlineData(5, (int)ShellPage.Claude)]
+    [InlineData(6, (int)ShellPage.Ticket)]
     public void PageForShortcut_MatchesTheShellShortcuts(int index, int expected)
     {
-        Assert.Equal((ShellPage)expected, ClaudePage.PageForShortcut(index));
+        Assert.Equal((ShellPage)expected, TerminalView.PageForShortcut(index));
     }
 
     [Theory]
     [InlineData(0)]
-    [InlineData(6)]
+    [InlineData(7)]
     public void PageForShortcut_IgnoresOtherDigits(int index)
     {
-        Assert.Null(ClaudePage.PageForShortcut(index));
+        Assert.Null(TerminalView.PageForShortcut(index));
     }
 }

@@ -7,7 +7,7 @@ namespace NoisLogTray;
 // Tray-resident application context. Owns the NotifyIcon, the capture window, and
 // the daily scheduler. Background work (sniff, MCP, drain) runs off the UI thread
 // and is marshaled back through a hidden control for tooltip/balloon/log updates.
-internal sealed class TrayApp : ApplicationContext
+internal sealed partial class TrayApp : ApplicationContext
 {
     private readonly NotifyIcon _tray;
     private readonly Control _marshal;
@@ -26,6 +26,7 @@ internal sealed class TrayApp : ApplicationContext
     private WeekPage? _weekPage;
     private ClaudePage? _claudePage;
     private ClaudeSessionHost? _claudeHost;
+    private TicketWorkspacePage? _ticketPage;
     private SettingsPage? _settingsPage;
     // All three stay null when the TaskWatcher state import failed: Tasks is disabled this session.
     private readonly TicketStore? _ticketStore;
@@ -35,7 +36,7 @@ internal sealed class TrayApp : ApplicationContext
     private bool _checkingTickets;
     private int _ticketPollFailures;
     private DateTime? _lastTicketCheck;
-    // Tickets with a Start / Open in flight; outlives TasksPage so a rebuilt page shows them busy.
+    // Tickets with a Start / Ready to Test in flight; outlives TasksPage so a rebuilt page shows them busy.
     private readonly Dictionary<string, StartStage> _launchStages = new();
     private const string TasksDisabledEnglish = "Tasks are disabled this session (setup failed; see log).";
     private const string TasksDisabledVietnamese = "Tasks đang tắt trong phiên này (khởi tạo lỗi; xem log).";
@@ -55,6 +56,7 @@ internal sealed class TrayApp : ApplicationContext
         _configError = error;
         _service = config != null ? new LoggingService(config) : null;
         (_teams, _ado) = CreatePrIntegrations(config);
+        StartHookServer();
 
         var menu = new ContextMenuStrip();
         // Hidden until the startup check finds a newer release; then it sits at the top.
@@ -172,6 +174,7 @@ internal sealed class TrayApp : ApplicationContext
         _tasksPage = null;
         _weekPage = null;
         _claudePage = null;
+        _ticketPage = null;
         _settingsPage = null;
         if (_service != null)
         {
@@ -235,8 +238,11 @@ internal sealed class TrayApp : ApplicationContext
             _dashboardPage.Reload();
             _logPage = new LogPage(_service, _configError);
             _shell.AddPage(ShellPage.Log, _logPage);
-            // Only Tasks can be missing: its page is not added when the state setup failed.
-            _shell.PageUnavailable += _ => Notify(Lang.T(TasksDisabledEnglish, TasksDisabledVietnamese), ToolTipIcon.Warning);
+            // Only Tasks can be missing (its page is not added when the state setup failed); any other page stays silent.
+            _shell.PageUnavailable += unavailablePage =>
+            {
+                if (unavailablePage == ShellPage.Tasks) Notify(Lang.T(TasksDisabledEnglish, TasksDisabledVietnamese), ToolTipIcon.Warning);
+            };
             if (_ticketStore != null && _ticketBoard != null)
             {
                 _tasksPage = new TasksPage(_ticketStore, _ticketBoard, () => _service);
@@ -245,20 +251,40 @@ internal sealed class TrayApp : ApplicationContext
                 _tasksPage.StartRequested += StartTicketAsync;
                 _tasksPage.OpenRequested += OpenTicketAsync;
                 _tasksPage.ReadyToTestRequested += MoveToReadyToTestAsync;
+                // Not RefreshTicketViews: the Tasks page already reloaded itself.
+                _tasksPage.BoardChanged += () =>
+                {
+                    _dashboardPage?.Reload();
+                    _ticketPage?.Reload();
+                };
                 _tasksPage.AttentionChanged += count => shell.SetBadge(ShellPage.Tasks, count);
                 _tasksPage.SetChecking(_checkingTickets, _lastTicketCheck);
                 foreach (var (ticketKey, stage) in _launchStages) _tasksPage.SetTicketBusy(ticketKey, stage);
                 _tasksPage.Reload(); // after subscribing, so the badge has a value right away
             }
+            PruneTicketTabs();
+            _ticketPage = new TicketWorkspacePage(_ticketStore, _service?.JiraBaseUrl ?? AppConfig.DefaultJiraBaseUrl, () => DevRepoPath, SessionFor);
+            _shell.AddPage(ShellPage.Ticket, _ticketPage);
+            // Deferred: the x button is on the Click stack and SetTabs disposes it.
+            _ticketPage.CloseRequested += ticketKey => shell.BeginInvoke(() => CloseTicketTab(ticketKey));
+            _ticketPage.VsCodeRequested += OpenInVsCode;
+            _ticketPage.SelectionChanged += ticketKey => _selectedTicket = ticketKey; // only stores: SetTabs raises this itself
+            _ticketPage.PageRequested += ShowShell;
+            _ticketPage.SetTabs(_openTickets, _selectedTicket); // before the page is shown, so HasOpenTabs is right for Esc
             _weekPage = new WeekPage(_service);
             _shell.AddPage(ShellPage.Week, _weekPage);
             // Clicking an under-logged day opens the Log page on that date.
             _weekPage.LogDayRequested += date => { ShowShell(ShellPage.Log); _logPage?.PrepareForDate(date); };
             // The session lives in TrayApp so a rebuilt window (Settings save) reattaches instead of killing it.
-            _claudeHost ??= new ClaudeSessionHost(() => _service?.DevRepoPath ?? AppConfig.DefaultDevRepoPath);
+            if (_claudeHost == null)
+            {
+                _claudeHost = new ClaudeSessionHost(() => DevRepoPath, settingsFile: HookSettingsFor(ClaudeAttention.GeneralSessionName));
+                TrackClaudeSession(ClaudeAttention.GeneralSessionName, _claudeHost);
+            }
             _claudePage = new ClaudePage(_claudeHost);
             _shell.AddPage(ShellPage.Claude, _claudePage);
             _claudePage.PageRequested += ShowShell;
+            RefreshClaudeAttention();
             _settingsPage = new SettingsPage();
             _shell.AddPage(ShellPage.Settings, _settingsPage);
             _settingsPage.SaveRequested += OnSettingsSaved;
@@ -303,45 +329,6 @@ internal sealed class TrayApp : ApplicationContext
             return;
         }
         ShowShell(ShellPage.Tasks);
-    }
-
-    // The ContainsKey check and first SetLaunchStage run before any await, so a double click cannot launch twice.
-    private async Task StartTicketAsync(string ticketKey)
-    {
-        if (_ticketBoard == null || _launchStages.ContainsKey(ticketKey)) return;
-        var repoPath = _service?.DevRepoPath ?? AppConfig.DefaultDevRepoPath;
-        if (Directory.Exists(repoPath))
-        {
-            SetLaunchStage(ticketKey, StartStage.Fetching);
-            // Created on the UI thread so reports come back here; a report after the finally is ignored.
-            var progress = new Progress<StartStage>(stage =>
-            {
-                if (_launchStages.ContainsKey(ticketKey)) SetLaunchStage(ticketKey, stage);
-            });
-            try
-            {
-                if (!await Task.Run(() => TicketLauncher.StartNewTicket(ticketKey, repoPath, progress)))
-                    Notify(Lang.T($"{ticketKey}: worktree failed - opened the main repo without ship (see log).",
-                        $"{ticketKey}: tạo worktree lỗi - đã mở repo chính, không ship (xem log)."), ToolTipIcon.Warning);
-            }
-            catch (Exception e)
-            {
-                AppLogger.Error($"[tasks] Start {ticketKey} failed: {e}");
-                Notify(Lang.T($"{ticketKey}: start failed (see log).", $"{ticketKey}: Start lỗi (xem log)."), ToolTipIcon.Warning);
-            }
-            finally
-            {
-                SetLaunchStage(ticketKey, null);
-            }
-        }
-        else
-        {
-            NotifyRepoNotFound(repoPath);
-        }
-
-        _ticketBoard.Start(ticketKey);
-        RefreshTicketViews();
-        QueueTicketForToday(ticketKey);
     }
 
     // Start and the Dashboard's queue button; a refusal becomes a notice.
@@ -393,35 +380,6 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
-    // Open: reopen an existing worktree (or the main repo) in VS Code; no board or queue change.
-    private async Task OpenTicketAsync(string ticketKey)
-    {
-        if (_launchStages.ContainsKey(ticketKey)) return;
-        var repoPath = _service?.DevRepoPath ?? AppConfig.DefaultDevRepoPath;
-        if (!Directory.Exists(repoPath))
-        {
-            NotifyRepoNotFound(repoPath);
-            return;
-        }
-
-        SetLaunchStage(ticketKey, StartStage.OpeningVsCode);
-        try
-        {
-            await Task.Run(() => TicketLauncher.OpenExistingTicket(ticketKey, repoPath));
-            ClearPrCommentAlert(ticketKey);
-            // `code` returns before VS Code has opened; keep the row busy a little longer.
-            await Task.Delay(TimeSpan.FromSeconds(3));
-        }
-        catch (Exception e)
-        {
-            AppLogger.Error($"[tasks] Open {ticketKey} failed: {e}");
-        }
-        finally
-        {
-            SetLaunchStage(ticketKey, null);
-        }
-    }
-
     // Opening a ticket counts as seeing its new PR comments.
     private void ClearPrCommentAlert(string ticketKey)
     {
@@ -459,6 +417,7 @@ internal sealed class TrayApp : ApplicationContext
     {
         _tasksPage?.Reload();
         _dashboardPage?.Reload();
+        _ticketPage?.Reload();
     }
 
     private async Task MoveToReadyToTestAsync(string ticketKey)
@@ -873,10 +832,23 @@ internal sealed class TrayApp : ApplicationContext
 
     private void Quit()
     {
+        // Quitting stops every ticket's Claude, maybe mid-`ship`; ask the way closing a running tab does.
+        var runningTickets = _ticketSessions.Where(kvp => kvp.Value.IsRunning).Select(kvp => kvp.Key).ToList();
+        if (runningTickets.Count != 0)
+        {
+            var owner = _shell != null && _shell.Visible ? _shell : null;
+            var answer = MessageBox.Show(owner,
+                Lang.T($"Claude is still running in {string.Join(", ", runningTickets)}. Quit and stop it?",
+                    $"Claude vẫn đang chạy trong {string.Join(", ", runningTickets)}. Thoát và dừng nó?"),
+                Lang.T("Quit", "Thoát"), MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes) return;
+        }
         _scheduler.Dispose();
         _tasksTimer.Dispose();
         _shell?.Dispose();
         _claudeHost?.Dispose();
+        foreach (var host in _ticketSessions.Values) host.Dispose();
+        _hookServer?.Dispose();
         ExitThread();
     }
 
@@ -928,6 +900,8 @@ internal sealed class TrayApp : ApplicationContext
             _tray.Dispose();
             _shell?.Dispose();
             _claudeHost?.Dispose();
+            foreach (var host in _ticketSessions.Values) host.Dispose();
+            _hookServer?.Dispose();
             _marshal.Dispose();
         }
         base.Dispose(disposing);

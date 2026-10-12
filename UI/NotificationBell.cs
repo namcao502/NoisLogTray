@@ -8,7 +8,6 @@ namespace NoisLogTray;
 // there are notices the user has not opened. The owner handles Click (opens the history).
 internal sealed class NotificationBell : Control
 {
-    private static readonly Color DotColor = Color.FromArgb(230, 76, 76);
     private bool _hover;
     private bool _hasUnread;
 
@@ -74,7 +73,7 @@ internal sealed class NotificationBell : Control
 
         if (_hasUnread)
         {
-            using var dot = new SolidBrush(DotColor);
+            using var dot = new SolidBrush(Theme.Badge);
             g.FillEllipse(dot, Width - UiScale.S(12), UiScale.S(4), UiScale.S(7), UiScale.S(7));
         }
     }

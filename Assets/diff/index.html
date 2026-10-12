@@ -1,0 +1,151 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --bg: #1e1e1e; --fg: #ececf0; --muted: #96969e; --line: #3e3e42; --selection: #3a5a8c; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Segoe UI", sans-serif; }
+  body { display: flex; }
+  #list { flex: none; width: 23em; overflow-y: auto; border-right: 1px solid var(--line); box-sizing: border-box; }
+  #editor { flex: 1; min-width: 0; }
+  #bar { position: sticky; top: 0; padding: 0.5em; background: var(--bg); border-bottom: 1px solid var(--line); }
+  #refresh { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 0.2em 0.9em; cursor: pointer; }
+  #refresh:hover { background: var(--selection); }
+  .empty { padding: 0.8em; color: var(--muted); }
+  .group { padding: 0.7em 0.8em 0.3em; font-weight: 600; }
+  .error { padding: 0.2em 0.8em; color: #f85149; }
+  .file { display: flex; gap: 0.6em; padding: 0.25em 0.8em; cursor: pointer; }
+  .file:hover { background: var(--line); }
+  .file.selected { background: var(--selection); }
+  .file .status { flex: none; width: 1em; font-weight: 600; }
+  .file .path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .file.A { color: #3fb950; }
+  .file.M { color: #d29922; }
+  .file.D { color: #f85149; }
+</style>
+</head>
+<body>
+<div id="list">
+  <div id="bar"><button id="refresh"></button></div>
+  <div id="groups"><div class="empty" id="loading"></div></div>
+</div>
+<div id="editor"></div>
+<script src="../monaco/vs/loader.js"></script>
+<script>
+  const params = new URLSearchParams(location.search);
+  const fontSize = Number(params.get("fontSize") || 13);
+  document.body.style.fontSize = fontSize + "px";
+  // Shown until the first listing arrives (git can take a few seconds per worktree).
+  document.getElementById("loading").textContent = params.get("loading") || "";
+  document.getElementById("refresh").textContent = params.get("refresh") || "";
+
+  const post = (m) => window.chrome.webview.postMessage(JSON.stringify(m));
+  // Ctrl+1..6 switch app pages, as in the terminal (WebView2 keeps keys from the form).
+  window.addEventListener("keydown", (e) => {
+    if (!e.ctrlKey || e.shiftKey || e.altKey || !/^(Digit|Numpad)[1-6]$/.test(e.code)) return;
+    e.preventDefault(); e.stopPropagation(); post({ type: "page", index: Number(e.code.slice(-1)) });
+  }, true);
+
+  const setColors = (colors) => {
+    for (const [name, value] of Object.entries(colors)) document.documentElement.style.setProperty("--" + name, value);
+  };
+  const addText = (parent, className, text) => {
+    const element = document.createElement("div");
+    element.className = className;
+    element.textContent = text; // never innerHTML: paths and labels come from git and the file system
+    parent.append(element);
+    return element;
+  };
+
+  // Without this the host would wait forever on a page that never says "ready".
+  const fail = (error) => post({ type: "failed", message: String((error && error.message) || error) });
+
+  const start = () => {
+    // Read-only diffs have no project context: language validation would only paint false errors.
+    const noValidation = { noSemanticValidation: true, noSyntaxValidation: true };
+    monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions(noValidation);
+    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions(noValidation);
+    monaco.languages.json.jsonDefaults.setDiagnosticsOptions({ validate: false });
+    for (const css of [monaco.languages.css.cssDefaults, monaco.languages.css.scssDefaults, monaco.languages.css.lessDefaults])
+      css.setOptions({ validate: false });
+
+    // Two columns even in a narrow window (Monaco goes inline below 900px by default).
+    const diff = monaco.editor.createDiffEditor(document.getElementById("editor"),
+      { readOnly: true, automaticLayout: true, minimap: { enabled: false }, fontSize, useInlineViewWhenSpaceIsLimited: false });
+
+    const clear = () => {
+      const old = diff.getModel(); diff.setModel(null);
+      if (old) { old.original.dispose(); old.modified.dispose(); }
+    };
+    let shown = null; // "<repository>|<path>" of the models in the editor
+    // Same URI on re-select after a refresh: dispose the old models before creating new ones. A re-list asks for
+    // the open file again; unchanged text keeps the editor (and its scroll) as it is.
+    const show = (repository, path, original, modified) => {
+      const current = diff.getModel();
+      if (current && shown === repository + "|" + path
+        && current.original.getValue() === original && current.modified.getValue() === modified) return;
+      clear();
+      shown = repository + "|" + path;
+      diff.setModel({
+        original: monaco.editor.createModel(original, undefined, monaco.Uri.from({ scheme: "base", path: "/" + path })),
+        modified: monaco.editor.createModel(modified, undefined, monaco.Uri.from({ scheme: "work", path: "/" + path })),
+      });
+    };
+
+    const refresh = document.getElementById("refresh");
+    const groups = document.getElementById("groups");
+    let selected = null; // { repository, path }
+
+    refresh.addEventListener("click", () => post({ type: "refresh" }));
+
+    // Keeps the selected file if it is still listed (and asks for its diff again); otherwise empties the editor.
+    const renderFiles = (m) => {
+      refresh.textContent = m.refreshText;
+      groups.replaceChildren();
+      if (m.groups.length === 0) addText(groups, "empty", m.emptyText);
+      let stillListed = false;
+      for (const group of m.groups) {
+        addText(groups, "group", group.label);
+        if (group.error) addText(groups, "error", group.error);
+        for (const file of group.files) {
+          const row = addText(groups, "file " + file.status, "");
+          addText(row, "status", file.status);
+          addText(row, "path", file.path);
+          row.title = file.path;
+          if (selected && selected.repository === group.repository && selected.path === file.path) {
+            row.classList.add("selected");
+            stillListed = true;
+          }
+          row.addEventListener("click", () => {
+            for (const other of groups.querySelectorAll(".file.selected")) other.classList.remove("selected");
+            row.classList.add("selected");
+            selected = { repository: group.repository, path: file.path };
+            post({ type: "select", repository: group.repository, path: file.path });
+          });
+        }
+      }
+      if (selected && stillListed) post({ type: "select", repository: selected.repository, path: selected.path });
+      else if (selected) { selected = null; shown = null; clear(); }
+    };
+
+    window.chrome.webview.addEventListener("message", (event) => {
+      const m = JSON.parse(event.data);
+      if (m.type === "files") renderFiles(m);
+      else if (m.type === "diff" && selected && selected.repository === m.repository && selected.path === m.path)
+        show(m.repository, m.path, m.original, m.modified);
+      else if (m.type === "theme") { setColors(m.colors); monaco.editor.setTheme(m.dark ? "vs-dark" : "vs"); }
+    });
+    post({ type: "ready" });
+  };
+
+  require.config({ paths: { vs: "../monaco/vs" } });
+  require(["vs/editor/editor.main"], () => {
+    try {
+      start();
+    } catch (error) {
+      fail(error);
+    }
+  }, fail);
+</script>
+</body>
+</html>

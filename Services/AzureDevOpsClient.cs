@@ -111,12 +111,14 @@ internal sealed class AzureDevOpsClient : IAzureDevOpsClient
             var pullRequestId = pr.GetProperty("pullRequestId").GetInt32();
             var status = pr.GetProperty("status").GetString() ?? string.Empty;
             var repository = pr.GetProperty("repository").GetProperty("name").GetString() ?? BackendRepository;
-            var url = $"https://dev.azure.com/{Org}/{Project}/_git/{repository}/pullrequest/{pullRequestId}";
-            result.Add(new PrStatus(pullRequestId, string.Empty, status, 0, url, repository));
+            result.Add(new PrStatus(pullRequestId, string.Empty, status, 0, PullRequestUrl(repository, pullRequestId), repository));
         }
 
         return result;
     }
+
+    internal static string PullRequestUrl(string repository, int pullRequestId) =>
+        $"https://dev.azure.com/{Org}/{Project}/_git/{repository}/pullrequest/{pullRequestId}";
 
     // commentType "system" covers auto-generated entries (policy updates, ref updates) no reviewer wrote.
     private async Task<int> CountRealCommentsAsync(string repository, int pullRequestId)

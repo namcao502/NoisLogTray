@@ -78,4 +78,22 @@ public class AppSettingsTests : IDisposable
         AppSettings.Save(new AppSettings { UiZoomPercent = 150 }, _path);
         Assert.Equal(150, AppSettings.Load(_path).UiZoomPercent);
     }
+
+    [Fact]
+    public void Load_NullOpenTicketTabs_BecomesEmpty()
+    {
+        File.WriteAllText(_path, "{ \"openTicketTabs\": null }");
+
+        var read = AppSettings.LoadOrBackup(out var corrupt, _path);
+        Assert.False(corrupt);
+        Assert.Empty(read.OpenTicketTabs);
+    }
+
+    [Fact]
+    public void OpenTicketTabs_RoundTripInOrder()
+    {
+        AppSettings.Save(new AppSettings { OpenTicketTabs = new List<string> { "MDP-2", "MDP-1" } }, _path);
+
+        Assert.Equal(new[] { "MDP-2", "MDP-1" }, AppSettings.Load(_path).OpenTicketTabs);
+    }
 }

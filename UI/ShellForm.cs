@@ -341,6 +341,14 @@ internal sealed class ShellForm : Form
         }
     }
 
+    // Minimized, the client area is 0x0: a layout would shrink every page to nothing and re-render it,
+    // then again on restore. Skipping it keeps the pages at their size, so restoring changes nothing.
+    protected override void OnLayout(LayoutEventArgs levent)
+    {
+        if (WindowState == FormWindowState.Minimized || ClientSize.Width == 0 || ClientSize.Height == 0) return;
+        base.OnLayout(levent);
+    }
+
     protected override void OnSizeChanged(EventArgs e)
     {
         base.OnSizeChanged(e);
@@ -497,10 +505,16 @@ internal sealed class ShellForm : Form
             case Keys.Control | Keys.NumPad5:
                 ShowPage(ShellPage.Claude);
                 return true;
+            case Keys.Control | Keys.D6:
+            case Keys.Control | Keys.NumPad6:
+                ShowPage(ShellPage.Ticket);
+                return true;
         }
 
-        // In the terminal Esc belongs to Claude (it interrupts a running turn).
-        if (keyData != Keys.Escape || CurrentPage == ShellPage.Claude) return base.ProcessCmdKey(ref msg, keyData);
+        // In the terminal pages Esc belongs to the page (it interrupts a running Claude turn).
+        if (keyData != Keys.Escape || CurrentPage == ShellPage.Claude
+            || (CurrentPage == ShellPage.Ticket && _pages[ShellPage.Ticket] is TicketWorkspacePage ticketPage && ticketPage.HasOpenTabs))
+            return base.ProcessCmdKey(ref msg, keyData);
 
         // Esc clears a non-empty input box first (placeholder marks the inputs, which skips
         // the inline hours field); otherwise it hides the window to the tray.

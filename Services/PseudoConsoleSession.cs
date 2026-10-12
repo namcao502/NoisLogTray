@@ -1,3 +1,4 @@
+using System.Collections;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
@@ -9,6 +10,7 @@ namespace NoisLogTray;
 internal sealed class PseudoConsoleSession : IDisposable
 {
     private const uint ExtendedStartupInfoPresent = 0x00080000;
+    private const uint CreateUnicodeEnvironment = 0x00000400;
     private const int ProcThreadAttributePseudoConsole = 0x00020016;
 
     private IntPtr _pseudoConsole;
@@ -47,13 +49,33 @@ internal sealed class PseudoConsoleSession : IDisposable
             throw new Win32Exception();
         startupInfo.lpAttributeList = _attributeList;
 
-        if (!CreateProcess(null, commandLine, IntPtr.Zero, IntPtr.Zero, false, ExtendedStartupInfoPresent,
-                IntPtr.Zero, workingDirectory, ref startupInfo, out _process))
-            throw new Win32Exception();
+        var environment = Marshal.StringToHGlobalUni(BuildEnvironmentBlock(Environment.GetEnvironmentVariables()));
+        try
+        {
+            if (!CreateProcess(null, commandLine, IntPtr.Zero, IntPtr.Zero, false, ExtendedStartupInfoPresent | CreateUnicodeEnvironment,
+                    environment, workingDirectory, ref startupInfo, out _process))
+                throw new Win32Exception();
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(environment);
+        }
 
         _inputStream = new FileStream(_inputWrite, FileAccess.Write, 1);
         _readThread = new Thread(ReadLoop) { IsBackground = true, Name = "pty-read" };
         _readThread.Start();
+    }
+
+    // The tray's environment minus the variables that would make claude think it runs inside another Claude Code
+    // session (the tray may have been started from one): "name=value\0" entries ended by one more "\0".
+    internal static string BuildEnvironmentBlock(IDictionary variables)
+    {
+        var entries = variables.Cast<DictionaryEntry>()
+            .Select(de => (Name: (string)de.Key, Value: de.Value as string ?? ""))
+            .Where(ev => !TicketLauncher.IsClaudeSessionVariable(ev.Name))
+            .OrderBy(ev => ev.Name, StringComparer.OrdinalIgnoreCase)
+            .Select(ev => $"{ev.Name}={ev.Value}\0");
+        return string.Concat(entries) + "\0";
     }
 
     internal void Write(byte[] data)

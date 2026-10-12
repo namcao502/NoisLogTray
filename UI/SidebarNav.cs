@@ -21,7 +21,6 @@ internal sealed class SidebarNav : Panel
     private static readonly Font GlyphFont = UiScale.Font("Segoe MDL2 Assets", 12F);
     private static readonly Font LabelFont = UiScale.Font("Segoe UI", 9.5F);
     private static readonly Font BadgeFont = UiScale.Font("Segoe UI", 7.5F, FontStyle.Bold);
-    private static readonly Color BadgeColor = Color.FromArgb(230, 76, 76);
 
     private readonly List<(ShellPage Page, string Glyph, Func<string> Label, ClickableRow Row)> _items = new();
     private readonly Dictionary<ShellPage, int> _badges = new();
@@ -44,6 +43,7 @@ internal sealed class SidebarNav : Panel
         AddItem(ShellPage.Tasks, "", () => PageLabel(ShellPage.Tasks));
         AddItem(ShellPage.Week, "", () => PageLabel(ShellPage.Week));
         AddItem(ShellPage.Claude, "", () => PageLabel(ShellPage.Claude));
+        AddItem(ShellPage.Ticket, "", () => PageLabel(ShellPage.Ticket));
         AddItem(ShellPage.Settings, "", () => PageLabel(ShellPage.Settings));
 
         ApplyLanguage();
@@ -69,6 +69,7 @@ internal sealed class SidebarNav : Panel
         ShellPage.Tasks => "Tasks",
         ShellPage.Week => Lang.T("Week", "Tuần"),
         ShellPage.Claude => "Claude",
+        ShellPage.Ticket => "Ticket",
         ShellPage.Settings => Lang.T("Settings", "Cài đặt"),
         _ => throw new ArgumentOutOfRangeException(nameof(page)),
     };
@@ -185,7 +186,7 @@ internal sealed class SidebarNav : Panel
             TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
         var badge = _badges.GetValueOrDefault(page);
-        using var badgeBrush = new SolidBrush(BadgeColor);
+        using var badgeBrush = new SolidBrush(Theme.Badge);
         if (_collapsed)
         {
             if (badge != 0)

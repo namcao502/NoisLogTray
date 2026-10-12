@@ -32,6 +32,8 @@ internal sealed class TasksPage : UserControl, IShellPage
     internal event Func<string, Task>? ReadyToTestRequested;
     // Raised at the end of every Reload with AttentionCount, for the sidebar badge.
     internal event Action<int>? AttentionChanged;
+    // Raised after this page moved or added a ticket, so the host refreshes the other ticket views (Dashboard, Ticket page).
+    internal event Action? BoardChanged;
 
     private readonly TicketStore _ticketStore;
     private readonly TicketBoard _ticketBoard;
@@ -285,7 +287,6 @@ internal sealed class TasksPage : UserControl, IShellPage
     {
         StartStage.Fetching => Lang.T("Fetching origin...", "Đang fetch origin..."),
         StartStage.CreatingWorktree => Lang.T("Creating worktree...", "Đang tạo worktree..."),
-        StartStage.OpeningVsCode => Lang.T("Opening VS Code...", "Đang mở VS Code..."),
         StartStage.UpdatingJira => Lang.T("Updating Jira...", "Đang cập nhật Jira..."),
         _ => throw new ArgumentOutOfRangeException(nameof(stage), stage, null),
     };
@@ -441,7 +442,11 @@ internal sealed class TasksPage : UserControl, IShellPage
     private void OnTicketMoved(string ticketKey, bool fromKeyboard)
     {
         if (fromKeyboard) _focusTicketKey = ticketKey;
-        BeginInvoke(new Action(Reload));
+        BeginInvoke(new Action(() =>
+        {
+            Reload();
+            BoardChanged?.Invoke();
+        }));
     }
 
     // Deferred: the host calls SetTicketBusy, whose Render disposes the clicked button.
@@ -542,6 +547,7 @@ internal sealed class TasksPage : UserControl, IShellPage
                 ShowAddResult(Lang.T("Added", "Đã thêm"), Green);
                 _addBox.Text = string.Empty;
                 Reload();
+                BoardChanged?.Invoke();
             }
             else
                 ShowAddResult(Lang.T("Already on the board", "Đã có trong danh sách"), null);

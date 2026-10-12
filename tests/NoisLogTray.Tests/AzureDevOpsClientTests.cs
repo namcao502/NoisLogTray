@@ -40,4 +40,12 @@ public class AzureDevOpsClientTests
         Assert.Empty(lookup.Prs);
         Assert.True(lookup.IsComplete);
     }
+
+    [Fact]
+    public void PullRequestUrl_PointsAtTheRepoPr()
+    {
+        Assert.Equal(
+            "https://dev.azure.com/TeeShirtCentral/MDP/_git/Portal-Angular/pullrequest/42",
+            AzureDevOpsClient.PullRequestUrl("Portal-Angular", 42));
+    }
 }

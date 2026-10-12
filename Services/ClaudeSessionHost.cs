@@ -1,13 +1,16 @@
 namespace NoisLogTray;
 
-// Owns the in-app Claude session for the life of the tray, so rebuilding the window (a Settings
-// save) does not kill it. Keeps recent output so a new page can replay the screen on attach.
+// Owns one Claude session (the general page's, or a ticket's) for the life of the tray, so rebuilding the
+// window (a Settings save) does not kill it. Keeps recent output so a new view can replay the screen on attach.
 internal sealed class ClaudeSessionHost : IDisposable
 {
     private const int ReplayLimitBytes = 1 << 20;
 
     private readonly object _lock = new();
     private readonly Func<string> _workingDirectory;
+    private readonly Func<string?>? _argument;
+    private readonly Func<string?>? _settingsFile;
+    private readonly bool _fallBackToProfile;
     private readonly LinkedList<byte[]> _replay = new();
     private int _replayBytes;
     private PseudoConsoleSession? _session;
@@ -16,9 +19,19 @@ internal sealed class ClaudeSessionHost : IDisposable
     // Raised on the pty read thread; the subscriber marshals to the UI.
     internal event Action? Exited;
 
-    internal ClaudeSessionHost(Func<string> workingDirectory)
+    // Raised on the caller's thread after a successful Start.
+    internal event Action? Started;
+
+    // Raised on the caller's thread when Start begins, before the old session stops; Start may still throw after it.
+    internal event Action? Starting;
+
+    internal ClaudeSessionHost(Func<string> workingDirectory, Func<string?>? argument = null, bool fallBackToProfile = true,
+        Func<string?>? settingsFile = null)
     {
         _workingDirectory = workingDirectory;
+        _argument = argument;
+        _settingsFile = settingsFile;
+        _fallBackToProfile = fallBackToProfile;
     }
 
     internal bool IsRunning
@@ -53,15 +66,31 @@ internal sealed class ClaudeSessionHost : IDisposable
         }
     }
 
-    // Starts claude in the dev repo (the user profile if the repo is missing). Throws Win32Exception.
+    // A flag ("--continue") goes bare; a prompt is quoted so the CLI gets it as one argument (so it must hold no quote).
+    // The settings file (the app's hooks) is a path, so it is always quoted.
+    internal static string BuildCommandLine(string executable, string? settingsFile, string? argument)
+    {
+        var command = $"\"{executable}\"";
+        if (!string.IsNullOrEmpty(settingsFile)) command += $" --settings \"{settingsFile}\"";
+        if (string.IsNullOrEmpty(argument)) return command;
+        return argument.StartsWith("--", StringComparison.Ordinal) ? $"{command} {argument}" : $"{command} \"{argument}\"";
+    }
+
+    // Starts claude in the working directory (the user profile if it is missing and fallBackToProfile).
+    // Throws Win32Exception, or DirectoryNotFoundException when the directory is missing and there is no fallback.
     internal void Start(short columns, short rows)
     {
+        Starting?.Invoke();
         Stop();
         var directory = _workingDirectory();
-        if (!Directory.Exists(directory)) directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!Directory.Exists(directory))
+        {
+            if (!_fallBackToProfile) throw new DirectoryNotFoundException($"Directory not found: {directory}");
+            directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        }
         // The native installer puts claude.exe here; otherwise CreateProcess searches PATH.
         var localClaude = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "bin", "claude.exe");
-        var commandLine = File.Exists(localClaude) ? $"\"{localClaude}\"" : "claude.exe";
+        var commandLine = BuildCommandLine(File.Exists(localClaude) ? localClaude : "claude.exe", _settingsFile?.Invoke(), _argument?.Invoke());
 
         var session = new PseudoConsoleSession(commandLine, directory, columns, rows);
         lock (_lock)
@@ -74,6 +103,7 @@ internal sealed class ClaudeSessionHost : IDisposable
         session.Output += bytes => OnOutput(session, bytes);
         session.Exited += () => OnExited(session);
         AppLogger.Info($"[claude] session started in {directory}");
+        Started?.Invoke();
     }
 
     internal void Write(byte[] data)

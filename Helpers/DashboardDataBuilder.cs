@@ -56,29 +56,28 @@ internal static class DashboardDataBuilder
 
     // "BE main ✓ · dev ● | FE dev ✓": per repo (BE first), the latest PR of each branch (completed ✓,
     // active ●, abandoned ✕; anything else "?"), main first.
-    internal static string PrSummary(string ticketKey, IReadOnlyDictionary<string, TrackedPr> prTracking)
+    internal static string PrSummary(string ticketKey, IReadOnlyDictionary<string, TrackedPr> prTracking) =>
+        string.Join(" | ", LatestPrs(ticketKey, prTracking)
+            .GroupBy(pr => (pr.RepoLabel, pr.Branch)).Select(group => group.MaxBy(pr => pr.PullRequestId)!)
+            .GroupBy(pr => pr.RepoLabel)
+            .Select(group => group.Key + " " + string.Join(" · ", group.Select(pr => $"{pr.Branch} {StatusGlyph(pr.Status)}"))));
+
+    // The latest PR per repo + branch; BE first, then repo label, main before other branches.
+    internal static List<TicketPr> LatestPrs(string ticketKey, IReadOnlyDictionary<string, TrackedPr> prTracking)
     {
-        var latestPerRepoBranch = new Dictionary<(string Repo, string Branch), (int PullRequestId, TrackedPr Pr)>();
+        var latest = new Dictionary<(string Repository, string Branch), TicketPr>();
         foreach (var entry in prTracking)
         {
             var parts = entry.Key.Split('|');
-            if (parts.Length != 3 || parts[0] != ticketKey) continue;
-            if (!int.TryParse(parts[2], out var pullRequestId)) continue;
-
-            var repoBranch = (RepoLabel(entry.Value.Repository), parts[1]);
-            var isNewer = !latestPerRepoBranch.TryGetValue(repoBranch, out var existing) || pullRequestId > existing.PullRequestId;
-            if (isNewer)
-                latestPerRepoBranch[repoBranch] = (pullRequestId, entry.Value);
+            if (parts.Length != 3 || parts[0] != ticketKey || !int.TryParse(parts[2], out var pullRequestId)) continue;
+            var repository = entry.Value.Repository ?? AzureDevOpsClient.BackendRepository;
+            if (latest.TryGetValue((repository, parts[1]), out var existing) && existing.PullRequestId >= pullRequestId) continue;
+            latest[(repository, parts[1])] = new TicketPr(repository, parts[1], pullRequestId, entry.Value.Status, entry.Value.CommentCount);
         }
-
-        return string.Join(" | ", latestPerRepoBranch
-            .GroupBy(rb => rb.Key.Repo)
-            .OrderBy(group => group.Key == "BE" ? 0 : 1)
-            .ThenBy(group => group.Key, StringComparer.Ordinal)
-            .Select(group => group.Key + " " + string.Join(" · ", group
-                .OrderBy(rb => rb.Key.Branch == MainBranchLabel ? 0 : 1)
-                .ThenBy(rb => rb.Key.Branch, StringComparer.Ordinal)
-                .Select(rb => $"{rb.Key.Branch} {StatusGlyph(rb.Value.Pr.Status)}"))));
+        return latest.Values
+            .OrderBy(pr => pr.RepoLabel == "BE" ? 0 : 1).ThenBy(pr => pr.RepoLabel, StringComparer.Ordinal)
+            .ThenBy(pr => pr.Branch == MainBranchLabel ? 0 : 1).ThenBy(pr => pr.Branch, StringComparer.Ordinal)
+            .ToList();
     }
 
     // Backend-DotNet (or an entry saved before repos were tracked) is "BE"; an Angular repo is "FE".
@@ -89,7 +88,7 @@ internal static class DashboardDataBuilder
         return repository;
     }
 
-    private static string StatusGlyph(string status) => status switch
+    internal static string StatusGlyph(string status) => status switch
     {
         "completed" => "✓",
         "active" => "●",

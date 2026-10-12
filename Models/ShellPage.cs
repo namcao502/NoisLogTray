@@ -8,5 +8,6 @@ internal enum ShellPage
     Tasks,
     Week,
     Claude,
+    Ticket,
     Settings,
 }
