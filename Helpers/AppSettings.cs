@@ -21,6 +21,9 @@ internal sealed class AppSettings
     public int UiZoomPercent { get; set; } = UiScale.DefaultZoomPercent; // read once at startup
     public Dictionary<string, string> Config { get; set; } = new();
     public List<string> OpenTicketTabs { get; set; } = new(); // ticket keys, in tab order
+    public string? ClaudeDirectory { get; set; } // the Claude page's folder; null = the dev repo
+    public List<string> RecentClaudeDirectories { get; set; } = new(); // most recent first
+    public Dictionary<string, string> ClaudeSessionIds { get; set; } = new(); // folder -> the Claude page's last session there
 
     private static readonly JsonSerializerOptions Options = new()
     {
@@ -47,6 +50,8 @@ internal sealed class AppSettings
             {
                 parsed.Config ??= new();
                 parsed.OpenTicketTabs ??= new();
+                parsed.RecentClaudeDirectories ??= new();
+                parsed.ClaudeSessionIds ??= new();
                 return parsed;
             }
         }

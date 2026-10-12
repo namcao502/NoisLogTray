@@ -38,6 +38,37 @@ public class TicketLauncherTests
         Directory.Delete(projectsRoot, true);
     }
 
+    [Fact]
+    public void GetResumeArgument_ResumesTheSession_WhenItsTranscriptExists()
+    {
+        var projectsRoot = Directory.CreateTempSubdirectory().FullName;
+        var folderPath = @"C:\Project\Backend-DotNet";
+        var sessionId = "0b5f2b8e-3f3c-4a59-9a43-1d2f7c6e8a10";
+        var sessionDirectory = Directory.CreateDirectory(Path.Combine(projectsRoot, TicketLauncher.GetClaudeProjectDirectoryName(folderPath)));
+        File.WriteAllText(Path.Combine(sessionDirectory.FullName, $"{sessionId}.jsonl"), "{}");
+
+        Assert.Equal($"--resume {sessionId}", TicketLauncher.GetResumeArgument(folderPath, sessionId, projectsRoot));
+
+        Directory.Delete(projectsRoot, true);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("not-a-guid")]
+    [InlineData("0b5f2b8e-3f3c-4a59-9a43-1d2f7c6e8a10\" --dangerously-skip-permissions")]
+    [InlineData("1c6a3c9f-0000-4000-8000-000000000000")]
+    public void GetResumeArgument_ReturnsNull_WhenTheIdIsInvalidOrHasNoTranscript(string? sessionId)
+    {
+        var projectsRoot = Directory.CreateTempSubdirectory().FullName;
+        var folderPath = @"C:\Project\Backend-DotNet";
+        var sessionDirectory = Directory.CreateDirectory(Path.Combine(projectsRoot, TicketLauncher.GetClaudeProjectDirectoryName(folderPath)));
+        File.WriteAllText(Path.Combine(sessionDirectory.FullName, "0b5f2b8e-3f3c-4a59-9a43-1d2f7c6e8a10.jsonl"), "{}");
+
+        Assert.Null(TicketLauncher.GetResumeArgument(folderPath, sessionId, projectsRoot));
+
+        Directory.Delete(projectsRoot, true);
+    }
+
     [Theory]
     [InlineData("CLAUDECODE")]
     [InlineData("CLAUDE_CODE_CHILD_SESSION")]

@@ -278,12 +278,13 @@ internal sealed partial class TrayApp : ApplicationContext
             // The session lives in TrayApp so a rebuilt window (Settings save) reattaches instead of killing it.
             if (_claudeHost == null)
             {
-                _claudeHost = new ClaudeSessionHost(() => DevRepoPath, settingsFile: HookSettingsFor(ClaudeAttention.GeneralSessionName));
+                _claudeHost = CreateClaudeHost();
                 TrackClaudeSession(ClaudeAttention.GeneralSessionName, _claudeHost);
             }
-            _claudePage = new ClaudePage(_claudeHost);
+            _claudePage = new ClaudePage(_claudeHost, ClaudeFolderChoices);
             _shell.AddPage(ShellPage.Claude, _claudePage);
             _claudePage.PageRequested += ShowShell;
+            _claudePage.FolderChosen += OnClaudeFolderChosen;
             RefreshClaudeAttention();
             _settingsPage = new SettingsPage();
             _shell.AddPage(ShellPage.Settings, _settingsPage);

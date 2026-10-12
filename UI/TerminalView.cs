@@ -21,6 +21,10 @@ internal sealed class TerminalView : UserControl
     private readonly Panel _bar = new() { Dock = DockStyle.Top };
     private readonly Label _directory = new() { AutoEllipsis = true, TextAlign = ContentAlignment.MiddleLeft };
     private readonly MacButton _restart = MacButton.Secondary(Lang.T("Restart", "Khởi động lại"));
+    // Only on a view whose session may move (the Claude page): ticket tabs are pinned to their worktree.
+    private readonly Func<IReadOnlyList<string>>? _folderChoices;
+    private readonly MacButton? _folderButton;
+    private readonly ContextMenuStrip _folderMenu = ThemedMenuRenderer.CreateMenu();
     private readonly System.Windows.Forms.Timer _flushTimer = new() { Interval = FlushIntervalMs };
     private readonly object _pendingLock = new();
     private readonly MemoryStream _pending = new();
@@ -32,10 +36,14 @@ internal sealed class TerminalView : UserControl
 
     // Ctrl+digit typed inside the terminal (WebView2 swallows them before the form's ProcessCmdKey).
     internal event Action<ShellPage>? PageRequested;
+    // Raised before the session restarts, so the host's working-directory func can already return the new folder.
+    internal event Action<string>? FolderChosen;
 
-    internal TerminalView(ClaudeSessionHost host)
+    internal TerminalView(ClaudeSessionHost host, Func<IReadOnlyList<string>>? folderChoices = null)
     {
         _host = host;
+        _folderChoices = folderChoices;
+        if (folderChoices != null) _folderButton = MacButton.Secondary(FolderButtonText());
         BackColor = Theme.WindowBg;
         _status.Font = UiScale.Font("Segoe UI", 10F);
         _status.ForeColor = Theme.TextSecondary;
@@ -60,6 +68,7 @@ internal sealed class TerminalView : UserControl
             _host.Exited -= OnHostExited;
             _host.Detach(OnHostOutput);
             _flushTimer.Dispose();
+            _folderMenu.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -94,6 +103,15 @@ internal sealed class TerminalView : UserControl
         _restart.Click += (_, _) => RestartSession();
         _bar.Controls.Add(_directory);
         _bar.Controls.Add(_restart);
+        if (_folderButton != null)
+        {
+            _folderButton.OnWindow = true;
+            _folderButton.Size = new Size(ButtonWidths.ToolbarWidth(_folderButton.Font), buttonH);
+            _folderButton.Top = (barH - buttonH) / 2;
+            _folderButton.Click += (_, _) => ShowFolderMenu();
+            _folderMenu.ShowCheckMargin = true;
+            _bar.Controls.Add(_folderButton);
+        }
         _bar.Resize += (_, _) => LayoutBar();
         UpdateDirectory();
     }
@@ -101,7 +119,63 @@ internal sealed class TerminalView : UserControl
     private void LayoutBar()
     {
         _restart.Left = _bar.ClientSize.Width - _restart.Width - UiScale.S(8);
-        _directory.Width = Math.Max(0, _restart.Left - _directory.Left - UiScale.S(12));
+        var labelRight = _restart.Left;
+        if (_folderButton != null)
+        {
+            _folderButton.Left = _restart.Left - _folderButton.Width - UiScale.S(6);
+            labelRight = _folderButton.Left;
+        }
+        _directory.Width = Math.Max(0, labelRight - _directory.Left - UiScale.S(12));
+    }
+
+    private static string FolderButtonText() => Lang.T("Folder ▾", "Thư mục ▾");
+
+    // Rebuilt on every open, so a folder picked elsewhere or deleted since shows up right.
+    private void ShowFolderMenu()
+    {
+        if (_folderChoices == null || _folderButton == null) return;
+        _folderMenu.Items.Clear();
+        foreach (var folder in _folderChoices())
+        {
+            var item = new ToolStripMenuItem(folder)
+            {
+                Checked = string.Equals(folder, _host.CurrentDirectory, StringComparison.OrdinalIgnoreCase),
+            };
+            item.Click += (_, _) => ChooseFolder(folder);
+            _folderMenu.Items.Add(item);
+        }
+        _folderMenu.Items.Add(new ToolStripSeparator());
+        var browse = new ToolStripMenuItem(Lang.T("Choose another folder...", "Chọn thư mục khác..."));
+        browse.Click += (_, _) => BrowseFolder();
+        _folderMenu.Items.Add(browse);
+        ThemedMenuRenderer.ShowBelow(_folderMenu, _folderButton);
+    }
+
+    private void BrowseFolder()
+    {
+        using var dialog = new FolderBrowserDialog
+        {
+            Description = Lang.T("Choose the folder Claude runs in", "Chọn thư mục để chạy Claude"),
+            UseDescriptionForTitle = true,
+        };
+        if (_host.CurrentDirectory != null && Directory.Exists(_host.CurrentDirectory)) dialog.InitialDirectory = _host.CurrentDirectory;
+        if (dialog.ShowDialog(FindForm()) == DialogResult.OK) ChooseFolder(dialog.SelectedPath);
+    }
+
+    // A running session (maybe mid-task) is only stopped after a Yes.
+    private void ChooseFolder(string folder)
+    {
+        if (string.Equals(folder, _host.CurrentDirectory, StringComparison.OrdinalIgnoreCase) && _host.IsRunning) return;
+        if (_host.IsRunning)
+        {
+            var answer = MessageBox.Show(FindForm(),
+                Lang.T($"Claude is running. Stop it and start Claude in {folder}?", $"Claude đang chạy. Dừng nó và mở Claude ở {folder}?"),
+                Lang.T("Change folder", "Đổi thư mục"), MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
+            if (answer != DialogResult.Yes) return;
+        }
+        FolderChosen?.Invoke(folder);
+        if (_ready) RestartSession();
+        else UpdateDirectory();
     }
 
     private void UpdateDirectory()
@@ -279,6 +353,7 @@ internal sealed class TerminalView : UserControl
     {
         _restart.Text = Lang.T("Restart", "Khởi động lại");
         _restart.Width = ButtonWidths.ToolbarWidth(_restart.Font);
+        if (_folderButton != null) _folderButton.Text = FolderButtonText();
         LayoutBar();
         UpdateDirectory();
     }
@@ -289,6 +364,7 @@ internal sealed class TerminalView : UserControl
         _bar.BackColor = Theme.WindowBg;
         _directory.ForeColor = Theme.TextSecondary;
         _restart.Invalidate();
+        _folderButton?.Invalidate();
         if (!_ready || _webView.CoreWebView2 == null) return;
         var theme = new
         {

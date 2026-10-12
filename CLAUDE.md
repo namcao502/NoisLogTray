@@ -369,10 +369,19 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   Icons come from the embedded `app.ico` via `AppIcon.Load(size)`.
 - **`ClaudePage`** - a thin `IShellPage` around one `TerminalView`, an interactive `claude` CLI
   inside the window. `ClaudeSessionHost` (owned by `TrayApp`) runs `%UserProfile%\.local\bin\claude.exe`
-  (else `claude.exe` on PATH) under ConPTY in `DEV_REPO_PATH` (the user profile if missing). The
-  command line is built by `ClaudeSessionHost.BuildCommandLine`: `--settings "<file>"` (the hook
-  settings, always quoted) comes first, then the argument - flags such as `--continue` go bare,
-  prompts such as `ship <KEY>` are quoted.
+  (else `claude.exe` on PATH) under ConPTY. Its folder defaults to `DEV_REPO_PATH`; the terminal bar's
+  "Folder" menu (only on this page, not on ticket tabs) lists the dev repo plus up to
+  `ClaudeFolders.MaxRecent` recently picked folders and "Choose another folder...". A pick asks before
+  stopping a running Claude, then restarts it there (`TrayApp.ClaudePage.cs`; `AppSettings.ClaudeDirectory`,
+  null = the dev repo, and `RecentClaudeDirectories`; a vanished folder falls back to the dev repo).
+  The page resumes its own last conversation in that folder with `--resume <id>`
+  (`TicketLauncher.GetResumeArgument`, only while the transcript exists). The id comes from the hooks'
+  `session_id` and is kept per folder in `AppSettings.ClaudeSessionIds`; /clear moves it to the new
+  session. It is not `--continue`, since the user runs other Claude sessions in the dev repo and
+  `--continue` would pick the newest of those. The command line is built by
+  `ClaudeSessionHost.BuildCommandLine`: `--settings "<file>"` (the hook settings, always quoted) comes
+  first, then the argument - flags such as `--continue` / `--resume <id>` go bare, prompts such as
+  `ship <KEY>` are quoted.
 - **`TerminalView`** - the reusable terminal (extracted from `ClaudePage`): it draws a session host with
   **xterm.js** in a **WebView2** (`Assets/terminal/`: `index.html` + vendored xterm 6 and addon-fit,
   MIT). **`WebViewSetup`** creates the one shared WebView2 environment (data in
@@ -601,7 +610,7 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 
 Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
 (the pending log queue), `settings.json` (theme, window position, the open Ticket tabs
-(`openTicketTabs`), **and** the `Config` key/value map of secrets/settings written from Settings,
+(`openTicketTabs`), the Claude page's folder, recent folders and resumable session ids, **and** the `Config` key/value map of secrets/settings written from Settings,
 via `AppSettings`), and `logs/app-yyyy-MM-dd.log` (one file per day), plus `WebView2/` (the web
 views' browser data: terminal and diff) and `claude-hooks/` (one `<session>.json` hook settings
 file per Claude session, rewritten at every session start since it holds the run's port and token).

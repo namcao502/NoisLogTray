@@ -22,6 +22,15 @@ internal static class TicketLauncher
         return null;
     }
 
+    // "--resume <id>" for a session the app itself ran in that folder, when its transcript is still there. Not
+    // --continue: the user runs other Claude sessions in the dev repo, and --continue would pick the newest of theirs.
+    internal static string? GetResumeArgument(string folderPath, string? sessionId, string claudeProjectsRoot)
+    {
+        if (!Guid.TryParse(sessionId, out var sessionGuid)) return null;
+        var transcript = Path.Combine(claudeProjectsRoot, GetClaudeProjectDirectoryName(folderPath), $"{sessionGuid:D}.jsonl");
+        return File.Exists(transcript) ? $"--resume {sessionGuid:D}" : null;
+    }
+
     // Claude Code stores sessions under ~/.claude/projects/<path with non-alphanumerics replaced by '-'>.
     internal static string GetClaudeProjectDirectoryName(string folderPath)
     {

@@ -21,7 +21,7 @@ public class ClaudeAttentionTests
 
         var hookEvent = ClaudeAttention.Parse(json);
 
-        Assert.Equal(new ClaudeHookEvent("Stop", "Bash", "idle_prompt", "agent-1"), hookEvent);
+        Assert.Equal(new ClaudeHookEvent("Stop", "Bash", "idle_prompt", "agent-1", "abc"), hookEvent);
     }
 
     [Theory]

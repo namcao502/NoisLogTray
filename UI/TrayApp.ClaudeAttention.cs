@@ -26,6 +26,7 @@ internal sealed partial class TrayApp
     {
         var host = sessionName == ClaudeAttention.GeneralSessionName ? _claudeHost : _ticketSessions.GetValueOrDefault(sessionName);
         if (host == null || !host.IsRunning) return; // a closed tab's or an ended session's late hook
+        if (sessionName == ClaudeAttention.GeneralSessionName) RememberClaudeSessionId(hookEvent.SessionId);
         ClaudeWaitReason? current = _claudeWaits.TryGetValue(sessionName, out var reason) ? reason : null;
         var next = ClaudeAttention.Next(current, hookEvent);
         if (next == current) return;

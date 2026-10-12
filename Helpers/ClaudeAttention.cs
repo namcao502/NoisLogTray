@@ -16,7 +16,8 @@ internal static class ClaudeAttention
             if (root.ValueKind != JsonValueKind.Object) return null;
             var eventName = ReadString(root, "hook_event_name");
             if (string.IsNullOrEmpty(eventName)) return null;
-            return new ClaudeHookEvent(eventName, ReadString(root, "tool_name"), ReadString(root, "notification_type"), ReadString(root, "agent_id"));
+            return new ClaudeHookEvent(eventName, ReadString(root, "tool_name"), ReadString(root, "notification_type"), ReadString(root, "agent_id"),
+                ReadString(root, "session_id"));
         }
         catch (Exception e) when (e is JsonException || e is InvalidOperationException)
         {

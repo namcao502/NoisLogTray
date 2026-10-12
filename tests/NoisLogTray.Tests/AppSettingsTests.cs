@@ -90,6 +90,17 @@ public class AppSettingsTests : IDisposable
     }
 
     [Fact]
+    public void Load_NullClaudeFolderLists_BecomeEmpty()
+    {
+        File.WriteAllText(_path, "{ \"recentClaudeDirectories\": null, \"claudeSessionIds\": null }");
+
+        var read = AppSettings.LoadOrBackup(out var corrupt, _path);
+        Assert.False(corrupt);
+        Assert.Empty(read.RecentClaudeDirectories);
+        Assert.Empty(read.ClaudeSessionIds);
+    }
+
+    [Fact]
     public void OpenTicketTabs_RoundTripInOrder()
     {
         AppSettings.Save(new AppSettings { OpenTicketTabs = new List<string> { "MDP-2", "MDP-1" } }, _path);
