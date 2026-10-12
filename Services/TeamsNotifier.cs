@@ -13,11 +13,45 @@ internal sealed class TeamsNotifier
 
     private readonly string? _webhookUrl;
     private readonly string _jiraBaseUrl;
+    private readonly string? _postWorkflowUrl;
 
-    internal TeamsNotifier(string? webhookUrl, string jiraBaseUrl)
+    internal TeamsNotifier(string? webhookUrl, string jiraBaseUrl, string? postWorkflowUrl = null)
     {
         _webhookUrl = webhookUrl;
         _jiraBaseUrl = jiraBaseUrl;
+        _postWorkflowUrl = postWorkflowUrl;
+    }
+
+    internal bool CanPostAsUser => !string.IsNullOrEmpty(_postWorkflowUrl);
+
+    // To the user's own Power Automate workflow, which posts the message as them. Unlike the cards the caller shows
+    // the outcome, so failures come back as false (logged without the URL, whose signature is a secret).
+    internal async Task<bool> PostAsUserAsync(string text, CancellationToken ct)
+    {
+        if (string.IsNullOrEmpty(_postWorkflowUrl))
+        {
+            return false;
+        }
+
+        try
+        {
+            var (subject, body) = TeamsPost.SplitSubject(text);
+            var payload = new JsonObject { ["subject"] = subject, ["message"] = TeamsPost.ToHtml(body) };
+            using var content = new StringContent(payload.ToJsonString(), Encoding.UTF8, "application/json");
+            using var response = await HttpClient.PostAsync(_postWorkflowUrl, content, ct);
+            response.EnsureSuccessStatusCode();
+            return true;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            return false; // the user cancelled: not an error
+        }
+        catch (Exception ex)
+        {
+            var status = ex is HttpRequestException httpException && httpException.StatusCode.HasValue ? $" {(int)httpException.StatusCode.Value}" : "";
+            AppLogger.Error($"Teams post as user: {ex.GetType().Name}{status}");
+            return false;
+        }
     }
 
     internal async Task PostNewTicketAsync(JiraTicket ticket)

@@ -186,7 +186,7 @@ internal sealed partial class TrayApp : ApplicationContext
 
     private static (TeamsNotifier Teams, IAzureDevOpsClient? Ado) CreatePrIntegrations(AppConfig? config)
     {
-        var teams = new TeamsNotifier(config?.TeamsWebhookUrl, config?.JiraBaseUrl.TrimEnd('/') ?? AppConfig.DefaultJiraBaseUrl);
+        var teams = new TeamsNotifier(config?.TeamsWebhookUrl, config?.JiraBaseUrl.TrimEnd('/') ?? AppConfig.DefaultJiraBaseUrl, config?.TeamsPostWorkflowUrl);
         var pat = config?.AzureDevOpsPat;
         return (teams, string.IsNullOrEmpty(pat) ? null : new AzureDevOpsClient(pat));
     }
@@ -268,6 +268,7 @@ internal sealed partial class TrayApp : ApplicationContext
             // Deferred: the x button is on the Click stack and SetTabs disposes it.
             _ticketPage.CloseRequested += ticketKey => shell.BeginInvoke(() => CloseTicketTab(ticketKey));
             _ticketPage.VsCodeRequested += OpenInVsCode;
+            _ticketPage.TeamsPostRequested += OpenTeamsPost;
             _ticketPage.SelectionChanged += ticketKey => _selectedTicket = ticketKey; // only stores: SetTabs raises this itself
             _ticketPage.PageRequested += ShowShell;
             _ticketPage.SetTabs(_openTickets, _selectedTicket); // before the page is shown, so HasOpenTabs is right for Esc

@@ -29,6 +29,7 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     // Raised from the × button's Click: defer the SetTabs it leads to, since SetTabs disposes that button.
     internal event Action<string>? CloseRequested;
     internal event Action<string>? VsCodeRequested;
+    internal event Action<string>? TeamsPostRequested;
 
     // A tab click or SetTabs moved the selection; TrayApp remembers it (and must not call SetTabs from here).
     internal event Action<string?>? SelectionChanged;
@@ -78,6 +79,7 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
             _views.Remove(removedKey);
             view.PageRequested -= OnViewPageRequested;
             view.VsCodeRequested -= OnViewVsCodeRequested;
+            view.TeamsPostRequested -= OnViewTeamsPostRequested;
             view.Dispose();
         }
         var created = false;
@@ -143,6 +145,7 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
         };
         view.PageRequested += OnViewPageRequested;
         view.VsCodeRequested += OnViewVsCodeRequested;
+        view.TeamsPostRequested += OnViewTeamsPostRequested;
         _viewHost.Controls.Add(view);
         _views[key] = view;
     }
@@ -238,6 +241,11 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     private void OnViewVsCodeRequested(string key)
     {
         VsCodeRequested?.Invoke(key);
+    }
+
+    private void OnViewTeamsPostRequested(string key)
+    {
+        TeamsPostRequested?.Invoke(key);
     }
 
     private void ApplyTheme()

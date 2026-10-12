@@ -12,7 +12,7 @@ internal static class Secrets
     private const string Prefix = "enc:";
 
     // Config keys whose values are encrypted at rest.
-    internal static readonly string[] Keys = { "JIRA_API_TOKEN", "HRM_API_KEY", "AZURE_DEVOPS_PAT", "TEAMS_WEBHOOK_URL" };
+    internal static readonly string[] Keys = { "JIRA_API_TOKEN", "HRM_API_KEY", "AZURE_DEVOPS_PAT", "TEAMS_WEBHOOK_URL", "TEAMS_POST_WORKFLOW_URL" };
 
     internal static bool IsSecretKey(string key) => Array.IndexOf(Keys, key) >= 0;
 

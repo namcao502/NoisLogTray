@@ -107,4 +107,23 @@ public class AppSettingsTests : IDisposable
 
         Assert.Equal(new[] { "MDP-2", "MDP-1" }, AppSettings.Load(_path).OpenTicketTabs);
     }
+
+    [Fact]
+    public void Load_NullTeamsPostedAt_BecomesEmpty()
+    {
+        File.WriteAllText(_path, "{ \"teamsPostedAt\": null }");
+
+        var read = AppSettings.LoadOrBackup(out var corrupt, _path);
+        Assert.False(corrupt);
+        Assert.Empty(read.TeamsPostedAt);
+    }
+
+    [Fact]
+    public void TeamsPostedAt_RoundTrips()
+    {
+        var postedAt = new DateTimeOffset(2026, 10, 12, 14, 30, 0, TimeSpan.FromHours(7));
+        AppSettings.Save(new AppSettings { TeamsPostedAt = new Dictionary<string, DateTimeOffset> { ["MDP-1"] = postedAt } }, _path);
+
+        Assert.Equal(postedAt, AppSettings.Load(_path).TeamsPostedAt["MDP-1"]);
+    }
 }

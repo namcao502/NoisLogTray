@@ -17,6 +17,9 @@ internal sealed class TicketWorkspaceView : UserControl
     private static readonly Font SummaryFont = UiScale.Font("Segoe UI", 10F);
     private static readonly Font PrFont = UiScale.Font("Segoe UI", 8.5F);
 
+    private const string TeamsLabelEnglish = "Post to Teams...";
+    private const string TeamsLabelVietnamese = "Đăng Teams...";
+
     private readonly string _jiraBaseUrl;
     private readonly Func<IReadOnlyList<TicketWorktree>> _worktrees;
     private readonly Panel _header = new() { Dock = DockStyle.Top };
@@ -29,6 +32,7 @@ internal sealed class TicketWorkspaceView : UserControl
     private readonly MacButton _claudeButton = MacButton.Secondary("Claude");
     private readonly MacButton _changesButton = MacButton.Secondary(string.Empty);
     private readonly MacButton _vsCodeButton = MacButton.Secondary("VS Code");
+    private readonly MacButton _teamsButton = MacButton.Secondary(string.Empty);
     private readonly TerminalView _terminal;
     private ChangesView? _changes;
     private bool _showingChanges;
@@ -38,6 +42,7 @@ internal sealed class TicketWorkspaceView : UserControl
     // Ctrl+digit typed inside either view.
     internal event Action<ShellPage>? PageRequested;
     internal event Action<string>? VsCodeRequested;
+    internal event Action<string>? TeamsPostRequested;
 
     internal string TicketKey { get; }
 
@@ -128,28 +133,32 @@ internal sealed class TicketWorkspaceView : UserControl
 
         _claudeButton.AccessibleName = "Claude";
         _vsCodeButton.AccessibleName = "VS Code";
-        foreach (var button in new[] { _claudeButton, _changesButton, _vsCodeButton })
+        foreach (var button in new[] { _claudeButton, _changesButton, _vsCodeButton, _teamsButton })
         {
             button.OnWindow = true;
             button.Size = new Size(ButtonWidths.ToolbarWidth(button.Font), ButtonH);
         }
+        // Fits both labels, so a language switch never resizes it.
+        _teamsButton.Width = Math.Max(_teamsButton.Width, new[] { TeamsLabelEnglish, TeamsLabelVietnamese }
+            .Max(label => TextRenderer.MeasureText(label, _teamsButton.Font).Width) + UiScale.S(24));
         _claudeButton.Click += (_, _) => ShowTerminal();
         _changesButton.Click += (_, _) => ShowChanges();
         _vsCodeButton.Click += (_, _) => VsCodeRequested?.Invoke(TicketKey);
+        _teamsButton.Click += (_, _) => TeamsPostRequested?.Invoke(TicketKey);
         UpdateViewButtons();
 
         _header.Controls.Add(_divider);
-        _header.Controls.AddRange(new Control[] { _keyLink, _summary, _facts, _prLinks, _claudeButton, _changesButton, _vsCodeButton });
+        _header.Controls.AddRange(new Control[] { _keyLink, _summary, _facts, _prLinks, _claudeButton, _changesButton, _vsCodeButton, _teamsButton });
         _header.Resize += (_, _) => LayoutHeader();
         LayoutHeader();
     }
 
-    // Row 1: key, summary and the three buttons at the right; then the facts and the PR links, each wrapping.
+    // Row 1: key, summary and the four buttons at the right; then the facts and the PR links, each wrapping.
     private void LayoutHeader()
     {
         var width = _header.ClientSize.Width;
         var buttonX = width - RightPad;
-        foreach (var button in new[] { _vsCodeButton, _changesButton, _claudeButton })
+        foreach (var button in new[] { _teamsButton, _vsCodeButton, _changesButton, _claudeButton })
         {
             buttonX -= button.Width;
             button.SetBounds(buttonX, TopPad, button.Width, ButtonH);
@@ -270,6 +279,8 @@ internal sealed class TicketWorkspaceView : UserControl
     {
         _changesButton.Text = Lang.T("Changes", "Thay đổi");
         _changesButton.AccessibleName = _changesButton.Text;
+        _teamsButton.Text = Lang.T(TeamsLabelEnglish, TeamsLabelVietnamese);
+        _teamsButton.AccessibleName = _teamsButton.Text;
         RenderInfo();
     }
 }

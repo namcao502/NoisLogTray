@@ -45,6 +45,7 @@ public class SecretsTests
     {
         Assert.True(Secrets.IsSecretKey("JIRA_API_TOKEN"));
         Assert.True(Secrets.IsSecretKey("HRM_API_KEY"));
+        Assert.True(Secrets.IsSecretKey("TEAMS_POST_WORKFLOW_URL"));
         Assert.False(Secrets.IsSecretKey("JIRA_EMAIL"));
     }
 }

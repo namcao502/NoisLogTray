@@ -24,6 +24,7 @@ internal sealed class AppSettings
     public string? ClaudeDirectory { get; set; } // the Claude page's folder; null = the dev repo
     public List<string> RecentClaudeDirectories { get; set; } = new(); // most recent first
     public Dictionary<string, string> ClaudeSessionIds { get; set; } = new(); // folder -> the Claude page's last session there
+    public Dictionary<string, DateTimeOffset> TeamsPostedAt { get; set; } = new(); // ticket key -> when its Teams post was sent
 
     private static readonly JsonSerializerOptions Options = new()
     {
@@ -52,6 +53,7 @@ internal sealed class AppSettings
                 parsed.OpenTicketTabs ??= new();
                 parsed.RecentClaudeDirectories ??= new();
                 parsed.ClaudeSessionIds ??= new();
+                parsed.TeamsPostedAt ??= new();
                 return parsed;
             }
         }

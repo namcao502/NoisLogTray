@@ -94,7 +94,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `TicketQueue`, `UpdateService` (startup GitHub-Releases update check), and the Tasks
   board: `TicketStore` (JSON state files), `TicketBoard` (section logic), `TicketPoller` (Jira poll),
   `AzureDevOpsClient` + `PrTracker` + `PrUpdateChecker` (PR tracking), `TeamsNotifier`
-  (Teams webhook cards), `JiraStatusFlow` (the walk to Ready to Test); the Claude terminal:
+  (Teams webhook cards, plus `PostAsUserAsync` for the ticket tab's own post), `JiraStatusFlow` (the walk to Ready to Test); the Claude terminal:
   `PseudoConsoleSession` (one child process on a Windows ConPTY, P/Invoke; its environment drops
   `CLAUDE*`/`ANTHROPIC*` via `BuildEnvironmentBlock`, so a tray started from a Claude Code session
   does not make the embedded claude a child session with transcripts off), `ClaudeSessionHost`
@@ -113,7 +113,8 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `AppIcon`, `TicketSort` (earliest due first, undated last, then key; Tasks + Dashboard),
   `PrCommentAlerts` (pure edits of the unseen-PR-comment map), `DashboardDataBuilder` (Dashboard data),
   `ClaudeAttention` (pure: parses a hook payload, maps it to the session's wait, words the notice),
-  `Retry` (transient-transport-failure retry with backoff, used by the Jira/Graph/HRM clients).
+  `Retry` (transient-transport-failure retry with backoff, used by the Jira/Graph/HRM clients),
+  `TeamsPost` (pure: the ticket's Teams post draft, its subject/body split and the body's HTML).
 - `Models/` - record types (+ the `CredentialCheck` and `NoticeKind` enums): `QueueEntry`,
   `JiraSuggestion`/`JiraVerifyResult`, `DrainResult`/`EntryLogResult`/`OffWriteResult`,
   `GraphTscOptions`, `TimeSlot`, `ToolEnvelope`, `CredentialCheck`, `UpdateInfo`; Tasks: `JiraTicket`, `DismissedTicket`,
@@ -151,7 +152,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `Card` sized to the page width, up to 1100px; from `SettingsPanel.WideMinWidth` the option groups
   and the Jira site/email share a row; a width change rebuilds the panel and keeps typed values;
   Dev repo path has a "Browse..." folder picker), `CredentialsForm` (a thin dialog around `SettingsPanel`, used only for first-run and
-  while the config is invalid), and
+  while the config is invalid), `TeamsPostForm` (the Teams post editor, see the Ticket page), and
   owner-drawn controls: `NotificationBell` + `NoticeToast` (see "Notices" under `ShellForm`),
   `WindowGlyphButton` (header menu / minimize / maximize-restore glyphs),
   `ThemedMenuRenderer` (themed `ContextMenuStrip`s, opened right-aligned under their button
@@ -402,12 +403,25 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
 - **`TicketWorkspacePage`** (with `TicketWorkspaceView`) - the Ticket page (`ShellPage.Ticket`, the
   sidebar row after Claude, Ctrl+6): a tab strip (a `MacButton` plus an "x" per ticket, an
   empty-state label when none is open, `HasOpenTabs`; events `CloseRequested` / `VsCodeRequested` /
-  `SelectionChanged` / `PageRequested`) over the selected ticket's `TicketWorkspaceView`. The view
+  `TeamsPostRequested` / `SelectionChanged` / `PageRequested`) over the selected ticket's `TicketWorkspaceView`. The view
   has a header - the Jira key link, the summary, `TaskRow.Facts`, the PR links
   (`DashboardDataBuilder.LatestPrs` -> `TicketPr`, `Url` from `AzureDevOpsClient.PullRequestUrl`)
-  and the Claude / Changes / VS Code buttons - over a `TerminalView` or a `ChangesView` (created on
+  and the Claude / Changes / VS Code / "Post to Teams..." buttons - over a `TerminalView` or a `ChangesView` (created on
   the first Changes click; both live while the tab is open). VS Code opens only the backend worktree
   folder (`TicketLauncher.OpenVsCode`), with no Claude inside it.
+  **Post to Teams** (`TrayApp.TeamsPost.cs`) posts a ticket announcement **as the user**: the app POSTs
+  `{"subject": <first line>, "message": <the rest as HTML>}` to the user's own Power Automate workflow
+  (`TEAMS_POST_WORKFLOW_URL`), which posts it in a channel under their account. Without that URL the button
+  is only a notice. `TeamsPostForm` opens on `docs\<KEY>\teams-post.md` (dev repo first, then the ticket's
+  worktree) or else `TeamsPost.Build`'s template (`<KEY> <summary>`, an empty description line, then `[BE]` /
+  `[FE <App>]` blocks of the tracked PRs), with the caret on the description line. A blank post or one with
+  only the title line is refused in the dialog; a ticket already posted (`AppSettings.TeamsPostedAt`, entries
+  kept 180 days) asks before posting again; closing the dialog while sending cancels the request. The
+  workflow answers 202 on receipt, so a failure inside the flow is not seen by the app.
+  **Workflow setup (once):** in Teams create a flow from "Send webhook alerts to a channel", edit it in
+  make.powerautomate.com, replace the "Post card" action in the condition's True branch with "Post message in
+  a chat or channel" (Post as: User, Post in: Channel, Message = `triggerBody()?['message']`, Subject =
+  `triggerBody()?['subject']`), set the trigger to "Anyone", save and paste the trigger URL into Settings.
   **Tabs and sessions** live in `TrayApp.TicketTabs.cs`, not in the page, so a shell rebuild
   reattaches: `_ticketSessions` holds one `ClaudeSessionHost` per open ticket, created with
   `fallBackToProfile: false` (a vanished worktree must not silently run Claude elsewhere) and the
@@ -588,7 +602,7 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   writes are **atomic** (temp + rename) and a corrupt file is preserved as
   `settings.json.bad` rather than silently reset (`AppSettings.LoadOrBackup`). The
   project `.env` is gitignored and never copied to a build. Secret keys
-  (`JIRA_API_TOKEN`, `HRM_API_KEY`, `AZURE_DEVOPS_PAT`, `TEAMS_WEBHOOK_URL`, see `Secrets.Keys`) are encrypted at rest with
+  (`JIRA_API_TOKEN`, `HRM_API_KEY`, `AZURE_DEVOPS_PAT`, `TEAMS_WEBHOOK_URL`, `TEAMS_POST_WORKFLOW_URL`, see `Secrets.Keys`) are encrypted at rest with
   Windows DPAPI (CurrentUser) - stored `enc:`-prefixed, decrypted only when building
   the runtime config; `AppConfig` upgrades any leftover plaintext secret on load.
   Required keys: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `HRM_API_KEY`.
@@ -603,6 +617,7 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   `AZURE_DEVOPS_PAT` (enables PR tracking) and `TEAMS_WEBHOOK_URL` (enables Teams posts); both are
   imported once from `<DEV_REPO_PATH>\docs\local-config\tokens.env` (`AppConfig.ImportDevTokens`)
   when not already in the config - a key the user cleared to empty is never re-imported,
+  `TEAMS_POST_WORKFLOW_URL` (the user's own "post as me" workflow for the ticket tab's Post to Teams; never imported),
   `HRM_PROJECT_ID`, `MS_GRAPH_TOKEN` (override that skips the sniff),
   `TSC_GRAPH_DRIVE_ID` / `_ITEM_ID` / `_SHARE_URL` / `_WORKSHEET`.
 
@@ -610,7 +625,8 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 
 Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
 (the pending log queue), `settings.json` (theme, window position, the open Ticket tabs
-(`openTicketTabs`), the Claude page's folder, recent folders and resumable session ids, **and** the `Config` key/value map of secrets/settings written from Settings,
+(`openTicketTabs`), the Claude page's folder, recent folders and resumable session ids, when each ticket was last posted to
+Teams (`teamsPostedAt`), **and** the `Config` key/value map of secrets/settings written from Settings,
 via `AppSettings`), and `logs/app-yyyy-MM-dd.log` (one file per day), plus `WebView2/` (the web
 views' browser data: terminal and diff) and `claude-hooks/` (one `<session>.json` hook settings
 file per Claude session, rewritten at every session start since it holds the run's port and token).
