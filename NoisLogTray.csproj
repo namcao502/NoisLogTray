@@ -64,6 +64,16 @@
     <PackageReference Include="ModelContextProtocol" Version="2.1.0" />
   </ItemGroup>
 
+  <!-- IncludeNativeLibrariesForSelfExtract would bundle Playwright's node.exe into the single-file exe, and Playwright
+       only looks for it in .playwright\node beside the exe, so TSC sign-in fails with "driver folder missing". -->
+  <Target Name="KeepPlaywrightDriverBesideExe" AfterTargets="CopyPlaywrightFilesToOutput">
+    <ItemGroup>
+      <Content Condition="'%(Content.NuGetPackageId)' == 'Microsoft.Playwright'">
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </Content>
+    </ItemGroup>
+  </Target>
+
   <!-- WebView2's targets always reference its WPF wrapper, which clashes with WinForms' WindowsBase (MSB3277). -->
   <Target Name="DropWebView2Wpf" BeforeTargets="ResolveAssemblyReferences">
     <ItemGroup>
