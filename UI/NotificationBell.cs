@@ -4,7 +4,7 @@ using System.Drawing.Drawing2D;
 
 namespace NoisLogTray;
 
-// Header icon button next to the theme toggle: a GDI-drawn bell with a red dot while
+// Header icon button next to the theme toggle: the Icons bell with a red dot while
 // there are notices the user has not opened. The owner handles Click (opens the history).
 internal sealed class NotificationBell : Control
 {
@@ -55,21 +55,7 @@ internal sealed class NotificationBell : Control
         using (var brush = new SolidBrush(_hover ? Theme.SecondaryBtnHover : Theme.SecondaryBtn))
             g.FillPath(brush, path);
 
-        var cx = Width / 2f;
-        var cy = Height / 2f;
-        static float S(float logical) => UiScale.S(logical);
-        using (var bell = new GraphicsPath())
-        using (var brush = new SolidBrush(Theme.SecondaryBtnText))
-        {
-            // Dome, flared sides, flat rim; then the clapper below the rim.
-            bell.AddArc(cx - S(5f), cy - S(8f), S(10f), S(10f), 180, 180);
-            bell.AddLine(cx + S(5f), cy - S(3f), cx + S(7f), cy + S(4f));
-            bell.AddLine(cx + S(7f), cy + S(4f), cx - S(7f), cy + S(4f));
-            bell.AddLine(cx - S(7f), cy + S(4f), cx - S(5f), cy - S(3f));
-            bell.CloseFigure();
-            g.FillPath(brush, bell);
-            g.FillEllipse(brush, cx - S(2f), cy + S(5f), S(4f), S(4f));
-        }
+        Icons.Draw(g, Icons.Alert, Icons.Medium, ClientRectangle, Theme.SecondaryBtnText);
 
         if (_hasUnread)
         {

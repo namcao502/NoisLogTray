@@ -4,6 +4,16 @@ internal static class DashboardDataBuilder
 {
     private const string MainBranchLabel = "main";
 
+    // The teams-post skill's app names; any other "-Angular" repo is named without the suffix.
+    private static readonly Dictionary<string, string> FrontendAppNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Portal-Angular"] = "Portal",
+        ["ExternalPortal-Angular"] = "External",
+        ["LicensorPortal-Angular"] = "Licensor",
+        ["MobileApp-Angular"] = "Mobile",
+        ["WebApp-Angular"] = "WebApp",
+    };
+
     internal static DashboardData Build(
         IReadOnlyDictionary<string, JiraTicket> pending,
         IReadOnlyDictionary<string, JiraTicket> started,
@@ -54,15 +64,14 @@ internal static class DashboardDataBuilder
             pendingSorted);
     }
 
-    // "BE main ✓ · dev ● | FE dev ✓": per repo (BE first), the latest PR of each branch (completed ✓,
+    // "BE main ✓ · dev ● | FE Portal dev ✓": per repo (BE first), the latest PR of each branch (completed ✓,
     // active ●, abandoned ✕; anything else "?"), main first.
     internal static string PrSummary(string ticketKey, IReadOnlyDictionary<string, TrackedPr> prTracking) =>
         string.Join(" | ", LatestPrs(ticketKey, prTracking)
-            .GroupBy(pr => (pr.RepoLabel, pr.Branch)).Select(group => group.MaxBy(pr => pr.PullRequestId)!)
-            .GroupBy(pr => pr.RepoLabel)
+            .GroupBy(pr => pr.RepoName)
             .Select(group => group.Key + " " + string.Join(" · ", group.Select(pr => $"{pr.Branch} {StatusGlyph(pr.Status)}"))));
 
-    // The latest PR per repo + branch; BE first, then repo label, main before other branches.
+    // The latest PR per repo + branch; BE first, then repo name, main before other branches.
     internal static List<TicketPr> LatestPrs(string ticketKey, IReadOnlyDictionary<string, TrackedPr> prTracking)
     {
         var latest = new Dictionary<(string Repository, string Branch), TicketPr>();
@@ -75,7 +84,7 @@ internal static class DashboardDataBuilder
             latest[(repository, parts[1])] = new TicketPr(repository, parts[1], pullRequestId, entry.Value.Status, entry.Value.CommentCount);
         }
         return latest.Values
-            .OrderBy(pr => pr.RepoLabel == "BE" ? 0 : 1).ThenBy(pr => pr.RepoLabel, StringComparer.Ordinal)
+            .OrderBy(pr => pr.RepoLabel == "BE" ? 0 : 1).ThenBy(pr => pr.RepoName, StringComparer.Ordinal)
             .ThenBy(pr => pr.Branch == MainBranchLabel ? 0 : 1).ThenBy(pr => pr.Branch, StringComparer.Ordinal)
             .ToList();
     }
@@ -86,6 +95,15 @@ internal static class DashboardDataBuilder
         if (repository == null || repository == AzureDevOpsClient.BackendRepository) return "BE";
         if (repository.EndsWith("-Angular", StringComparison.OrdinalIgnoreCase)) return "FE";
         return repository;
+    }
+
+    // RepoLabel plus the front-end app ("FE Portal", "FE External"), so two FE repos' PRs stay apart.
+    internal static string RepoName(string? repository)
+    {
+        var label = RepoLabel(repository);
+        if (repository == null || label != "FE") return label;
+        var appName = FrontendAppNames.GetValueOrDefault(repository) ?? repository[..^"-Angular".Length];
+        return $"FE {appName}";
     }
 
     internal static string StatusGlyph(string status) => status switch

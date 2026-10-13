@@ -3,9 +3,8 @@ using System.Drawing.Drawing2D;
 
 namespace NoisLogTray;
 
-// A small rounded, theme-aware icon button that toggles light/dark. Draws a sun in
-// dark mode (tap to go light) and a moon in light mode (tap to go dark). Icons are
-// drawn with GDI (no glyph fonts).
+// A small rounded, theme-aware icon button that toggles light/dark. Shows a sun in
+// dark mode (tap to go light) and a moon in light mode (tap to go dark).
 internal sealed class ThemeToggleButton : Control
 {
     private bool _hover;
@@ -52,39 +51,7 @@ internal sealed class ThemeToggleButton : Control
         using (var brush = new SolidBrush(fill))
             g.FillPath(brush, path);
 
-        var cx = Width / 2f;
-        var cy = Height / 2f;
-        var icon = Theme.SecondaryBtnText;
-        if (Theme.Dark) DrawSun(g, cx, cy, icon);
-        else DrawMoon(g, cx, cy, icon, fill);
-    }
-
-    private static void DrawSun(Graphics g, float cx, float cy, Color color)
-    {
-        var r = UiScale.S(4f);
-        var rayStart = r + UiScale.S(2f);
-        var rayEnd = r + UiScale.S(5f);
-        using var brush = new SolidBrush(color);
-        g.FillEllipse(brush, cx - r, cy - r, 2 * r, 2 * r);
-        using var pen = new Pen(color, UiScale.S(1.5f)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-        for (var i = 0; i < 8; i++)
-        {
-            var a = i * Math.PI / 4;
-            var x1 = cx + (float)Math.Cos(a) * rayStart;
-            var y1 = cy + (float)Math.Sin(a) * rayStart;
-            var x2 = cx + (float)Math.Cos(a) * rayEnd;
-            var y2 = cy + (float)Math.Sin(a) * rayEnd;
-            g.DrawLine(pen, x1, y1, x2, y2);
-        }
-    }
-
-    private static void DrawMoon(Graphics g, float cx, float cy, Color color, Color bg)
-    {
-        var r = UiScale.S(6.5f);
-        using var brush = new SolidBrush(color);
-        g.FillEllipse(brush, cx - r, cy - r, 2 * r, 2 * r);
-        using var carve = new SolidBrush(bg);
-        g.FillEllipse(carve, cx - r + UiScale.S(4.5f), cy - r - UiScale.S(1.5f), 2 * r, 2 * r);
+        Icons.Draw(g, Theme.Dark ? Icons.Sunny : Icons.Moon, Icons.Medium, ClientRectangle, Theme.SecondaryBtnText);
     }
 
     private static GraphicsPath Rounded(Rectangle r, int radius)

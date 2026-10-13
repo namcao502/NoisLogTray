@@ -10,13 +10,15 @@ internal static class ButtonWidths
 
     private static readonly string[] Labels =
     {
+        // "→ Done" stands for Done with its arrow glyph (TaskRow, DashboardRow), about as wide; so do "→ Log" and
+        // "→ In entry" for the "+ Log" button and its checkmark.
         "Queue", "Queued", "Đã queue", "Open", "Mở", "Start", "Bắt đầu", "Done", "Xong", "→ Done", "→ Xong",
-        "Dismiss", "Ẩn", "Restore", "Khôi phục", "Seen", "Đã xem",
+        "Restore", "Khôi phục", "Seen", "Đã xem", "→ Log", "→ In entry", "→ Đã thêm",
     };
 
     private static readonly string[] ToolbarLabels =
     {
-        "Log queue now", "Log queue ngay", "Log cả hàng đợi", "Clear queue", "Xóa hàng đợi", "Edit JQL", "Sửa JQL",
+        "Log queue now", "Log queue ngay", "Log cả hàng đợi", "Clear queue", "Xóa hàng đợi",
         "Refresh", "Làm mới", "Check", "Check now", "Kiểm tra", "Add", "Thêm",
     };
 

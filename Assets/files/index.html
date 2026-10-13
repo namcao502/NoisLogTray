@@ -1,0 +1,578 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --bg: #1e1e1e; --fg: #ececf0; --muted: #96969e; --line: #3e3e42; --selection: #3a5a8c; --link: #4c8dff; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Segoe UI", sans-serif; }
+  body { display: flex; flex-direction: column; }
+  #tools { flex: none; display: flex; align-items: center; gap: 0.4em; padding: 0.35em 0.5em; border-bottom: 1px solid var(--line); }
+  #tools button, #note button { font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 0.15em 0.7em; cursor: pointer; }
+  #tools button:hover:enabled, #note button:hover { background: var(--selection); }
+  #tools button:disabled { opacity: 0.5; cursor: default; }
+  #filter { flex: none; width: 14em; font: inherit; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 4px; padding: 0.15em 0.5em; outline: none; }
+  #filter:focus { border-color: var(--selection); }
+  #filter::placeholder { color: var(--muted); }
+  #current { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); padding: 0 0.4em; }
+  #current b { color: var(--fg); }
+  #content { flex: 1; min-height: 0; display: flex; }
+  #list { flex: none; width: 23em; max-width: 70%; overflow: auto; box-sizing: border-box; }
+  #splitter { flex: none; width: 5px; cursor: col-resize; border-left: 1px solid var(--line); }
+  #splitter:hover, #splitter.dragging { background: var(--selection); }
+  #list.hidden, #splitter.hidden { display: none; }
+  #viewer { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  #viewer > div { flex: 1; min-height: 0; }
+  #picture { padding: 1em; overflow: auto; }
+  #picture img { max-width: 100%; }
+  #note { padding: 1em; }
+  #note button { margin-top: 0.8em; }
+  #markdown { padding: 1em 1.5em; overflow: auto; line-height: 1.5; }
+  #markdown a { color: var(--link); }
+  #markdown img { max-width: 100%; }
+  #markdown code, #markdown pre { background: var(--line); border-radius: 3px; }
+  #markdown pre { padding: 0.6em; overflow: auto; }
+  #markdown table { border-collapse: collapse; }
+  #markdown th, #markdown td { border: 1px solid var(--line); padding: 0.25em 0.6em; }
+  #markdown blockquote { margin-left: 0; padding-left: 1em; border-left: 3px solid var(--line); color: var(--muted); }
+  .empty { padding: 0.8em; color: var(--muted); }
+  .group { padding: 0.7em 0.8em 0.3em; font-weight: 600; }
+  .error { padding: 0.2em 0.8em; color: #f85149; }
+  .folder, .file { display: flex; gap: 0.4em; padding: 0.2em 0.8em; cursor: pointer; white-space: nowrap; }
+  .folder { color: var(--muted); }
+  .folder:hover, .file:hover { background: var(--line); }
+  .file.selected { background: var(--selection); }
+  .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  /* The app's icon set (UI/Icons.cs), and its thin themed scrollbars instead of Windows' own. */
+  @font-face { font-family: "FluentIcons"; src: url("../icons/FluentSystemIcons-Regular.ttf"); }
+  #tools button.icon { font-family: "FluentIcons"; font-size: 1.15em; line-height: 1; padding: 0.2em 0.4em; }
+  .twisty { flex: none; width: 1em; font-family: "FluentIcons"; display: flex; align-items: center; }
+  /* The app's one scrollbar look (UI/ThemedScrollBar.cs): a pill 8px thick, 11px under the mouse or while dragged,
+     3px in from the edge, in the secondary text color at 40% / 60% / 80%. The transparent borders place the thumb;
+     the radii keep its two sides round when the hovered thumb drops its inner border. */
+  ::-webkit-scrollbar { width: 14px; height: 14px; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted) 40%, transparent); background-clip: padding-box; border: 3px solid transparent; border-radius: 7px; }
+  ::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--muted) 60%, transparent); }
+  ::-webkit-scrollbar-thumb:active { background-color: color-mix(in srgb, var(--muted) 80%, transparent); }
+  ::-webkit-scrollbar-thumb:vertical:hover, ::-webkit-scrollbar-thumb:vertical:active { border-left-width: 0; border-radius: 5.5px 8.5px 8.5px 5.5px; }
+  ::-webkit-scrollbar-thumb:horizontal:hover, ::-webkit-scrollbar-thumb:horizontal:active { border-top-width: 0; border-radius: 5.5px 5.5px 8.5px 8.5px; }
+  /* Monaco's own bars, the same way (its stylesheet loads later, hence body and !important). */
+  body .monaco-scrollable-element > .scrollbar > .slider { background: color-mix(in srgb, var(--muted) 40%, transparent) !important; border-radius: 6px; }
+  body .monaco-scrollable-element > .scrollbar > .slider:hover { background: color-mix(in srgb, var(--muted) 60%, transparent) !important; }
+  body .monaco-scrollable-element > .scrollbar > .slider.active { background: color-mix(in srgb, var(--muted) 80%, transparent) !important; }
+  body .monaco-scrollable-element > .scrollbar.vertical > .slider { width: 8px !important; left: auto !important; right: 3px; }
+  body .monaco-scrollable-element > .scrollbar.vertical:hover > .slider,
+  body .monaco-scrollable-element > .scrollbar.vertical > .slider.active { width: 11px !important; }
+  body .monaco-scrollable-element > .scrollbar.horizontal > .slider { height: 8px !important; top: auto !important; bottom: 3px; }
+  body .monaco-scrollable-element > .scrollbar.horizontal:hover > .slider,
+  body .monaco-scrollable-element > .scrollbar.horizontal > .slider.active { height: 11px !important; }
+</style>
+<script>
+  // The app's colors also ride the URL, so the first paint is already themed: the theme message waits for Monaco.
+  {
+    const startColors = new URLSearchParams(location.search).get("colors");
+    if (startColors) for (const [name, value] of Object.entries(JSON.parse(startColors))) document.documentElement.style.setProperty("--" + name, value);
+  }
+</script>
+</head>
+<body>
+<div id="tools">
+  <button id="toggleList" class="icon">&#xE8B0;</button>
+  <button id="refresh"></button>
+  <input id="filter" type="text" spellcheck="false" autocomplete="off">
+  <div id="current"></div>
+  <button id="source" hidden></button>
+  <button id="vsCode" disabled></button>
+  <button id="showInFolder" disabled></button>
+</div>
+<div id="content">
+  <div id="list"><div id="groups"><div class="empty" id="loading"></div></div></div>
+  <div id="splitter"></div>
+  <div id="viewer">
+    <div id="editor" hidden></div>
+    <div id="markdown" hidden></div>
+    <div id="picture" hidden></div>
+    <div id="note" hidden><div id="noteText"></div><button id="noteShowInFolder"></button></div>
+  </div>
+</div>
+<!-- marked before Monaco's loader: once define.amd exists the UMD build registers as a module, not window.marked. -->
+<script src="../marked/marked.umd.js"></script>
+<script src="markdown.js"></script>
+<script src="../monaco/vs/loader.js"></script>
+<script>
+  const params = new URLSearchParams(location.search);
+  const fontSize = Number(params.get("fontSize") || 13);
+  document.body.style.fontSize = fontSize + "px";
+  // Shown until the first listing arrives (git can take a few seconds per worktree).
+  document.getElementById("loading").textContent = params.get("loading") || "";
+
+  const post = (m) => window.chrome.webview.postMessage(JSON.stringify(m));
+  const chevronRight = "\uF2B0", chevronDown = "\uF2A3"; // FluentIcons glyphs
+  // Ctrl+1..4 switch app pages, as in the terminal (WebView2 keeps keys from the form).
+  window.addEventListener("keydown", (e) => {
+    if (!e.ctrlKey || e.shiftKey || e.altKey || !/^(Digit|Numpad)[1-4]$/.test(e.code)) return;
+    e.preventDefault(); e.stopPropagation(); post({ type: "page", index: Number(e.code.slice(-1)) });
+  }, true);
+
+  const setColors = (colors) => {
+    for (const [name, value] of Object.entries(colors)) document.documentElement.style.setProperty("--" + name, value);
+  };
+  const addText = (parent, className, text) => {
+    const element = document.createElement("div");
+    element.className = className;
+    element.textContent = text; // never innerHTML: paths and labels come from git and the file system
+    parent.append(element);
+    return element;
+  };
+
+  // Without this the host would wait forever on a page that never says "ready".
+  const fail = (error) => post({ type: "failed", message: String((error && error.message) || error) });
+
+  const maxMatches = 500;
+
+  const start = () => {
+    if (typeof window.renderMarkdown !== "function") throw new Error("marked or markdown.js did not load");
+
+    // Read-only files have no project context: language validation would only paint false errors.
+    const noValidation = { noSemanticValidation: true, noSyntaxValidation: true };
+    monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions(noValidation);
+    monaco.languages.typescript.javascriptDefaults.setDiagnosticsOptions(noValidation);
+    monaco.languages.json.jsonDefaults.setDiagnosticsOptions({ validate: false });
+    for (const css of [monaco.languages.css.cssDefaults, monaco.languages.css.scssDefaults, monaco.languages.css.lessDefaults])
+      css.setOptions({ validate: false });
+
+    // The layout the host saved: file list width (em) and visibility.
+    const layout = {
+      listWidth: Number(params.get("listWidth")) || 23,
+      listHidden: params.get("listHidden") === "1",
+    };
+    // Only the setting that changed: another tab's page may hold older values for the others.
+    const saveLayout = (name) => post({ type: "layout", [name]: layout[name] });
+
+    const editor = monaco.editor.create(document.getElementById("editor"), {
+      theme: params.get("dark") === "1" ? "vs-dark" : "vs", readOnly: true, automaticLayout: true, minimap: { enabled: false }, fontSize, model: null,
+      scrollbar: { vertical: "visible", horizontal: "visible", useShadows: false, verticalScrollbarSize: 14, horizontalScrollbarSize: 14, verticalSliderSize: 8, horizontalSliderSize: 8 },
+    });
+
+    const list = document.getElementById("list");
+    const splitter = document.getElementById("splitter");
+    const groups = document.getElementById("groups");
+    const current = document.getElementById("current");
+    const filter = document.getElementById("filter");
+    const markdown = document.getElementById("markdown");
+    const picture = document.getElementById("picture");
+    const noteText = document.getElementById("noteText");
+    const sourceButton = document.getElementById("source");
+    const vsCodeButton = document.getElementById("vsCode");
+    const showInFolderButton = document.getElementById("showInFolder");
+    const noteShowInFolderButton = document.getElementById("noteShowInFolder");
+    // One of them is visible at a time, or none while nothing is shown.
+    const panels = { editor: document.getElementById("editor"), markdown, picture, note: document.getElementById("note") };
+
+    let labels = { source: "", rendered: "", tooMany: "", noMatch: "" };
+    let listing = { groups: [], emptyText: "" }; // the last "files" message
+    let fileIndex = new Map(); // "<group>|<path>" -> { group, path } of every listed file
+    let groupLabels = new Map(); // group id -> its label ("BE - Backend-DotNet")
+    const rows = new Map(); // "<group>|<path>" -> the file row on screen (tree rows exist only once their folder opened)
+    const expanded = new Set(); // "<group>|<folder path>" of the folders the user opened, kept across re-lists
+    let selected = null; // { group, path } the user picked
+    let shown = null; // { group, path, kind, content, note } in the viewer; may lag behind selected until the host answers
+    let showSource = false; // a markdown file in Monaco instead of rendered
+    let pendingLine = null; // { group, path, line } of a terminal Ctrl+click, applied when that file arrives
+
+    const applyLayout = () => {
+      list.style.width = layout.listWidth + "em";
+      list.classList.toggle("hidden", layout.listHidden);
+      splitter.classList.toggle("hidden", layout.listHidden);
+    };
+    applyLayout();
+
+    // The selected file, above the viewer: "<group label>  folder/" then the name in bold.
+    const showCurrent = () => {
+      current.replaceChildren();
+      current.title = "";
+      if (!selected) return;
+      const label = groupLabels.get(selected.group) || selected.group;
+      const slash = selected.path.lastIndexOf("/");
+      current.append(label + "  " + selected.path.slice(0, slash + 1));
+      const name = document.createElement("b");
+      name.textContent = selected.path.slice(slash + 1);
+      current.append(name);
+      current.title = label + "  " + selected.path;
+    };
+
+    const updateButtons = () => {
+      vsCodeButton.disabled = selected === null;
+      showInFolderButton.disabled = selected === null;
+      sourceButton.hidden = shown === null || shown.kind !== "markdown";
+      sourceButton.textContent = showSource ? labels.rendered : labels.source;
+    };
+
+    const showPanel = (name) => {
+      for (const [key, element] of Object.entries(panels)) element.hidden = key !== name;
+    };
+
+    const clearModel = () => {
+      const old = editor.getModel();
+      editor.setModel(null);
+      if (old) old.dispose();
+    };
+
+    // Empties every panel; the caller decides which one shows next.
+    const clearPanels = () => {
+      clearModel();
+      markdown.replaceChildren();
+      picture.replaceChildren();
+      noteText.textContent = "";
+    };
+
+    // The selected file left the listing: nothing selected, nothing shown.
+    const clearViewer = () => {
+      selected = null;
+      shown = null;
+      showSource = false;
+      clearPanels();
+      showPanel(null);
+      showCurrent();
+      updateButtons();
+    };
+
+    const select = (group, path) => {
+      pendingLine = null;
+      for (const other of groups.querySelectorAll(".file.selected")) other.classList.remove("selected");
+      const row = rows.get(group + "|" + path);
+      if (row) {
+        row.classList.add("selected");
+        row.scrollIntoView({ block: "nearest" });
+      }
+      selected = { group, path };
+      showCurrent();
+      updateButtons();
+      post({ type: "select", group, path });
+    };
+
+    // Monaco at the line; a rendered markdown file switches to its source to show it.
+    const goToLine = (line) => {
+      if (shown.kind === "markdown" && !showSource) {
+        showSource = true;
+        showPanel("editor");
+        updateButtons();
+      }
+      editor.revealLineInCenter(line);
+      editor.setPosition({ lineNumber: line, column: 1 });
+    };
+
+    // A Ctrl+clicked terminal path: back to the tree with its folders open (every prefix, so merged folders open
+    // too), then picked. An unchanged file gets no new "file" message (the host skips it), so a shown one moves now.
+    const reveal = (m) => {
+      if (!fileIndex.has(m.group + "|" + m.path)) return;
+      clearTimeout(filterTimer);
+      filter.value = "";
+      const parts = m.path.split("/");
+      for (let count = 1; count < parts.length; count++) expanded.add(m.group + "|" + parts.slice(0, count).join("/"));
+      renderTree();
+      select(m.group, m.path);
+      if (!m.line) return;
+      const isShown = shown !== null && shown.group === m.group && shown.path === m.path;
+      if (isShown && (shown.kind === "text" || shown.kind === "markdown")) goToLine(m.line);
+      else pendingLine = { group: m.group, path: m.path, line: m.line };
+    };
+
+    const open = (file, target) => {
+      if (file) post({ type: "open", group: file.group, path: file.path, target });
+    };
+
+    const indent = (depth) => (0.8 + depth * 1.1) + "em";
+
+    const addFileRow = (container, group, path, name, depth) => {
+      const row = addText(container, "file", "");
+      row.style.paddingLeft = indent(depth);
+      addText(row, "twisty", "");
+      addText(row, "name", name);
+      row.title = path;
+      rows.set(group + "|" + path, row);
+      if (selected && selected.group === group && selected.path === path) row.classList.add("selected");
+      row.addEventListener("click", () => select(group, path));
+    };
+
+    const buildTree = (files) => {
+      const root = { folders: new Map(), files: [] };
+      for (const path of files) {
+        const parts = path.split("/");
+        let node = root;
+        for (const part of parts.slice(0, -1)) {
+          if (!node.folders.has(part)) node.folders.set(part, { folders: new Map(), files: [] });
+          node = node.folders.get(part);
+        }
+        node.files.push({ name: parts[parts.length - 1], path });
+      }
+      return root;
+    };
+
+    // Folders first, then files, by name; a folder holding only one subfolder is merged into it, as in Changes.
+    // A folder's rows are built on its first open, so a 10k-file worktree costs only its top level.
+    const renderNode = (container, node, group, prefix, depth) => {
+      for (const [folderName, folder] of [...node.folders].sort(([a], [b]) => a.localeCompare(b))) {
+        let name = folderName;
+        let path = prefix + folderName;
+        let child = folder;
+        while (child.files.length === 0 && child.folders.size === 1) {
+          const [subName, sub] = [...child.folders][0];
+          name += "/" + subName;
+          path += "/" + subName;
+          child = sub;
+        }
+        const key = group + "|" + path;
+        const row = addText(container, "folder", "");
+        row.style.paddingLeft = indent(depth);
+        const twisty = addText(row, "twisty", expanded.has(key) ? chevronDown : chevronRight);
+        addText(row, "name", name);
+        row.title = path;
+        const children = document.createElement("div");
+        children.hidden = !expanded.has(key);
+        container.append(children);
+        let built = false;
+        const build = () => {
+          if (built) return;
+          built = true;
+          renderNode(children, child, group, path + "/", depth + 1);
+        };
+        if (!children.hidden) build();
+        row.addEventListener("click", () => {
+          children.hidden = !children.hidden;
+          twisty.textContent = children.hidden ? chevronRight : chevronDown;
+          if (children.hidden) expanded.delete(key);
+          else {
+            expanded.add(key);
+            build();
+          }
+        });
+      }
+      for (const { name, path } of node.files.sort((a, b) => a.name.localeCompare(b.name)))
+        addFileRow(container, group, path, name, depth);
+    };
+
+    const renderTree = () => {
+      groups.replaceChildren();
+      rows.clear();
+      if (listing.groups.length === 0) addText(groups, "empty", listing.emptyText);
+      for (const group of listing.groups) {
+        addText(groups, "group", group.label);
+        if (group.error) addText(groups, "error", group.error);
+        renderNode(groups, buildTree(group.files), group.id, "", 0);
+      }
+    };
+
+    // Every group's files whose path contains the query, as full paths under the group label; at most maxMatches rows.
+    const renderMatches = (query) => {
+      groups.replaceChildren();
+      rows.clear();
+      let count = 0;
+      let truncated = false;
+      for (const group of listing.groups) {
+        const matches = [];
+        for (const path of group.files) {
+          if (!path.toLowerCase().includes(query)) continue;
+          if (count === maxMatches) {
+            truncated = true;
+            break;
+          }
+          matches.push(path);
+          count++;
+        }
+        if (matches.length !== 0) {
+          addText(groups, "group", group.label);
+          for (const path of matches) addFileRow(groups, group.id, path, path, 0);
+        }
+        if (truncated) break;
+      }
+      if (truncated) addText(groups, "empty", labels.tooMany);
+      else if (count === 0) addText(groups, "empty", labels.noMatch);
+    };
+
+    const renderList = () => {
+      const query = filter.value.trim().toLowerCase();
+      if (query) renderMatches(query);
+      else renderTree();
+    };
+
+    // Keeps the selected file if it is still listed (and asks for it again); otherwise empties the viewer.
+    const renderFiles = (m) => {
+      listing = m;
+      fileIndex = new Map();
+      groupLabels = new Map();
+      for (const group of m.groups) {
+        groupLabels.set(group.id, group.label);
+        for (const path of group.files) fileIndex.set(group.id + "|" + path, { group: group.id, path });
+      }
+      renderList();
+      if (selected && fileIndex.has(selected.group + "|" + selected.path)) {
+        showCurrent();
+        post({ type: "select", group: selected.group, path: selected.path });
+      } else if (selected) clearViewer();
+    };
+
+    const altText = (img) => {
+      const span = document.createElement("span");
+      span.className = "alt";
+      span.textContent = "[" + (img.alt || img.dataset.path) + "]";
+      return span;
+    };
+
+    // One request per distinct picture; one that is not a listed file shows its alt text at once (the host would only send null).
+    const requestImages = () => {
+      const requested = new Set();
+      for (const img of markdown.querySelectorAll("img[data-path]")) {
+        const key = img.dataset.group + "|" + img.dataset.path;
+        if (!fileIndex.has(key)) img.replaceWith(altText(img));
+        else if (!requested.has(key)) {
+          requested.add(key);
+          post({ type: "image", group: img.dataset.group, path: img.dataset.path });
+        }
+      }
+    };
+
+    const showImage = (m) => {
+      for (const img of markdown.querySelectorAll("img[data-path]")) {
+        if (img.dataset.group !== m.group || img.dataset.path !== m.path) continue;
+        if (m.dataUrl) img.src = m.dataUrl;
+        else img.replaceWith(altText(img));
+      }
+    };
+
+    // The same file with the same kind, content and note is left alone, so its scroll position stays. The note is
+    // compared too: binary / toolarge / error have no content, and a language switch changes only their note.
+    const showFile = (m) => {
+      if (!selected || selected.group !== m.group || selected.path !== m.path) return;
+      const sameFile = shown !== null && shown.group === m.group && shown.path === m.path;
+      if (sameFile && shown.kind === m.kind && shown.content === m.content && shown.note === m.note) return;
+      if (!sameFile) showSource = false;
+      // Render first: a throw here leaves the previous file on screen rather than half a new one.
+      const html = m.kind === "markdown" ? renderMarkdown(m.content, { group: m.group, path: m.path }) : null;
+      clearPanels();
+      shown = { group: m.group, path: m.path, kind: m.kind, content: m.content, note: m.note };
+      if (m.kind === "text" || m.kind === "markdown") {
+        // The URI's file name lets Monaco pick the language from the extension.
+        const uri = monaco.Uri.from({ scheme: "ticket-file", path: "/" + m.group + "/" + m.path });
+        editor.setModel(monaco.editor.createModel(m.content, undefined, uri));
+      }
+      if (m.kind === "text") showPanel("editor");
+      else if (m.kind === "markdown") {
+        markdown.innerHTML = html; // the only innerHTML: markdown.js escapes raw HTML and keeps only safe links
+        requestImages();
+        showPanel(showSource ? "editor" : "markdown");
+      } else if (m.kind === "image") {
+        const img = document.createElement("img");
+        img.alt = m.path;
+        img.src = m.content;
+        picture.append(img);
+        showPanel("picture");
+      } else {
+        noteText.textContent = m.note || "";
+        showPanel("note");
+      }
+      if (!sameFile) {
+        markdown.scrollTop = 0;
+        picture.scrollTop = 0;
+      }
+      updateButtons();
+    };
+
+    // Links in the rendered markdown never navigate the page: http(s) opens the browser, a listed file opens here.
+    markdown.addEventListener("click", (e) => {
+      const anchor = e.target.closest("a");
+      if (!anchor) return;
+      e.preventDefault();
+      const href = anchor.getAttribute("href") || ""; // not anchor.href, which is resolved against this page's URL
+      if (/^https?:\/\//i.test(href)) {
+        post({ type: "openUrl", url: href });
+        return;
+      }
+      const path = shown === null ? null : resolveRelative(shown.path, href);
+      const file = path === null ? undefined : fileIndex.get(shown.group + "|" + path);
+      if (file) select(file.group, file.path);
+    });
+
+    const applyLabels = (m) => {
+      labels = m;
+      document.getElementById("toggleList").title = m.files;
+      const refresh = document.getElementById("refresh");
+      refresh.textContent = m.refresh;
+      refresh.title = m.refresh;
+      filter.placeholder = m.filter;
+      vsCodeButton.textContent = m.vsCode;
+      showInFolderButton.textContent = m.showInFolder;
+      noteShowInFolderButton.textContent = m.showInFolder;
+      updateButtons();
+    };
+
+    document.getElementById("refresh").addEventListener("click", () => post({ type: "refresh" }));
+    document.getElementById("toggleList").addEventListener("click", () => {
+      layout.listHidden = !layout.listHidden;
+      applyLayout();
+      saveLayout("listHidden");
+    });
+    sourceButton.addEventListener("click", () => {
+      showSource = !showSource;
+      showPanel(showSource ? "editor" : "markdown");
+      updateButtons();
+    });
+    vsCodeButton.addEventListener("click", () => open(selected, "vscode"));
+    showInFolderButton.addEventListener("click", () => open(selected, "folder"));
+    // The note belongs to the shown file, which can lag behind the selection until the host answers.
+    noteShowInFolderButton.addEventListener("click", () => open(shown, "folder"));
+
+    let filterTimer = 0;
+    filter.addEventListener("input", () => {
+      clearTimeout(filterTimer);
+      filterTimer = setTimeout(renderList, 150);
+    });
+
+    // Drag the list's right edge; the width is kept in em so it follows the font size.
+    splitter.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      splitter.classList.add("dragging");
+      const move = (moveEvent) => {
+        const width = Math.min(Math.max(moveEvent.clientX - list.getBoundingClientRect().left, 8 * fontSize), window.innerWidth * 0.7);
+        layout.listWidth = Math.round(width / fontSize * 10) / 10;
+        list.style.width = layout.listWidth + "em";
+      };
+      const up = () => {
+        splitter.classList.remove("dragging");
+        window.removeEventListener("mousemove", move);
+        window.removeEventListener("mouseup", up);
+        saveLayout("listWidth");
+      };
+      window.addEventListener("mousemove", move);
+      window.addEventListener("mouseup", up);
+    });
+
+    window.chrome.webview.addEventListener("message", (event) => {
+      const m = JSON.parse(event.data);
+      if (m.type === "files") renderFiles(m);
+      else if (m.type === "file") {
+        showFile(m);
+        if (pendingLine && pendingLine.group === m.group && pendingLine.path === m.path) {
+          if (m.kind === "text" || m.kind === "markdown") goToLine(pendingLine.line);
+          pendingLine = null;
+        }
+      }
+      else if (m.type === "reveal") reveal(m);
+      else if (m.type === "image") showImage(m);
+      else if (m.type === "labels") applyLabels(m);
+      else if (m.type === "theme") { setColors(m.colors); monaco.editor.setTheme(m.dark ? "vs-dark" : "vs"); }
+    });
+    post({ type: "ready" });
+  };
+
+  require.config({ paths: { vs: "../monaco/vs" } });
+  require(["vs/editor/editor.main"], () => {
+    try {
+      start();
+    } catch (error) {
+      fail(error);
+    }
+  }, fail);
+</script>
+</body>
+</html>

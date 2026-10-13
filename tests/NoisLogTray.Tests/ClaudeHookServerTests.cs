@@ -17,7 +17,7 @@ public class ClaudeHookServerTests
 
         var hooks = settings["hooks"]!.AsObject();
         Assert.Equal(
-            new[] { "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop" },
+            new[] { "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SessionEnd" },
             hooks.Select(kvp => kvp.Key).ToArray());
         foreach (var eventEntry in hooks)
         {

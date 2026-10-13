@@ -19,7 +19,6 @@ internal static class Program
         AppLogger.Info("NoisLogTray started.");
         Theme.Load();
         Lang.Load();
-        UiScale.Load(); // before any UI type initialises its static fonts
         Application.Run(new TrayApp());
     }
 }

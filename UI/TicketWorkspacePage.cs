@@ -2,33 +2,34 @@ using System.Drawing;
 
 namespace NoisLogTray;
 
-// The Ticket page: a strip of tabs, one per open ticket, over that ticket's TicketWorkspaceView (all views stay
-// alive while their tab exists). TrayApp owns the tab list and the per-ticket sessions; this page only shows them.
+// The Ticket page: a strip of tabs, one per open ticket, in the shell header (HeaderControl), and the selected ticket's
+// TicketWorkspaceView below (all views stay alive while their tab exists). TrayApp owns the tab list and the per-ticket
+// sessions; this page only shows them.
 internal sealed class TicketWorkspacePage : UserControl, IShellPage
 {
     private static readonly int TabH = UiScale.S(28);
-    private static readonly int CloseW = UiScale.S(28);
-    private static readonly int StripPad = UiScale.S(8);
-    private static readonly int TabGap = UiScale.S(8);
-    private static readonly int CloseGap = UiScale.S(2);
+    private static readonly int TabGap = UiScale.S(6);
+    private static readonly int WheelStep = UiScale.S(60);
 
     private readonly TicketStore? _store;
     private readonly string _jiraBaseUrl;
     private readonly Func<string> _devRepoPath;
     private readonly Func<string, ClaudeSessionHost> _sessionFor;
     private readonly Func<string, TeamsPostView?> _teamsPostFor;
-    private readonly Panel _tabStrip = new() { Dock = DockStyle.Top, AutoScroll = true };
+    private readonly HeaderToolbar _tabStrip = new();
     private readonly Panel _viewHost = new() { Dock = DockStyle.Fill };
     private readonly Label _empty = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
     private readonly Dictionary<string, TicketWorkspaceView> _views = new();
-    private readonly Dictionary<string, MacButton> _tabButtons = new();
+    private readonly Dictionary<string, TicketTab> _tabButtons = new();
+    private readonly Dictionary<string, int> _tabLefts = new(); // each tab's left edge in the unscrolled strip
     private List<string> _tabKeys = new();
     private HashSet<string> _waiting = new();
     private int _tabsWidth;
+    private int _tabScroll; // how far the strip is scrolled right; the header has no room for a scroll bar
     private string? _selected;
     private bool _headerCollapsed = AppSettings.Load().TicketHeaderCollapsed;
 
-    // Raised from the × button's Click: defer the SetTabs it leads to, since SetTabs disposes that button.
+    // Raised from a tab's mouse or key handler: defer the SetTabs it leads to, since SetTabs disposes that tab.
     internal event Action<string>? CloseRequested;
     internal event Action<string>? VsCodeRequested;
 
@@ -49,8 +50,7 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
         _empty.UseMnemonic = false;
         _viewHost.Controls.Add(_empty);
         Controls.Add(_viewHost);
-        Controls.Add(_tabStrip);
-        _tabStrip.Resize += (_, _) => FitStripHeight();
+        _tabStrip.Resize += (_, _) => PlaceTabs();
         MinimumSize = UiScale.S(new Size(640, 480));
         ApplyTheme();
         ApplyLanguage();
@@ -64,9 +64,12 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
         {
             Theme.Changed -= ApplyTheme;
             Lang.Changed -= ApplyLanguage;
+            _tabStrip.Dispose(); // it lives in the shell header, not among this page's controls
         }
         base.Dispose(disposing);
     }
+
+    internal Control HeaderControl => _tabStrip;
 
     internal bool HasOpenTabs => _tabKeys.Count != 0;
 
@@ -140,7 +143,7 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     private void CreateView(string key)
     {
         var view = new TicketWorkspaceView(key, _jiraBaseUrl, _sessionFor(key),
-            () => TicketWorktrees.Find(_devRepoPath(), key), () => _teamsPostFor(key))
+            () => TicketWorktrees.Find(_devRepoPath(), key), () => TicketFiles.DocsPath(_devRepoPath(), key), () => _teamsPostFor(key))
         {
             Dock = DockStyle.Fill,
             Visible = false,
@@ -165,9 +168,8 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     {
         foreach (var (key, view) in _views) view.Visible = key == _selected;
         foreach (var (key, tab) in _tabButtons) tab.Selected = key == _selected;
-        if (_selected != null && _tabButtons.TryGetValue(_selected, out var selectedTab)) _tabStrip.ScrollControlIntoView(selectedTab);
+        ScrollTabIntoView(_selected);
         _empty.Visible = _selected == null;
-        _tabStrip.Visible = _selected != null;
         ActivateSelected();
     }
 
@@ -190,50 +192,58 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     private string TabAccessibleName(string key) =>
         _waiting.Contains(key) ? Lang.T($"{key}, Claude is waiting", $"{key}, Claude đang chờ") : key;
 
-    // A tab button then its close button per ticket, left to right; a strip wider than the page scrolls sideways.
+    // One tab per ticket, its close inside it, left to right. More tabs than the header holds scroll sideways with the
+    // mouse wheel over them, and the selected one is always scrolled into view.
     private void BuildTabs()
     {
         _tabStrip.SuspendLayout();
         foreach (var control in _tabStrip.Controls.Cast<Control>().ToList()) control.Dispose();
         _tabButtons.Clear();
-        // Bounds are relative to the scrolled view, so lay out from an unscrolled strip.
-        _tabStrip.AutoScrollPosition = Point.Empty;
-        var nextLeft = StripPad;
+        _tabLefts.Clear();
+        var nextLeft = 0;
         foreach (var key in _tabKeys)
         {
-            var tab = MacButton.Secondary(key);
-            tab.OnWindow = true;
-            tab.AccessibleName = TabAccessibleName(key);
-            tab.ShowDot = _waiting.Contains(key);
-            tab.Selected = key == _selected; // a rebuild (language switch) keeps the current tab marked
-            tab.Bounds = new Rectangle(nextLeft, StripPad, TextRenderer.MeasureText(key, tab.Font).Width + UiScale.S(24), TabH);
-            tab.Click += (_, _) => SelectTab(key);
-            nextLeft = tab.Right + CloseGap;
-
-            var close = MacButton.Secondary("×");
-            close.OnWindow = true;
-            close.AccessibleName = Lang.T($"Close {key}", $"Đóng {key}");
-            close.Bounds = new Rectangle(nextLeft, StripPad, CloseW, TabH);
-            close.Click += (_, _) => CloseRequested?.Invoke(key);
-            nextLeft = close.Right + TabGap;
-
+            var tab = new TicketTab(key, TabH)
+            {
+                AccessibleName = TabAccessibleName(key),
+                AccessibleDescription = Lang.T("Delete closes the tab", "Delete để đóng tab"),
+                ShowDot = _waiting.Contains(key),
+                Selected = key == _selected, // a rebuild (language switch) keeps the current tab marked
+            };
+            tab.SelectRequested += () => SelectTab(key);
+            tab.CloseRequested += () => CloseRequested?.Invoke(key);
+            tab.MouseWheel += (_, e) => ScrollTabs(-e.Delta / 120 * WheelStep);
+            _tabLefts[key] = nextLeft;
+            nextLeft += tab.Width + TabGap;
             _tabStrip.Controls.Add(tab);
-            _tabStrip.Controls.Add(close);
             _tabButtons[key] = tab;
         }
-        _tabsWidth = nextLeft - TabGap + StripPad;
-        _tabStrip.AutoScrollMinSize = new Size(_tabsWidth, 0);
+        _tabsWidth = Math.Max(0, nextLeft - TabGap);
         _tabStrip.ResumeLayout();
-        FitStripHeight();
-        if (_selected != null && _tabButtons.TryGetValue(_selected, out var selectedTab)) _tabStrip.ScrollControlIntoView(selectedTab);
+        ScrollTabIntoView(_selected);
     }
 
-    // Room for the scroll bar only while the tabs overflow, so it never covers the buttons.
-    private void FitStripHeight()
+    private void ScrollTabs(int distance)
     {
-        var overflows = _tabsWidth > _tabStrip.Width;
-        var height = 2 * StripPad + TabH + (overflows ? SystemInformation.HorizontalScrollBarHeight : 0);
-        if (_tabStrip.Height != height) _tabStrip.Height = height;
+        _tabScroll += distance;
+        PlaceTabs();
+    }
+
+    private void ScrollTabIntoView(string? key)
+    {
+        if (key == null || !_tabButtons.TryGetValue(key, out var tab)) return;
+        var left = _tabLefts[key];
+        if (left < _tabScroll) _tabScroll = left;
+        else if (left + tab.Width > _tabScroll + _tabStrip.ClientSize.Width) _tabScroll = left + tab.Width - _tabStrip.ClientSize.Width;
+        PlaceTabs();
+    }
+
+    // The scroll is clamped here, so a wider header or a closed tab never leaves a gap at the right.
+    private void PlaceTabs()
+    {
+        _tabScroll = Math.Clamp(_tabScroll, 0, Math.Max(0, _tabsWidth - _tabStrip.ClientSize.Width));
+        var top = (_tabStrip.ClientSize.Height - TabH) / 2;
+        foreach (var (key, tab) in _tabButtons) tab.Location = new Point(_tabLefts[key] - _tabScroll, top);
     }
 
     private void OnViewPageRequested(ShellPage page)
@@ -259,7 +269,6 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     private void ApplyTheme()
     {
         BackColor = Theme.WindowBg;
-        _tabStrip.BackColor = Theme.WindowBg;
         _viewHost.BackColor = Theme.WindowBg;
         _empty.ForeColor = Theme.TextSecondary;
     }

@@ -53,7 +53,8 @@ dotnet publish NoisLogTray.csproj -p:PublishProfile=win-x64
 ```
 
 Output: `bin/publish/win-x64/` - a single `NoisLogTray.exe` (runtime baked in) plus
-the `.playwright/` driver folder, `Assets/`, `conpty.dll` + `x64\OpenConsole.exe` (the bundled
+the `.playwright/` driver folder (its `node.exe` kept out of the bundle by the csproj's
+`KeepPlaywrightDriverBesideExe`, or TSC sign-in fails with "driver folder missing"), `Assets/`, `conpty.dll` + `x64\OpenConsole.exe` (the bundled
 ConPTY, which must stay beside the exe) and `.env.example`. Zip that folder and share it.
 The csproj marks `.env` `CopyToPublishDirectory=Never`, so **no secrets ship**; each
 recipient fills the first-run dialog (writes `%AppData%\NoisLogTray\.env`). Google
@@ -100,12 +101,17 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   redistributable ConPTY (`conpty.dll` + `x64\OpenConsole.exe` beside the exe, from the
   `Microsoft.Windows.Console.ConPTY` package, copied by hand in the csproj and kept out of the single-file
   bundle) when `UsesBundledConpty`, else the inbox one, whose Windows 10 version re-renders the screen and
-  shifts claude's input line; each start logs `[pty] session on the bundled|inbox ConPTY`. The bundled one
+  shifts claude's input line; each start logs `[pty] session on the bundled|inbox ConPTY`. ConPTY keeps its output
+  pipe open after the child exits, so the session watches the child (`Process.Exited`, `WatchForExit`) and closes the
+  console then; the read loop sees EOF and raises `Exited` (logged `[claude] session exited`), which is what shows
+  "Press Enter to start it again" after the terminal's shell exits (`exit`). The bundled one
   asks the terminal for DA1 (`ESC[c`), focus events and win32-input-mode at start; xterm.js answers the
   first and ignores the last. `STARTF_USESTDHANDLES` with null handles keeps a parent's redirected
   stdio (a test runner, `dotnet run` from a shell) from replacing the console's. Its environment drops
   `CLAUDE*`/`ANTHROPIC*` via `BuildEnvironmentBlock`, so a tray started from a Claude Code session
-  does not make the embedded claude a child session with transcripts off; it also sets
+  does not make the embedded claude a child session with transcripts off, and the `NO_COLOR` / `AI_AGENT` /
+  `DISABLE_AUTOUPDATER` that Claude Code puts in its tool shells (`TicketLauncher.IsClaudeSessionVariable`),
+  which would turn the embedded claude black-and-white and stop its updates; it also sets
   `CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1`, because the mouse never reaches claude's fullscreen renderer
   (`"tui": "fullscreen"`) here, so wheel scroll and selection only work with the classic one), `ClaudeSessionHost`
   (owns that session for the tray's lifetime plus a ~1MB replay buffer; built from a working
@@ -116,21 +122,26 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `git` run, stdout + stderr as UTF-8, a timeout that kills the process tree; `WorktreeService` and
   `GitChanges` go through it), `GitChanges` (a worktree's changed files and the two sides of each,
   see `ChangesView` below), `TicketWorktrees` (a ticket's backend worktree path and its sibling
-  `*-Angular` worktrees) and `TicketLauncher` (the `--continue` lookup for a worktree and the VS Code
-  launch).
+  `*-Angular` worktrees), `TicketFiles` (the Files view's listing and reading, see `FilesView` below) and
+  `TicketLauncher` (the `--continue` lookup for a worktree and the VS Code launch: `cmd /c code`, the path in the
+  `NOIS_VSCODE_TARGET` variable so cmd never expands a `%NAME%` inside it, `-g path:line` when a line is given).
 - `Helpers/` - utilities: `TicketParser` (incl. `TryParseKey` for a key or Jira link), `TicketSearch`, `TimeSlots`, `TscCells`, `Timesheet`, `Leave`,
   `Hcm`, `Env`, `AppPaths`, `AppLogger`, `BrowserLock`, `AppConfig`, `AppSettings`,
   `AppIcon` (`AppIcon.Load(size)`: icons from the embedded `app.ico`), `TicketSort` (earliest due first, undated last, then key; Tasks + Dashboard),
   `PrCommentAlerts` (pure edits of the unseen-PR-comment map), `DashboardDataBuilder` (Dashboard data),
   `ClaudeAttention` (pure: parses a hook payload, maps it to the session's wait, words the notice),
   `Retry` (transient-transport-failure retry with backoff, used by the Jira/Graph/HRM clients),
-  `TeamsPost` (pure: the ticket's Teams post draft, its subject/body split and the body's HTML).
+  `TeamsPost` (pure: the ticket's Teams post draft, its subject/body split and the body's HTML),
+  `BusyWork` (`BusyWork.Shared`: the work the user may be waiting on; `Begin(label)` returns a handle whose `Dispose`
+  ends it, thread-safe. The Jira/PR check, the drain, the log column's actions, the week card and Dashboard coverage
+  reads, Add by key, Start's worktree, Ready to Test, the Changes/Files listings, the Teams post and the Settings
+  verify all register; a new slow job should too).
 - `Models/` - record types (+ the `CredentialCheck` and `NoticeKind` enums): `QueueEntry`,
-  `JiraSuggestion`/`JiraVerifyResult`, `DrainResult`/`EntryLogResult`/`OffWriteResult`,
+  `JiraVerifyResult`, `DrainResult`/`EntryLogResult`/`OffWriteResult`,
   `GraphTscOptions`, `TimeSlot`, `ToolEnvelope`, `CredentialCheck`, `UpdateInfo`; Tasks: `JiraTicket`, `DismissedTicket`,
   `TicketSection`, `DueUrgency`, `DevPriorityLevel`, `TicketPollResult`, `PrStatus`, `TrackedPr`,
   `PrNotification`, `PrCheckResult`, `StartStage`, `QueueAddResult`, `PrLookupResult`, `PrCommentAlert`;
-  Ticket page: `TicketPr`, `TicketWorktree`, `ChangeSet`, `FileChange`, `FileChangeStatus`;
+  Ticket page: `TicketPr`, `TicketWorktree`, `ChangeSet`, `FileChange`, `FileChangeStatus`, `TicketFileKind`, `TicketFileContent`;
   Claude hooks: `ClaudeHookEvent`, `ClaudeWaitReason`; Dashboard: `DashboardData`, `AttentionItem`, `AttentionKind`; coverage: `DayCoverage`, `TscReadState`;
   shell: `ShellPage`.
 - `Interface/` - abstractions (`IJiraClient`, implemented by `JiraClient`; `IAzureDevOpsClient`, by
@@ -148,11 +159,11 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `ShellForm`, `SidebarNav`, the pages and `TrayApp.ApplyLanguage` re-label on `Lang.Changed`;
   other dialogs read the language when opened. Logs and code stay English. Also `TrayApp`,
   `ShellForm` + `SidebarNav` + `ShellLayout` (the one app window, see below), the pages
-  `DashboardPage` (with `DashboardRow`, see below), `LogPage` (with the card `WeekCard`), `TasksPage` (with `TaskRow`),
-  `ClaudePage` and `TicketWorkspacePage` (with `TicketWorkspaceView`; both below, built on the web
-  views `TerminalView`, `ChangesView` and `WebViewSetup`); then `WeekCard` (the Log page's week card: HRM hours + TSC
+  `DashboardPage` (with `DashboardRow`, see below), `WorkPage` (the board `TasksPage` with `TaskRow`, beside the log
+  column `LogPage` with the card `WeekCard`; see below), `ClaudePage` and `TicketWorkspacePage` (with `TicketWorkspaceView`; both below, built on the web
+  views `TerminalView`, `ChangesView`, `FilesView` and `WebViewSetup`); then `WeekCard` (the log column's week card: HRM hours + TSC
   ticket per weekday; an under-logged past weekday is a clickable `ClickableRow` that raises
-  `DayRequested` -> the Log page puts that date in New entry via `LogPage.PrepareForDate`.
+  `DayRequested` -> the log column puts that date in New entry via `LogPage.PrepareForDate`.
   An approved day off (`DayCoverage.IsOff`) reads gray "off"
   for HRM and is judged only on the TSC marker - green `OFF`, else amber "off - not
   marked" and clickable, including when it is still in the future so planned leave can
@@ -163,21 +174,74 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   and the Jira site/email share a row; a width change rebuilds the panel and keeps typed values;
   Dev repo path has a "Browse..." folder picker), `CredentialsForm` (a thin dialog around `SettingsPanel`, used only for first-run and
   while the config is invalid), `TeamsPostView` (the ticket tab's Teams post editor, see the Ticket page), and
-  owner-drawn controls: `NotificationBell` + `NoticeToast` (see "Notices" under `ShellForm`),
+  **no Windows-default popups**: `CardDialog` is the dialog frame (borderless rounded card, drop shadow,
+  `Theme.CardBorder`, drag the background to move; `CredentialsForm` and `ConfirmDialog` derive from it);
+  `ConfirmDialog.Ask(owner, title, message, confirmText, confirmByDefault, destructive)` replaces every
+  `MessageBox` - the confirm button names the action ("Quit", "Close tab", "Dismiss"), red when `destructive`,
+  Enter = Cancel unless `confirmByDefault`, Esc = Cancel; a null owner (Quit from the tray menu while the window
+  is hidden) centers it on screen, on top and in the taskbar. It asks before: Dismiss, Clear queue, Log OFF,
+  Ready to Test, Quit / closing a tab / changing the Claude folder while the terminal runs, and saving unverified
+  Settings. `ThemedToolTip` is the owner-drawn tooltip every `ToolTip` field uses;
+  `ThemedToolTip.Track(label)` is how an ellipsis label is set up (instead of a bare `AutoEllipsis = true`): any
+  ToolTip text on a `Label` switches off its own Windows "full text" tooltip, so the shared `FullText` instance
+  takes over and pops only while `IsCut`. A static, shared tooltip uses `SetUntilDisposed`, or it would keep
+  every rebuilt row alive. **No Windows scrollbars either**: `ThemedScrollBar.Attach(target)` (a `ScrollableControl`
+  with AutoScroll, or a multiline `TextBox`) clips the target's native bar
+  away with a window `Region` and lays a sibling over that strip that draws a thin rounded thumb and drives the
+  scroll (drag, track click = page, wheel forwarded). The target keeps all of its own scrolling and layout (rows still
+  leave `SystemInformation.VerticalScrollBarWidth` free); the bar follows it on every `Application.Idle`, so call
+  sites never notify it. Not inside a `FlowLayoutPanel`/`TableLayoutPanel` parent, which would place the sibling
+  itself. Every AutoScroll area and both multiline boxes are attached. **One scrollbar look everywhere**: a pill 8px
+  thick (11px under the mouse or while dragged), 3px in from the outer edge, no track, at 40% / 60% / 80% of
+  `TextSecondary`, shown whenever there is something to scroll. `ThemedScrollBar` draws it; the Changes/Files pages
+  get it from `::-webkit-scrollbar` CSS (transparent borders place the thumb) plus overrides of Monaco's own bars
+  (`scrollbar` editor options + `body .monaco-scrollable-element` CSS), and the terminal from CSS on xterm 6's
+  VS Code-style bar (`.xterm-scrollable-element`, its idle fade turned off) with the `scrollbarSlider*` theme colors.
+  Change all four together. **Striped lists**: every other row of a list sits on `Theme.RowStripe(surface)`, an
+  opaque shade darker than the surface behind it (in both themes, so the hover color still differs) - Tasks (counted
+  per section), the three Dashboard lists, the bell history, the Queue (per date) and the week card's
+  days; rows are rebuilt on a theme switch, so they pick the color when built. A striped row hands that color to its
+  buttons (`MacButton.Surface`, `CloseButton.Surface`) so their rounded corners blend in, and a hover restores it on
+  leave. The folder
+  picker (`FolderBrowserDialog`) and the Windows balloons stay native. **One icon set**: `Icons` draws Fluent UI
+  System Icons (Microsoft, MIT; `Assets/icons`, loaded with `PrivateFontCollection.AddFontFile`, which also
+  registers them with GDI for `TextRenderer`) as font glyphs - `Icons.Draw`, the shared `Small`/`Medium`/
+  `MediumFilled` fonts. Constants are the
+  `_20_` code points; look a new one up in the font's JSON map (fluentui-system-icons repo) and add it to `Icons`,
+  whose test checks every constant is in the font. Sidebar: Board / TaskList / WindowConsole / Ticket /
+  Settings, the selected row filled; header, X buttons, chevrons, `MacButton.Glyph` (alone or beside the text,
+  `GlyphAfterText` for a dropdown), the calendar and the Changes/Files toolbars and trees (`@font-face` on the same
+  TTF) all use it, as do the week card's previous/next, the "Done" of a ticket already done in Jira (`ArrowRight`
+  beside the text) and the PR status marks: `FactTag.Runs` draws ✓ ● ✕ as CheckmarkCircle / Record / DismissCircle,
+  while the text keeps the characters for notices and Teams posts. The tray icon's menu uses `ThemedMenuRenderer`
+  like every other menu. Arrows that are prose (the Ready to Test steps tooltip, "Alt+↑") stay text. `UiScale.Factor` is a
+  fixed 125%; there is no zoom setting. Also
+  owner-drawn controls: `NotificationBell` + `NoticeToast` (see "Notices" under `ShellForm`), `BusySpinner` (left of
+  the bell: a turning arc while `BusyWork` has anything running, shown only after 250ms so a quick job never flickers
+  it, its tooltip naming the running work; idle it is drawn empty but keeps its place, so the header never shifts),
+  `FactTag` (a ticket fact as a pill: a soft fill of its tone with the text in that tone; with an action it is a
+  link, as the ticket header's PR tags are),
   `WindowGlyphButton` (header menu / minimize / maximize-restore glyphs),
-  `ThemedMenuRenderer` (themed `ContextMenuStrip`s, opened right-aligned under their button
-  so they stay inside the window; the bell history also cuts each line to fit), `MacButton`
+  `ThemedMenuRenderer` (every dropdown and the tray menu, built by `CreateMenu`: a card like the bell's history -
+  rounded `Region` and border, roomy rows (`ItemAdded` pads each item), a rounded hover, the Fluent checkmark in
+  `Theme.Accent`, inset separators; opened right-aligned under their button so they stay inside the window), `NoticeHistoryPopup` + `NoticeHistoryRow` (the bell's history: a rounded card
+  under the bell, a `ToolStripDropDown` hosting it so any outside click or Esc closes it without taking activation;
+  newest first, each notice with its kind icon, up to three lines (the rest in a tooltip) and its time, scrolling past
+  440px; a press closes it, then runs the notice's target), `MacButton`
   (rounded button; `Primary` blue, `Secondary` neutral, `Tinted(text, color)` its own fill - the ticket action
   colors `Theme.ActionStart` green / `ActionDone` teal / `ActionReadyToTest` purple, Open uses `Accent`; `ShowDot`
   paints a `Theme.Badge` attention dot in its top-right corner), `Card` (rounded card surface; `WeekCard` derives from it), `RoundedHost` (rounded border
-  around native controls like the list/textbox), `RoundedDatePicker` (rounded date
+  around native controls like the list/textbox; `OnWindow` for one on the window background, as in the header),
+  `HeaderToolbar` (a page's controls in the shell header, see `ShellForm`), `RoundedDatePicker` (rounded date
   field with a custom `ModernCalendar` popup in a rounded `CalendarPopupForm`, replacing
   the native `DateTimePicker`/`MonthCalendar`), `WillLogRow` (one owner-drawn Will Log
-  line), `ClickableRow` (a focusable/keyboard-activatable `Panel` for clickable list rows -
-  My-tickets suggestions and actionable weekly days).
-  Owner-drawn interactive controls (`MacButton`, `RoundedDatePicker`, `ClickableRow`) paint
-  a keyboard-focus ring and set `AccessibleName`/`AccessibleRole` so the app is operable by
-  keyboard and screen reader.
+  line), `ClickableRow` (a focusable/keyboard-activatable `Panel` for clickable rows -
+  sidebar items, board section headers and actionable weekly days).
+  Owner-drawn interactive controls (`MacButton`, `CloseButton`, `WindowGlyphButton`, `RoundedDatePicker`,
+  `ClickableRow`, `TicketTab`, `FactTag`, `NoticeHistoryRow`) paint a keyboard-focus ring and set
+  `AccessibleName`/`AccessibleRole` so the app is operable by keyboard and screen reader. The ring (and the focus
+  highlight) shows only while `ShowFocusCues` is on - Windows turns it on with Tab - and `OnChangeUICues` repaints:
+  a clicked button keeps focus, and a ring left on it after a mouse click reads as stuck.
 - `Program.cs` stays at the repo root.
 
 - **`Program.cs`** - entry point. Single-instance `Global\` mutex, global exception
@@ -188,26 +252,25 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   tooltip/balloon/log updates. `_draining` is an `Interlocked` guard so only one
   drain runs at a time. When config is missing it runs `RunFirstRunSetup` (a
   `BeginInvoke` after the message loop starts, not a modal in the ctor) to show
-  `CredentialsForm`. Otherwise Settings is a page: the sidebar's ⚙ item or the tray
-  "Settings..." item (`EditCredentials`) opens the shell on `ShellPage.Settings`; only while
-  there is no working config (`_service == null`, so no window) does "Settings..." fall back to the
-  dialog. Both host `SettingsPanel`: instant-apply pill groups (Language, Start with Windows via
+  `CredentialsForm`. Otherwise Settings is a page: the sidebar's ⚙ item, or a config notice's target
+  (`EditCredentials`), opens the shell on `ShellPage.Settings`; only while there is no working config
+  (`_service == null`) does `EditCredentials` fall back to the dialog. Both host `SettingsPanel`: instant-apply pill groups (Language, Start with Windows via
   `StartupService`; selected pill = `MacButton.Selected`), the account fields verified on Save
   (Enter in a field = Save), and an "Open log folder" footer. No Quit button there on purpose -
   beside Settings it reads as "close this dialog"; quitting is the tray menu's "Quit".
   `SettingsPage` re-reads the saved values each time it is shown (unless a Save is verifying), so
-  leaving the page or Esc (hide to tray) drops half-done edits; window activation does not reload. The tray menu is deliberately short - Open, Weekly
-  check... (Log page, scrolled to its week card), Tasks... (Tasks page), Settings..., Quit (plus "Download update..." when
-  one exists). Open and a left click on the icon (`OpenShell`) show the **Dashboard** when the
+  leaving the page or Esc (hide to tray) drops half-done edits; window activation does not reload. The tray menu is just Open and Quit (plus "Download update..." when
+  one exists); every page, Settings included, is reached from the window. Open and a left click on the icon (`OpenShell`) show the **Dashboard** when the
   window is hidden or not built yet, and keep the current page when it is already on screen; the
-  18:00 reminder still opens the Log page. Logging and TSC session actions live
+  18:00 reminder still opens the Work page. Logging and TSC session actions live
   only in the window, so they are not duplicated there. `ShowShell(page)` builds the shell and its
-  pages lazily (`_shell`, `_dashboardPage`, `_logPage`, `_tasksPage`, `_claudePage`, `_ticketPage`, `_settingsPage`) and shows the
-  requested page. `_claudeHost` (the Claude session) is created once and outlives every shell
+  pages lazily (`_shell`, `_dashboardPage`, `_logPage` + `_tasksPage` inside `_workPage`, `_claudePage`, `_ticketPage`,
+  `_settingsPage`) and shows the
+  requested page. `_claudeHost` (the Terminal page's terminal) is created once and outlives every shell
   rebuild, as do the per-ticket sessions (`_ticketSessions`); Quit and `Dispose` end them (Quit asks
-  Yes/No first, default No, while a ticket's Claude is running). Ticket state changes refresh
+  first (`ConfirmDialog`, default Cancel) while a ticket's terminal is running). Ticket state changes refresh
   the ticket views via `RefreshTicketViews` (Tasks + Dashboard + the Ticket page headers); launch stages and the
-  checking state are pushed to the Tasks and Dashboard pages.
+  checking state are pushed to the board and the Dashboard.
   A page Save (`SettingsPage.SaveRequested` -> `OnSettingsSaved`) writes the per-user config into
   `settings.json` (an IO/permission failure is logged and noticed), then - deferred via
   `BeginInvoke`, since the panel's click is still on the stack - rebuilds `_service` via
@@ -219,14 +282,18 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   blocked. A successful TSC re-auth (from the window, via the `ReauthSucceeded` event)
   calls `CatchUpIfDue` to retry any queue entries that were waiting on sign-in.
 - **`ShellForm`** - the single app window (title "NOIS Workday"): a `SidebarNav` on the left
-  (one row per `ShellPage` - Dashboard, Log, Tasks, Claude, Ticket, and Settings pinned at the bottom), and on the right a
-  header (menu button that collapses the sidebar to glyphs, page title, bell, theme toggle, EN/VI
-  language toggle, then minimize / maximize-restore / close) over the current page. Pages are
+  (one row per `ShellPage` - Dashboard, Work, Terminal (`ShellPage.Claude`), Ticket, and Settings pinned at the bottom), and on the right a
+  header (menu button that collapses the sidebar to glyphs, page title, busy spinner, bell, theme toggle, EN/VI
+  language toggle, then minimize / maximize-restore / close) over the current page. The title is as wide as its
+  text; `AddPage`'s optional header control docks right after it and shows only while its page is current: the
+  Terminal page's Folder menu, the Work board's search / Add by key / Check now and the Ticket tabs
+  (each a `HeaderToolbar`, docked Fill up to the header's buttons). A `HeaderToolbar` answers `WM_NCHITTEST` with
+  `HTTRANSPARENT` on its own background, so a drag or double-click on its empty part reaches the header and still
+  moves or maximizes the window. Pages are
   `UserControl`s added with `AddPage`; they may implement `IShellPage` (`OnPageShown` when the page
   becomes visible or the window is shown on it, `OnActivatedRefresh` on window activate, `OnHidden`
   to every page on hide-to-tray). The shell's `MinimumSize` is the open sidebar plus the largest
-  page `MinimumSize`, recomputed in `AddPage`. Showing a page that was never added (Tasks, when its state setup
-  failed) raises `PageUnavailable` instead.
+  page `MinimumSize`, recomputed in `AddPage`.
   **Window:** borderless (`FormBorderStyle.None`, `CS_DROPSHADOW`, `WS_MINIMIZEBOX` +
   `WS_MAXIMIZEBOX` so the taskbar, Win+Up and Aero Snap work). While Normal it is rounded (a
   `Region` plus a 1px painted border) with a 6px resize grip (`ResizeHitTest`); maximized it is
@@ -238,13 +305,13 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   land on a connected monitor, else centered (1200x800 the first time). Dragging the header moves
   the window, double-clicking it toggles maximize, and dragging a maximized header restores it
   under the cursor. The sidebar's collapsed state persists as `AppSettings.SidebarCollapsed`. The
-  Tasks row shows a red **badge** with `TasksPage.AttentionCount` (In progress / Done tickets with
+  Work row shows a red **badge** with `TasksPage.AttentionCount` (In progress / Done tickets with
   a Ready to Test button, or In progress ones already Done in Jira), raised via `AttentionChanged`
   on every `Reload`; the Claude and Ticket rows get badges from the Claude hook bridge (below).
-  **Keys:** Ctrl+1 .. Ctrl+5 switch to Dashboard / Log / Tasks / Claude / Ticket (Settings
+  **Keys:** Ctrl+1 .. Ctrl+4 switch to Dashboard / Work / Terminal / Ticket (Settings
   has no shortcut). Esc clears a non-empty input
   box (one with a placeholder, so not the inline hours field), otherwise hides to tray - except on
-  the Claude page and on the Ticket page while it has open tabs, where Esc goes to the CLI (it
+  the Terminal page and on the Ticket page while it has open tabs, where Esc goes to the CLI (it
   interrupts a running turn); the
   header's close button and Alt+F4 also **hide to tray**; `TrayApp` owns exit.
   **Notices:** every user-facing message goes through `TrayApp.Notify`, which records
@@ -253,57 +320,72 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   under the bell while the window is on screen (3s, errors 6s; capped at 2 lines). A Windows balloon is
   added unless the window is the **foreground** one (`IsForeground`), so a result that
   lands while the window is covered by another app is not missed. A notice arriving while the
-  window is hidden clears any toast.
+  window is hidden clears any toast. A notice may carry a target (`Notify`'s `open`): a click on its
+  toast, its bell-history line or its balloon (`_balloonOpen`, the last balloon's) goes there - a
+  Claude wait to that session (the Terminal page, or the ticket's tab via `ShowTicketTab`, which never
+  starts a session for a closed tab), new / Done-in-Jira tickets to Work, PR merges to the Dashboard,
+  new PR comments to the PR in the browser, log and drain results to Work, config problems to
+  Settings, an update to its download page. A balloon without a target opens the window. While a balloon click
+  runs (`_balloonClicked`), `ShowShell` uses `ShellForm.ForceForeground` (`AttachThreadInput` to the foreground
+  thread, then `SetForegroundWindow`): a background process is otherwise refused the foreground and Windows only
+  flashes the taskbar button. Other background shows (the 18:00 reminder) keep a plain `Activate`, so they never
+  take focus from an app the user is typing in.
   **Size before Anchor:** a page builds its controls at a fixed design size and assigns `Size`
   (and `MinimumSize`) **before** setting any `Anchor`, because WinForms records each anchor's edge
   distances when `Anchor` is assigned; anchoring first records them against the default size and
   the layout breaks on the first resize. Lists whose rows are built at the list's width re-render
-  (posted via `BeginInvoke`) only when that width really changes; My tickets also re-renders
-  when a height change flips its scrollbar allowance, coalesced to one posted render per burst;
-  the Tasks page re-renders on any card size change, since its kanban columns are placed by hand.
+  (posted via `BeginInvoke`) only when that width really changes; the board re-renders on any card size
+  change, coalesced to one posted render per burst.
 - **`DashboardPage`** (partial with `DashboardPage.Rows.cs`, rows are `DashboardRow`) - today at a
   glance, four cards placed by `ShellLayout.DashboardCardBounds` (one column below
-  `TwoColumnMinWidth`, else Today + In progress left, Attention + New right). **Today**: the queue
+  `TwoColumnMinWidth` (`DashboardColumns`), else Today + In progress left, Attention + New right). **Today**: the queue
   line with a "Log queue now" button (`LogQueueRequested` -> the tray's guarded drain; disabled while
   `SetDraining(true)`), and today's TSC + HRM coverage. **In progress**: Started tickets with due date
   and a PR summary, "+ queue" (`QueueTicketRequested` -> `TrayApp.QueueTicketForToday`, the same
   `AddStartedTicket` path Start uses) and Open. **Attention**: Ready to Test (dev PR merged), overdue,
   unseen PR comments ("Seen" -> `CommentsSeen`) and In progress tickets already Done in Jira
-  ("-> Done" -> `MarkDoneRequested`). **New**: pending tickets with Start. Lists are sorted by
-  `TicketSort.ByDue`; a "View Tasks" link raises `PageRequested(Tasks)`. The page only draws local
+  (Done with an arrow -> `MarkDoneRequested`). **New**: pending tickets with Start. Lists are sorted by
+  `TicketSort.ByDue`; an "All tickets" link raises `PageRequested(Work)`. The page only draws local
   data (`DashboardDataBuilder` over the ticket store + queue) and raises events; `TrayApp` does the
   work and re-seeds busy/checking state into a rebuilt page. Coverage is read once per window show
-  with `allowSniff: false` (cached/override Graph token only, never Chrome), so TSC may read "not
+  with `allowSniff: true`, so it sniffs a Graph token only when none is cached (shared with the week card's
+  first read, see `WeekCard`); the midnight rollover re-reads without Chrome, so TSC may then read "not
   read (click Re-check)" (`TscReadState.NoToken`); Re-check reads with `allowSniff: true`. After a
   drain that had a today entry, `TrayApp` re-reads coverage without a sniff (the drain's token is
   still cached), but only if the page had already loaded it.
-- **`LogPage`** - the capture page, structured like the old web app: `Card`s, input first:
+- **`WorkPage`** - the Work page (`ShellPage.Work`, Ctrl+2): the old Log and Tasks pages in one, since both picked
+  tickets from Jira. The board (`TasksPage`, left) and the log column (`LogPage`, right, `ShellLayout.LogColumnWidth`
+  = one card plus its 20px right margin) sit side by side from `ShellLayout.WorkSideBySideMinWidth` (the board's
+  `DesignWidth` + the column), each full height (`ShellLayout.WorkBounds`); a narrower page stacks the column at its
+  natural height (`LogPage.NaturalHeight`) over the board (at least its `DesignHeight`) and the page scrolls. There
+  only the page scrolls (`LogPage.SetStacked` turns the column's own scrolling off), and the page's `AutoScroll` is
+  turned on only after the columns are placed, or the side-by-side bounds would scroll it sideways. A row's
+  **"+ Log"** (`TasksPage.LogRequested`, key + summary) calls `LogPage.AddTicketToInput`, which marks the ticket
+  verified with that summary and focuses the ticket box; `LogPage.EntryTicketsChanged` (every edit of the box)
+  feeds `TasksPage.SetEntryKeys`, so a typed ticket's row shows a disabled "In entry" and an accent bar
+  (re-render debounced 200ms, like the search). `WorkPage` forwards `IShellPage` to both. With Tasks off this session the board's
+  place shows the "Tasks are disabled" text. There is no "My tickets" list or custom JQL any more: the board's
+  search filters, and "Add by key/link" puts any other ticket on the board. Both sit in the shell header
+  (`WorkPage.HeaderControl` = `TasksPage.HeaderControl`), so the board starts at the top, level with New entry.
+- **`LogPage`** - the log column of the Work page, structured like the old web app: `Card`s, input first:
   "New entry" (date + ticket, then one action row: the primary "Add to queue", a "Log now" dropdown
   with TSC + HRM / TSC only / HRM only, and a "more" dropdown with Log OFF... / Check TSC
   session / Re-authenticate TSC; the dropdowns are `ContextMenuStrip`s painted by
   `ThemedMenuRenderer`), "Queue" (titled QUEUE; called "Will log" in code, described
-  below), the week card (`WeekCard`, see below), and "My tickets" (a
-  "My tickets" list from `LoggingService.GetMyTicketsAsync` - every match, paged via
-  `nextPageToken` (capped at 500), in a list that scrolls - each row shows the key,
-  summary, then a right-aligned due date - click a row to add it; an "Edit JQL" button
-  opens `JqlForm` to customise the query driving that list (validated against Jira, then
-  persisted + re-fetched)).
-  **Layout:** `LayoutCards` (on every `OnSizeChanged`) places the four cards from
-  `ShellLayout.LogCardBounds`. Below `ShellLayout.TwoColumnMinWidth` (1180px) they stack in one
-  column (New entry, Queue, the week card, My tickets at least at its built height) and the page
-  scrolls (`_body.AutoScroll`; cards are placed at their bounds plus `AutoScrollPosition`, kept clear
-  of the scroll bar via `ScrollBarOverflow`; the window's minimum size does not grow); at or above it
-  New entry + the Queue fill the left column, and the week card + My tickets (the long list) the right
-  one. Focusing the ticket box scrolls back to the top. Only
-  `Bounds` change, so switching columns keeps typed text. The cards carry no `Anchor`; the
-  controls inside them do (the Queue and My tickets lists stretch on all four sides).
+  below) and the week card (`WeekCard`, see below).
+  **Layout:** `LayoutCards` (on every `OnSizeChanged`) places the three cards from
+  `ShellLayout.LogCardBounds`, stacked; the Queue takes any extra height, so the week card ends at the bottom
+  margin. A column shorter than the built cards scrolls (`_body.AutoScroll`; cards are placed at their bounds
+  plus `AutoScrollPosition`, kept clear of the scroll bar via `ScrollBarOverflow`). Focusing the ticket box
+  scrolls back to the top. Only `Bounds` change, so a resize keeps typed text. The cards carry no `Anchor`; the
+  controls inside them do (the Queue list stretches on all four sides).
   `BuildLayout` stores the cards and their built heights before assigning `Size`, so that first
   `OnSizeChanged` reproduces the built bounds before `AnchorForResize` records the distances.
   "Will log" has one row per ticket - a
   status dot, the colored
   ticket key, and its time slots; the dot reflects Jira verification, green valid /
   red not found / amber error, via `VerifyTicketsAsync` debounced on typing and on
-  blur, suggestions pre-marked valid. While typing it previews the typed tickets for
+  blur, tickets added from the board pre-marked valid. While typing it previews the typed tickets for
   the selected date, using an **editable `WillLogEditRow`** with an inline hours field
   per ticket: default is the even split (`TimeSlots.EvenSplit`), editing sets a custom
   per-ticket duration (partial day allowed, day capped at 8h; over-8h disables Add to queue
@@ -314,10 +396,10 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   in the background, since `Leave` does not fire on deactivation).
   With the input empty it falls back to the **whole persisted queue** grouped by date
   (each headed "(queued for <LOG_TIME>)"), shown read-only via `WillLogRow`, and shows a
-  "Log queue now" (secondary; raises `DrainRequested` -> the tray's guarded drain) + "Clear queue"
+  "Log queue now" (secondary; raises `DrainRequested` -> the tray's guarded drain) + "Clear queue" (asks first)
   buttons - this is the single view of what's scheduled (there is no separate queue card). The
-  list **scrolls internally** (`WillLogHostH` sizes it for a date header + 3 ticket rows in the
-  one-column layout). "Log OFF" needs no ticket and takes any date,
+  list **scrolls internally** (`WillLogHostH` sizes it for a date header + 3 ticket rows at its built
+  height). "Log OFF" needs no ticket and takes any date,
   confirms, then writes the `OFF` marker for the selected day and drops that day's queued
   entries; it is the only path that overwrites a cell holding real work.
   `RefreshQueuedView` (called on queue/clear, on window
@@ -330,26 +412,31 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   on valid input via `UpdateActionState`.
   `MacButton`, `Card`, and `RoundedHost` are owner-drawn
   (no third-party UI library).
-  Keyboard fast path: showing the page and picking a suggestion both focus the ticket
-  box, and Enter in the ticket box queues (only when "Add to queue" is enabled). Enter in the
-  search box instead adds the top match to the ticket box (never queues). Hiding the window clears
+  Keyboard fast path: showing the page and a board row's "+ Log" both focus the ticket
+  box, and Enter in the ticket box queues (only when "Add to queue" is enabled). Hiding the window clears
   the half-typed ticket text (`OnHidden`), because the date resets to today on reopen.
-- **`TasksPage`** (with `TaskRow`) - Jira tickets in sections New / In
-  progress / Done / Dismissed, a search box, "Add by key/link", and "Check now"; it re-renders on
-  show only when data changed while hidden. When the list area (card width - 16, in logical
-  `UiScale` pixels) reaches `ShellLayout.TaskBoardMinWidth` the sections become a **kanban**: three
-  columns New / In progress / Done placed by `ShellLayout.TaskBoardColumnBounds` inside a host
-  panel that scrolls sideways; a column with nothing to show (after search; a collapsed Dismissed
-  alone counts as empty) shrinks to `TaskColumnCollapsedWidth` and the others share the rest, never
-  below `TaskColumnMinWidth`. Each column scrolls on its own, with a 1px
-  `Theme.Divider` line in each gap; Dismissed (collapsed by default) sits at the end of the Done
-  column. No drag-and-drop - rows move via their buttons as before. Narrower, it is one vertical
-  list. Search, collapse and focus work the same in both modes; any card resize re-renders once per
-  burst (posted), keeping each list's scroll within the same mode. A `TaskRow` (and a `DashboardRow`) has
-  three lines: key + summary with the action buttons at the right (Start / Done / Open / Ready to Test tinted,
-  Dismiss / Restore / Queue / Seen neutral, see `MacButton`); the facts
-  (`TaskRow.Facts`: `Due Oct 15`, `P 2`, `ETA Oct 15`, status, `Logged 3h`; dates via `TaskRow.ShortDate`)
-  across the row; and `TaskRow.PrLine` (`PR  BE main ✓ · dev ●`, green once every PR is closed) when
+- **`TasksPage`** (with `TaskRow`) - the board of the Work page: Jira tickets in sections New / In
+  progress / Done / Dismissed. Its search box, "Add by key/link" + Add, "Check now" and the last check's time are a
+  `HeaderToolbar` in the shell header (`HeaderControl`, laid out by `LayoutToolbar`: a narrow header drops the time,
+  then Add by key, and the search box takes what is left, 140-280px); Add's result is a notice (`StatusRaised`), as
+  the header has no room for a result line. It re-renders on
+  show only when data changed while hidden. The sections are stacked in one list across the full
+  card width at any window size (no kanban columns; Dismissed is collapsed by default); rows move
+  via their buttons. Any card resize re-renders once per burst (posted), keeping the list's scroll.
+  A `TaskRow` (and a `DashboardRow`) has
+  three lines (key + summary, facts, PRs) that stop short of the action buttons, which sit at the right centered on the
+  row's height (Start / Done / Open / Ready to Test tinted,
+  Restore / Queue / Seen neutral, see `MacButton`; Dismiss is a `CloseButton` X at the right edge, asked first; a
+  `TaskRow` given `onLog` has "+ Log" leftmost, "In entry" while the ticket is in New entry, none when Dismissed);
+  the facts as `FactTag`s (`TaskRow.Facts`: `Due Oct 15` blue, `P 2`, `ETA Oct 15` teal, `Logged 3h` green, then the
+  status purple; red/orange when they need action - overdue/soon, top/high priority, no time logged, done in Jira - and
+  gray when empty; dates via `TaskRow.ShortDate`; `TaskRow.DueFact` is shared with the Dashboard). Due, P, ETA and
+  Logged get fixed widths (`RowColumns.FactWidths`, measured from each fact's widest form in either language, every
+  month included), so they line up in columns across rows; the status, whose length has no bound, comes last
+  across the row; and `TaskRow.PrTags` ("PR", then one tag per repo of `BE main ✓ · dev ● | FE Portal dev ✓`,
+  `TaskRow.PrTone`: green once its PRs are closed, blue while one is open, gray when unknown; each front-end repo is
+  named by `DashboardDataBuilder.RepoName`, which the ticket header's PR tags,
+  the PR notices and `TeamsPost`'s `[FE <App>]` headers also use) when
   there are PRs (on the Dashboard only In progress rows pass them), hidden while the row is busy. In a `TaskRow` the buttons move
   to their own line when they need more than half the row (`ButtonsOnOwnLine`) and wrap across
   lines by `ButtonLines`, so the larger buttons at high DPI are never clipped in a narrow column.
@@ -379,62 +466,98 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   throws; the URL is a secret and is never logged). **Ready to Test** (`TrayApp.MoveToReadyToTestAsync`)
   shows on an In progress / Done row once its `dev` PR merged: it walks the ticket through Jira's
   transitions (`JiraStatusFlow.GetStepsToReadyToTest`, from Jira's **live** status so it never walks
-  backward), stops at the first missing transition, then re-reads the ticket. Deployed to Dev / Ready
+  backward), stops at the first missing transition, then re-reads the ticket. It asks first (testers see the
+  move). Deployed to Dev / Ready
   to Test stay a manual click because CI deploys after the merge; the merge notice only reminds.
   This replaces TaskWatcher: **shut TaskWatcher down and remove it from startup**, or both apps
   post the same events to Teams.
-- **`WeekCard`** - the weekly coverage check, a card on the Log page (see `UI/` above). It reads the current
-  week on the Log page's first `OnPageShown` after the window was shown (`LoadIfNeeded`) **without Chrome**
-  (`allowSniff: false`, like the Dashboard's coverage), so a background sniff never takes the browser from
-  Log now; a day TSC could not read shows "not read", and the card's status line then says "Refresh reads it". `<` / `>` read without Chrome too; only
-  Refresh may launch it. Hiding to tray resets it to the current week (`Reset`). After a log action on the
-  Log page (TSC + HRM, TSC only, HRM only, Log OFF) and after a drain (`TrayApp.RefreshAfterDrain`), a loaded
+- **`WeekCard`** - the weekly coverage check, a card in the log column (see `UI/` above). It reads the current
+  week on the Work page's first `OnPageShown` after the window was shown (`LoadIfNeeded`) with `allowSniff: true`,
+  like the Dashboard's first coverage read, so it is current without a Refresh: with no cached Graph token
+  it sniffs one (headless Chrome, at most once per token lifetime), and `AcquireGraphTokenAsync`'s lock makes
+  the other reader, and a Log now started meanwhile, wait for that token instead of finding the browser busy.
+  The previous / next week buttons read without Chrome (the token is usually cached by then); a day TSC could
+  not read shows "not read", and the card's status line then says "Refresh reads it". Refresh may always
+  launch Chrome. Hiding to tray resets it to the current week (`Reset`). After a log action in the
+  log column (TSC + HRM, TSC only, HRM only, Log OFF) and after a drain (`TrayApp.RefreshAfterDrain`), a loaded
   card re-reads without Chrome (`ReloadIfLoaded`); a read requested while one runs follows it.
-- **`ClaudePage`** - a thin `IShellPage` around one `TerminalView`, an interactive `claude` CLI
-  inside the window. `ClaudeSessionHost` (owned by `TrayApp`) runs `%UserProfile%\.local\bin\claude.exe`
-  (else `claude.exe` on PATH) under ConPTY. Its folder defaults to `DEV_REPO_PATH`; the terminal bar's
-  "Folder" menu (only on this page, not on ticket tabs) lists the dev repo plus up to
+- **`ClaudePage`** - the Terminal page (labelled "Terminal"; `ShellPage.Claude` in code): a thin `IShellPage` around
+  one `TerminalView`; its header (`HeaderControl`, a `HeaderToolbar`) holds the Folder menu. **Every terminal (this page
+  and each ticket tab) is a PowerShell that runs claude**: `ClaudeSessionHost` (owned by `TrayApp`) starts `pwsh.exe`
+  when on PATH, else `powershell.exe`, as `-NoLogo -NoExit -Command "function global:claude { & '<claude.exe>' --settings
+  '<hooks>' @args }; claude <argument>"` under ConPTY, with claude.exe from `%UserProfile%\.local\bin` (else `claude.exe`
+  on PATH). So `/exit` (or Ctrl+C twice) leaves the PowerShell prompt, where `claude update`, `claude -c`, `claude
+  --model ...` or any command runs, and a `claude` typed there still gets the hook settings (a function wins over an
+  exe in PowerShell; the function calls the `.exe` so it never calls itself). `exit` ends the terminal. Its folder defaults to `DEV_REPO_PATH`; the "Folder" menu in the
+  shell header beside the title (`TerminalView.FolderButton`, put in `ClaudePage.HeaderControl`; ticket tabs have none) lists the dev repo plus up to
   `ClaudeFolders.MaxRecent` recently picked folders and "Choose another folder...". A pick asks before
-  stopping a running Claude, then restarts it there (`TrayApp.ClaudePage.cs`; `AppSettings.ClaudeDirectory`,
+  stopping a running terminal, then restarts it there (`TrayApp.ClaudePage.cs`; `AppSettings.ClaudeDirectory`,
   null = the dev repo, and `RecentClaudeDirectories`; a vanished folder falls back to the dev repo).
   The page resumes its own last conversation in that folder with `--resume <id>`
   (`TicketLauncher.GetResumeArgument`, only while the transcript exists). The id comes from the hooks'
   `session_id` and is kept per folder in `AppSettings.ClaudeSessionIds`; /clear moves it to the new
-  session. It is not `--continue`, since the user runs other Claude sessions in the dev repo and
-  `--continue` would pick the newest of those. The command line is built by
-  `ClaudeSessionHost.BuildCommandLine`: `--settings "<file>"` (the hook settings, always quoted) comes
-  first, then the argument - flags such as `--continue` / `--resume <id>` go bare, prompts such as
-  `ship <KEY>` are quoted.
+  session, and so does a claude typed at the prompt in that folder, but not one started after a `cd` elsewhere
+  (`TicketLauncher.IsTranscriptOfFolder` checks the hook's `transcript_path`). It is not `--continue`, since the user
+  runs other Claude sessions in the dev repo and `--continue` would pick the newest of those. The command line is
+  built by `ClaudeSessionHost.BuildCommandLine`: the argument follows the first `claude` - flags such as `--continue` /
+  `--resume <id>` go bare, prompts such as `ship <KEY>` are single-quoted; nothing may hold a double quote, which would
+  end the `-Command` string.
 - **`TerminalView`** - the reusable terminal (extracted from `ClaudePage`): it draws a session host with
   **xterm.js** in a **WebView2** (`Assets/terminal/`: `index.html` + vendored xterm 6 and addon-fit,
   MIT). **`WebViewSetup`** creates the one shared WebView2 environment (data in
   `%AppData%\NoisLogTray\WebView2`) and serves `<exe>\Assets` to every web view through the virtual
   host `noislogtray.assets`; it also sets `DefaultBackgroundColor` to the window background (no white
-  flash in dark mode) and blocks popups and navigation away from that host. A view starts its
+  flash in dark mode) and blocks popups and navigation away from that host. Each page's URL also carries the
+  current theme (the terminal's `theme` = the same object as its `theme` message; Changes/Files `colors` + `dark`,
+  applied by a `<head>` script and given to Monaco at creation), so the first paint is already themed: the `theme`
+  message only follows `ready`, which for Changes/Files waits for Monaco, and the pages' CSS defaults are dark. A view starts its
   WebView2 on its first `Activate()`; later calls re-fit with a `fit` message (the window may have
   been resized while hidden). Messages are JSON: page -> host `ready` / `resize` /
-  `input` / `page` (Ctrl+1..5 typed in the terminal, which WebView2 keeps from the form's
-  `ProcessCmdKey`; mapped by `TerminalView.PageForShortcut`) / `pasteRequest`, host -> page `output` (base64
-  bytes, so split UTF-8 survives) / `theme` / `focus` / `reset` / `fit` / `paste`. Output is coalesced and flushed at
+  `input` / `page` (Ctrl+1..4 typed in the terminal, which WebView2 keeps from the form's
+  `ProcessCmdKey`; mapped by `TerminalView.PageForShortcut`) / `pasteRequest` / `openPath` / `openUrl`, host -> page `output` (base64
+  bytes, so split UTF-8 survives) / `theme` (xterm's theme plus the `jump` button's card colors) / `labels` / `focus` /
+  `reset` / `fit` / `paste`. While the view is scrolled above the newest line (`viewportY < baseY`, checked on every
+  scroll and render) a round ArrowDown button sits at the bottom center; a click scrolls to the bottom and focuses the
+  terminal, ready to type. Output is coalesced and flushed at
   most every 16ms. A rebuilt view (Settings save) `Attach`es to the running session and replays its buffered
-  output, then resizes to nudge a repaint. A mouse selection (drag or double-click) is copied on release; a
-  right-click pastes (the host reads the clipboard, the page calls `term.paste` for bracketed paste);
+  output, then resizes to nudge a repaint. A mouse selection (drag or double-click) is copied on release;
+  Ctrl+V and a right-click paste through the host (`pasteRequest`; the page would need a clipboard permission), which
+  picks by `TerminalView.PasteFor`: text goes back for `term.paste` (bracketed paste) and wins over an image beside it;
+  an image alone only sends claude its image-paste key, Alt+V on Windows (`ESC v`), so claude reads the clipboard
+  itself and inserts an `[Image #N]`; files copied in Explorer paste as their quoted paths;
   `minimumContrastRatio` 4.5 keeps claude's dark-background colors readable on either theme (it matters on light).
-  Ctrl+C copies a selection, else sends ^C. When the CLI
-  exits the view says so and Enter starts a new session; the top bar shows the working directory
-  and a Restart button (stop, clear the screen, start again). The csproj's `DropWebView2Wpf`
+  Ctrl+C copies a selection, else sends ^C. Shift+Enter sends Ctrl+J (`\n`, claude's newline), since
+  xterm.js sends `\r` for it like Enter and would submit. Ctrl+click on a web URL (the same link provider, trailing
+  punctuation dropped) or an OSC 8 hyperlink (`linkHandler`) posts `openUrl`, and the host opens the browser only for
+  http(s) (`TaskRow.WebUrl`, also the Files view's check), on the Terminal page and in ticket tabs alike. Ctrl+click on
+  a file path (an xterm link provider: `C:\...` or a relative path with an extension, optionally `:line[:col]`, never
+  inside a URL) posts `openPath`;
+  `TerminalView.ResolvePathLink` resolves it against the session's folder and raises `FileRequested` only for a file
+  that exists. The Terminal page opens it in VS Code; a ticket tab shows it in its Files view when `FilesView.Locate`
+  places it in the ticket's docs (or a worktree's copy of them) or a worktree, else opens VS Code. When the shell
+  exits the view says so and Enter starts a new one, running claude with its argument again (there is no Restart
+  button). The terminal takes its view's whole height; the Terminal page's Folder menu lives in the shell header (the
+  checked item names the folder). The csproj's `DropWebView2Wpf`
   target (also in the test project) removes the package's WPF wrapper reference, which otherwise
   clashes with WinForms' `WindowsBase` (MSB3277).
 - **`TicketWorkspacePage`** (with `TicketWorkspaceView`) - the Ticket page (`ShellPage.Ticket`, the
-  sidebar row after Claude, Ctrl+5): a tab strip (a `MacButton` plus an "x" per ticket, an
-  empty-state label when none is open, `HasOpenTabs`; events `CloseRequested` / `VsCodeRequested` /
+  sidebar row after Claude, Ctrl+4): a tab strip in the shell header (`HeaderControl`, a `HeaderToolbar`; with no
+  room for a scroll bar there, more tabs than fit scroll sideways with the mouse wheel over them, and the selected
+  one is always scrolled into view) (one owner-drawn `TicketTab` per ticket - the key and its × in a
+  single pill like a browser tab, the × circled on hover; a middle click or Delete also closes, the waiting dot sits in
+  its corner - an empty-state label when none is open, `HasOpenTabs`; events `CloseRequested` / `VsCodeRequested` /
   `SelectionChanged` / `PageRequested`) over the selected ticket's `TicketWorkspaceView`. The view
-  has a header - the Jira key link, the summary, `TaskRow.Facts`, the PR links
+  has a header - row 1 is the Jira key link, the summary (cut with "..." and a tooltip), `TaskRow.Facts` as tags and the
+  buttons (`KeyRow`: the summary gives way down to 160px, then the facts take a row of their own); below it one PR row
+  per repo (`PrGroups`: "BE", "FE External", ... in a label column, then that repo's PRs as clickable `FactTag`s,
+  `PrTagText` = branch, status mark, number, comments; merged green, open blue, else gray)
   (`DashboardDataBuilder.LatestPrs` -> `TicketPr`, `Url` from `AzureDevOpsClient.PullRequestUrl`)
-  and the Claude / Changes / Teams view buttons plus VS Code - over a `TerminalView`, a `ChangesView` or a
-  `TeamsPostView` (the last two created on their first click; all live while the tab is open). VS Code opens only the backend worktree
-  folder (`TicketLauncher.OpenVsCode`), with no Claude inside it. The ▴/▾ button at the far right collapses the
-  header to its key line (facts and PR links hidden) for every tab at once (`AppSettings.TicketHeaderCollapsed`).
+  and the Claude / Changes / Files / Teams view buttons plus VS Code (each button is as wide as its longer label,
+  English or Vietnamese) - over a `TerminalView`, a `ChangesView`, a `FilesView` or a
+  `TeamsPostView` (the last three created on their first click; all live while the tab is open). The header's VS Code button opens only the backend worktree
+  folder (`TicketLauncher.OpenVsCode`), with no Claude inside it (the Files toolbar's opens the selected file). The ▴/▾ button at the far right collapses the
+  header to its key row (the PR rows, and the facts when they had a row of their own, hidden) for every tab at once
+  (`AppSettings.TicketHeaderCollapsed`).
   **Teams view** (`TeamsPostView`, built by `TrayApp.CreateTeamsPostView` in `TrayApp.TeamsPost.cs`) posts a
   ticket announcement **as the user**: the app POSTs
   `{"subject": <first line>, "message": <the rest as HTML>}` to the user's own Power Automate workflow
@@ -461,22 +584,26 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   end up in paths, git refs and a cmd.exe line). `PruneTicketTabs`, run when the shell
   is built, drops a tab whose backend worktree is gone and whose session is not running (skipped
   while the dev repo itself is missing, so a mistyped path in Settings does not lose the tabs).
-  Closing a tab asks Yes/No (default No) while Claude still runs, then stops the session; the
-  dialog is raised via `BeginInvoke` because the "x" is on the Click stack of a button `SetTabs`
-  disposes.
+  Closing a tab asks first (`ConfirmDialog`, default Cancel) while its terminal still runs, then stops the session; the
+  dialog is raised via `BeginInvoke` because the close comes from a mouse or key handler of the `TicketTab` that
+  `SetTabs` disposes.
 - **Claude hook bridge** (`ClaudeHookServer`, `ClaudeAttention`, `TrayApp.ClaudeAttention.cs`) - tells
   the window when a Claude session waits for the user. `TrayApp` starts the server in its ctor: an
   `HttpListener` on a free `localhost` port under a random per-run token path
   (`http://localhost:<port>/<token>/<session>`; http.sys answers 404 outside that prefix, so the
   token check is free). Every session's `ClaudeSessionHost` gets a `settingsFile`
   (`HookSettingsFor`, resolved at each start) = `%AppData%\NoisLogTray\claude-hooks\<session>.json`,
-  whose HTTP hooks (UserPromptSubmit / PreToolUse / PostToolUse / Notification / Stop) POST to that
+  whose HTTP hooks (UserPromptSubmit / PreToolUse / PostToolUse / Notification / Stop / SessionEnd) POST to that
   session's URL; claude merges them with the user's own hooks and the server always answers `200 {}`,
   so it never blocks or alters a turn. The `/hooks` menu does not list `--settings` hooks even though
   they run; to check them, look for the `[hooks] <session>: ...` log lines. The session name is `ClaudeAttention.GeneralSessionName`
-  (`claude`) for the Claude page, else the ticket key. No free port or an unwritable settings file
+  (`claude`) for the Terminal page, else the ticket key. No free port or an unwritable settings file
   only means that session starts without hooks, as before.
-  **Waiting rules** (`ClaudeAttention.Next`): Stop -> `Finished`; a `permission_prompt` /
+  **Waiting rules** (`ClaudeAttention.Next`): Stop -> `Finished`, unless its `background_tasks` still lists a
+  running `subagent` (`ClaudeHookEvent.SubagentsRunning`): the turn ended only to wait for background agents, so the
+  wait is left as it was and no "done" notice fires; claude starts another turn when they finish (UserPromptSubmit ...
+  Stop with an empty list), and that Stop is the done. A background shell or Monitor (`type: "shell"`) does not hold it
+  back, since a dev server may run for good; a `permission_prompt` /
   `worker_permission_prompt` Notification -> `Permission` (2.1.284 draws AskUserQuestion as a
   permission dialog, so its prompt stays `Question`; the prompt only comes after the dialog is open 6s);
   `elicitation_dialog` / `elicitation_url_dialog` / `agent_needs_input` or a PreToolUse of
@@ -484,17 +611,18 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   tool event end the wait; `idle_prompt` changes nothing. A subagent's tool event (payload has
   `agent_id`) ends only a `Permission` wait, because background agents keep running after a Stop.
   **Badges and notices:** `TrayApp.OnClaudeHook` (marshaled from the pool thread) keeps
-  `_claudeWaits` (session -> reason) and logs each change as `[hooks]`. A (re)starting session (`Starting`), an ended one (`Exited`) and a closed or pruned tab
-  clear their wait (`Dispose` raises no `Exited`). A `Finished` wait also clears once seen
+  `_claudeWaits` (session -> reason) and logs each change as `[hooks]`. A (re)starting terminal (`Starting`), an ended
+  one (`Exited`), a claude that ended inside a running terminal (`SessionEnd`: /exit, /clear, Ctrl+C twice; SessionStart
+  takes no HTTP hooks) and a closed or pruned tab clear their wait (`Dispose` raises no `Exited`). A `Finished` wait also clears once seen
   (`ClaudeAttention.ClearsWhenSeen`; `AcknowledgeSeenWaits` runs on `ShellForm.PageViewed` - page switch, window
   shown or activated - and on a tab switch, and a Stop arriving while `IsWatching` sets no dot); `Permission` /
   `Question` stay until answered, since claude is blocked on them. `RefreshClaudeAttention` (also run when the shell
   is built) sets a `1` badge on the Claude row while the general session waits, a count badge on the
   Ticket row, and a dot on each waiting ticket tab (`TicketWorkspacePage.SetWaiting` ->
-  `MacButton.ShowDot`). A new wait is also a `Notify` ("MDP-1: Claude is done - your turn." /
-  needs permission / is asking; the general session is labelled "Claude page") unless `IsWatching`: the
-  window is the foreground one and already on that session (the Claude page, or the Ticket page with
-  that ticket selected, even while its Changes view is open). A hook for a closed tab or an ended
+  `TicketTab.ShowDot`). A new wait is also a `Notify` ("MDP-1: Claude is done - your turn." /
+  needs permission / is asking; the general session is labelled "Terminal") unless `IsWatching`: the
+  window is the foreground one and already on that session (the Terminal page, or the Ticket page with
+  that ticket selected, whichever view is open). A hook for a closed tab or an ended
   session is ignored.
 - **`ChangesView`** - the ticket's changes as a read-only diff. `TicketWorktrees.Find` lists the
   backend worktree first, then every sibling `*-Angular` repo that has a
@@ -518,6 +646,31 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   disk), so nothing over 1MB is read whole. Monaco is vendored
   under `Assets/monaco` (monaco-editor **0.52.2** `min/vs`, the last AMD build; nls files removed,
   ~12MB; `LICENSE-monaco.txt`) and copied to the output with the rest of `Assets/`.
+- **`FilesView`** - the ticket's files, read-only. The list on the left has one group per source: `Docs - <KEY>`
+  (`TicketFiles.DocsPath`: `docs\<KEY>` in the dev repo, else in the ticket's backend worktree; every file, by
+  name) and then each `TicketWorktrees.Find` worktree (`"BE - Backend-DotNet"`, `"FE - Portal-Angular"`;
+  `TicketFiles.ListWorktree` = tracked + untracked-not-ignored via `git ls-files`, minus files deleted on disk, with
+  `--no-optional-locks`). A group that cannot be listed shows its error and the others still list. Each group is a
+  folder tree like `ChangesView`'s whose folders build their rows on first open (a 10k-file worktree costs only its top
+  level); a filter box above it switches to a flat list of the first 500 matches. The right shows the selected file by
+  `TicketFileKind`: `Text` in Monaco (`Assets/files/index.html`, same vendored Monaco), `Markdown` rendered with a
+  Source / Rendered switch, `Image` inline (a data URL, up to 10MB; images in rendered markdown are asked for
+  one by one); `Binary`, `TooLarge` (text over `GitChanges.MaxChars`, an image over 10MB) and a failed read (kind
+  `error`) show a note with a Show in folder button. The page can only name a file as a (group, path) pair, and the host opens only a pair it listed itself
+  (`FilesView.FullPath`), so a made-up path reads and opens nothing. It re-lists on every `Activate`, Refresh and
+  language switch; the open file is sent again only when its write time or size changed (or the language
+  switched), so a re-list keeps its scroll. VS Code opens the file (`TicketLauncher.OpenVsCode`) and Show in folder
+  runs `explorer.exe /select`. `Assets/files/markdown.js` renders with **marked** (`Assets/marked`, MIT,
+  `LICENSE-marked.txt`), loaded before Monaco's AMD loader. Docs come from Jira and other people, so raw HTML is escaped (shown as text) except `<br>`, and a link
+  becomes an anchor only for http(s) or a relative path that stays inside the group (a relative link to a listed
+  file opens it in the view, http(s) opens the browser); `javascript:`, `data:`, `//host` and the like stay plain
+  text. List width (em) and list hidden are posted as a `layout` message and kept in `AppSettings`
+  (`FilesListWidthEm`, `FilesListHidden`); labels come from a `labels` message. A Ctrl+clicked terminal path arrives
+  through `Reveal`, answered after the listing that the view's `Activate` starts: a listed file gets a `reveal`
+  message (the page clears the filter, opens the file's folders, selects it and goes to the line, switching a rendered
+  markdown to Source) when the listed copy is the clicked file or byte-equal to it (`ShowsSameContent`: the docs group
+  lists the dev repo's copy of a worktree's docs). A differing copy, a file the list does not hold (gitignored, or its
+  group failed) or a view that failed to start opens the clicked file in VS Code instead.
 - **`LoggingService`** - orchestrator over both destinations plus Jira. `DrainQueueAsync`
   is the core: sniff one Graph token, log every queued entry to both destinations
   (`LogEntryAsync` runs TSC + HRM in parallel), and remove only entries that fully
@@ -530,7 +683,8 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `GetOffDatesAsync` in parallel, merged into `DayCoverage` per date (future dates
   skipped -> nulls, but leave is read for the whole week so a planned day off reads
   "off", not "pending"). Each day carries a `TscReadState` (`Read`, `NotDue` for a future day,
-  `NoToken`, `Failed`). With `allowSniff: false` (Dashboard background reads) it uses only
+  `NoToken`, `Failed`). With `allowSniff: false` (week paging, the re-reads after a log or drain, the
+  Dashboard's midnight rollover) it uses only
   `TryGetCachedGraphToken` / the override and never launches Chrome; no token is then `NoToken`
   rather than `Failed`. `LogOffAsync` writes the `OFF` marker (see "Days off").
 
@@ -649,8 +803,6 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   `LOG_TIME` (daily auto-log + reminder time; the dialog uses 12-hour `h:mm tt`, e.g.
   `6:00 PM`, and `AppConfig.ParseLogTime` also accepts 24-hour `H:mm`; default 18:00 via
   `AppConfig.DefaultLogTime`),
-  `JIRA_MY_TICKETS_JQL` (custom "My tickets" query, edited via `JqlForm`; default is the
-  built-in MDP filter `JiraClient.DefaultMyTicketsJql`),
   `DEV_REPO_PATH` (repo Tasks Start/Open work in; default `AppConfig.DefaultDevRepoPath`),
   `AZURE_DEVOPS_PAT` (enables PR tracking) and `TEAMS_WEBHOOK_URL` (enables Teams posts); both are
   imported once from `<DEV_REPO_PATH>\docs\local-config\tokens.env` (`AppConfig.ImportDevTokens`)
@@ -663,9 +815,9 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
 
 Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.json`
 (the pending log queue), `settings.json` (theme, window position, the open Ticket tabs
-(`openTicketTabs`), the Claude page's folder, recent folders and resumable session ids, when each ticket was last posted to
-Teams (`teamsPostedAt`), the Ticket header and Changes layout (`ticketHeaderCollapsed`, `diffListWidthEm`,
-`diffListHidden`, `diffInline`), **and** the `Config` key/value map of secrets/settings written from Settings,
+(`openTicketTabs`), the Terminal page's folder, recent folders and resumable session ids, when each ticket was last posted to
+Teams (`teamsPostedAt`), the Ticket header, Changes and Files layout (`ticketHeaderCollapsed`, `diffListWidthEm`,
+`diffListHidden`, `diffInline`, `filesListWidthEm`, `filesListHidden`), **and** the `Config` key/value map of secrets/settings written from Settings,
 via `AppSettings`), and `logs/app-yyyy-MM-dd.log` (one file per day), plus `WebView2/` (the web
 views' browser data: terminal and diff) and `claude-hooks/` (one `<session>.json` hook settings
 file per Claude session, rewritten at every session start since it holds the run's port and token).

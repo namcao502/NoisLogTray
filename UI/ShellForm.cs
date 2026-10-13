@@ -30,20 +30,22 @@ internal sealed class ShellForm : Form
     private readonly FlowLayoutPanel _headerButtons = new();
     private readonly WindowGlyphButton _menuBtn = new(WindowGlyphButton.GlyphKind.Menu);
     private readonly NotificationBell _bell = new();
+    private readonly BusySpinner _spinner = new(BusyWork.Shared);
     private readonly ThemeToggleButton _themeBtn = new();
     private readonly LanguageToggleButton _langBtn = new();
     private readonly WindowGlyphButton _minimizeBtn = new(WindowGlyphButton.GlyphKind.Minimize);
     private readonly WindowGlyphButton _maximizeBtn = new(WindowGlyphButton.GlyphKind.Maximize);
     private readonly CloseButton _closeBtn = new() { Surface = () => Theme.WindowBg };
-    private readonly ContextMenuStrip _bellMenu = ThemedMenuRenderer.CreateMenu();
+    private readonly NoticeHistoryPopup _noticeHistory = new();
     private readonly NoticeToast _toast = new();
-    private readonly ToolTip _tips = new();
+    private readonly ThemedToolTip _tips = new();
 
     // Recent notices for the bell's history, newest last; session-only, capped.
     private const int NoticeHistoryCap = 20;
-    private readonly List<(DateTime Time, string Message, NoticeKind Kind)> _notices = new();
+    private readonly List<(DateTime Time, string Message, NoticeKind Kind, Action? Open)> _notices = new(); // Open: where a click goes
 
     private readonly Dictionary<ShellPage, Control> _pages = new();
+    private readonly Dictionary<ShellPage, Control> _headerControls = new(); // shown beside the title on their page
     private ShellPage? _currentPage;
 
     // Header press while maximized; a drag past DragSize restores the window under the cursor.
@@ -51,8 +53,6 @@ internal sealed class ShellForm : Form
     private FormWindowState _lastWindowState = FormWindowState.Normal;
     private bool? _savedMaximized;
 
-    // Raised for navigation (sidebar or hotkey) to a page that was never added.
-    internal event Action<ShellPage>? PageUnavailable;
     // The user may now be looking at another page: a page switch, the window shown or activated.
     internal event Action? PageViewed;
 
@@ -88,13 +88,13 @@ internal sealed class ShellForm : Form
         {
             Theme.Changed -= ApplyTheme;
             Lang.Changed -= ApplyLanguage;
-            _bellMenu.Dispose();
+            _noticeHistory.Dispose();
             _tips.Dispose();
         }
         base.Dispose(disposing);
     }
 
-    internal ShellPage CurrentPage => _currentPage ?? ShellPage.Log;
+    internal ShellPage CurrentPage => _currentPage ?? ShellPage.Work;
 
     private void BuildLayout()
     {
@@ -137,15 +137,18 @@ internal sealed class ShellForm : Form
         _menuBtn.Width = BtnH;
         _menuBtn.Click += (_, _) => ToggleSidebar();
 
-        _headerTitle.Dock = DockStyle.Fill;
-        _headerTitle.AutoSize = false;
+        // As wide as its text, so a page's header control sits right after it; the rest of the header drags.
+        _headerTitle.Dock = DockStyle.Left;
+        _headerTitle.AutoSize = true;
         _headerTitle.TextAlign = ContentAlignment.MiddleLeft;
-        _headerTitle.Padding = new Padding(BtnGap, 0, 0, 0);
+        // Sized to its text and so drawn from the top of the header's row; the top padding lowers its letters (no
+        // descenders, so they sit above the line's middle) onto the buttons' center.
+        _headerTitle.Padding = new Padding(BtnGap, UiScale.S(1), BtnGap * 2, 0);
         _headerTitle.Font = TitleFont;
         _headerTitle.ForeColor = Theme.TextPrimary;
         _headerTitle.UseMnemonic = false;
 
-        // Right to left: close, maximize/restore, minimize, a wider gap, language, theme, bell.
+        // Right to left: close, maximize/restore, minimize, a wider gap, language, theme, bell, the busy spinner.
         _headerButtons.Dock = DockStyle.Right;
         _headerButtons.FlowDirection = FlowDirection.RightToLeft;
         _headerButtons.WrapContents = false;
@@ -161,7 +164,7 @@ internal sealed class ShellForm : Form
         _bell.Click += (_, _) => OpenNoticeHistory();
         _themeBtn.OnWindow = true;
 
-        var buttons = new Control[] { _closeBtn, _maximizeBtn, _minimizeBtn, _langBtn, _themeBtn, _bell };
+        var buttons = new Control[] { _closeBtn, _maximizeBtn, _minimizeBtn, _langBtn, _themeBtn, _bell, _spinner };
         foreach (var button in buttons)
         {
             button.Size = new Size(BtnH, BtnH);
@@ -181,7 +184,7 @@ internal sealed class ShellForm : Form
         _header.Controls.Add(_headerButtons);
         _header.Controls.Add(_menuBtn);
         _header.Controls.Add(_headerTitle);
-        _headerTitle.BringToFront(); // Fill docks last, between the menu button and the buttons
+        _headerTitle.BringToFront(); // docks after the menu button, from the left
     }
 
     private void ToggleSidebar()
@@ -197,22 +200,28 @@ internal sealed class ShellForm : Form
 
     // ---- Pages
 
-    internal void AddPage(ShellPage page, Control content)
+    // headerControl sits in the header right after the title, while the page is current: docked Left unless it chose a
+    // Dock itself (a HeaderToolbar fills the room up to the header's buttons).
+    internal void AddPage(ShellPage page, Control content, Control? headerControl = null)
     {
         content.Dock = DockStyle.Fill;
         content.Visible = false;
         _pageHost.Controls.Add(content);
         _pages[page] = content;
+        if (headerControl != null)
+        {
+            if (headerControl.Dock == DockStyle.None) headerControl.Dock = DockStyle.Left;
+            headerControl.Visible = false;
+            _header.Controls.Add(headerControl);
+            headerControl.BringToFront(); // docks after the title
+            _headerControls[page] = headerControl;
+        }
         UpdateMinimumSize();
     }
 
     internal void ShowPage(ShellPage page)
     {
-        if (!_pages.TryGetValue(page, out var content))
-        {
-            PageUnavailable?.Invoke(page);
-            return;
-        }
+        if (!_pages.TryGetValue(page, out var content)) return;
         if (_currentPage == page && Visible) return;
 
         // Redraw off while the pages swap and refresh, then one repaint: no flicker, without the
@@ -224,6 +233,7 @@ internal sealed class ShellForm : Form
         if (_currentPage is ShellPage previous && previous != page) _pages[previous].Visible = false;
         _currentPage = page;
         _headerTitle.Text = SidebarNav.PageLabel(page);
+        foreach (var (headerPage, headerControl) in _headerControls) headerControl.Visible = headerPage == page;
         _sidebar.Selected = page;
         if (IsHandleCreated && Visible) (content as IShellPage)?.OnPageShown();
         _pageHost.ResumeLayout();
@@ -435,6 +445,39 @@ internal sealed class ShellForm : Form
     [DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr processId);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("user32.dll")]
+    private static extern bool AttachThreadInput(uint attachThreadId, uint attachToThreadId, bool attach);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    // Windows refuses the foreground to a background process (a balloon click is one) and only flashes the taskbar
+    // button; sharing the foreground thread's input state for the call lets it through.
+    internal void ForceForeground()
+    {
+        var foregroundThreadId = GetWindowThreadProcessId(GetForegroundWindow(), IntPtr.Zero);
+        var ownThreadId = GetCurrentThreadId();
+        var attached = foregroundThreadId != 0 && foregroundThreadId != ownThreadId && AttachThreadInput(ownThreadId, foregroundThreadId, true);
+        try
+        {
+            SetForegroundWindow(Handle);
+            Activate();
+        }
+        finally
+        {
+            if (attached) AttachThreadInput(ownThreadId, foregroundThreadId, false);
+        }
+    }
+
     // Hand the drag to Windows as a title-bar drag; ResizeEnd then saves the new position.
     private void DragWindow()
     {
@@ -496,18 +539,14 @@ internal sealed class ShellForm : Form
                 return true;
             case Keys.Control | Keys.D2:
             case Keys.Control | Keys.NumPad2:
-                ShowPage(ShellPage.Log);
+                ShowPage(ShellPage.Work);
                 return true;
             case Keys.Control | Keys.D3:
             case Keys.Control | Keys.NumPad3:
-                ShowPage(ShellPage.Tasks);
+                ShowPage(ShellPage.Claude);
                 return true;
             case Keys.Control | Keys.D4:
             case Keys.Control | Keys.NumPad4:
-                ShowPage(ShellPage.Claude);
-                return true;
-            case Keys.Control | Keys.D5:
-            case Keys.Control | Keys.NumPad5:
                 ShowPage(ShellPage.Ticket);
                 return true;
         }
@@ -580,25 +619,25 @@ internal sealed class ShellForm : Form
         _tips.SetToolTip(_closeBtn, hideText);
         _closeBtn.AccessibleName = hideText;
 
-        if (_bellMenu.Visible) RenderNoticeHistory();
+        if (_noticeHistory.Visible) RenderNoticeHistory();
     }
 
     // ---- Notices
 
     // Record a notice in the bell history and, when the window is on screen, show the toast.
-    // With the history menu open the menu itself is refreshed instead. Safe from any thread.
-    internal void PostNotice(string message, NoticeKind kind)
+    // With the history open the history itself is refreshed instead. Safe from any thread.
+    internal void PostNotice(string message, NoticeKind kind, Action? open = null)
     {
         if (InvokeRequired)
         {
-            BeginInvoke(new Action<string, NoticeKind>(PostNotice), message, kind);
+            BeginInvoke(new Action<string, NoticeKind, Action?>(PostNotice), message, kind, open);
             return;
         }
 
-        _notices.Add((DateTime.Now, message, kind));
+        _notices.Add((DateTime.Now, message, kind, open));
         if (_notices.Count > NoticeHistoryCap) _notices.RemoveAt(0);
 
-        if (_bellMenu.Visible)
+        if (_noticeHistory.Visible)
         {
             RenderNoticeHistory();
             return;
@@ -607,7 +646,7 @@ internal sealed class ShellForm : Form
         if (IsOnScreen)
         {
             PositionToast();
-            _toast.ShowNotice(message, kind);
+            _toast.ShowNotice(message, kind, open: open);
         }
         else
         {
@@ -647,41 +686,13 @@ internal sealed class ShellForm : Form
         _toast.HideNotice();
         _bell.HasUnread = false;
         RenderNoticeHistory();
-        ThemedMenuRenderer.ShowBelow(_bellMenu, _bell);
+        _noticeHistory.Show(_bell, new Point(_bell.Width, _bell.Height + UiScale.S(6)), ToolStripDropDownDirection.BelowLeft);
     }
 
-    // Newest first; long messages are cut in the menu and shown whole in the item tooltip.
+    // Right-aligned under the bell, so it may span back to the window's left margin.
     private void RenderNoticeHistory()
     {
-        _bellMenu.Items.Clear();
-        if (_notices.Count == 0)
-        {
-            _bellMenu.Items.Add(new ToolStripMenuItem(Lang.T("No notifications yet", "Chưa có thông báo")) { Enabled = false });
-            return;
-        }
-        // The menu opens right-aligned under the bell, so it may span from the bell's right
-        // edge back to the window's left margin, less the menu's own item padding (~50px).
         var bellRight = PointToClient(_bell.PointToScreen(new Point(_bell.Width, 0))).X;
-        var maxTextWidth = bellRight - UiScale.S(20) - UiScale.S(50);
-        for (var index = _notices.Count - 1; index >= 0; index--)
-        {
-            var (time, message, kind) = _notices[index];
-            var mark = kind == NoticeKind.Success ? "✓" : kind == NoticeKind.Error ? "✕" : "•";
-            var prefix = $"{time:HH:mm}   {mark}  ";
-            var text = FitToWidth(prefix + message, _bellMenu.Font, maxTextWidth);
-            _bellMenu.Items.Add(new ToolStripMenuItem(text)
-            {
-                ToolTipText = text.Length < prefix.Length + message.Length ? message : null,
-            });
-        }
-    }
-
-    // Cut text with "..." so it renders within maxWidth pixels.
-    private static string FitToWidth(string text, Font font, int maxWidth)
-    {
-        if (TextRenderer.MeasureText(text, font).Width <= maxWidth) return text;
-        var length = text.Length;
-        while (length > 1 && TextRenderer.MeasureText(text[..length] + "...", font).Width > maxWidth) length--;
-        return text[..length].TrimEnd() + "...";
+        _noticeHistory.SetNotices(_notices, Math.Min(UiScale.S(400), bellRight - UiScale.S(20)));
     }
 }

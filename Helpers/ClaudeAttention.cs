@@ -16,8 +16,12 @@ internal static class ClaudeAttention
             if (root.ValueKind != JsonValueKind.Object) return null;
             var eventName = ReadString(root, "hook_event_name");
             if (string.IsNullOrEmpty(eventName)) return null;
+            var subagentsRunning = root.TryGetProperty("background_tasks", out var backgroundTasks)
+                && backgroundTasks.ValueKind == JsonValueKind.Array
+                && backgroundTasks.EnumerateArray().Any(bt => bt.ValueKind == JsonValueKind.Object
+                    && ReadString(bt, "type") == "subagent" && ReadString(bt, "status") == "running");
             return new ClaudeHookEvent(eventName, ReadString(root, "tool_name"), ReadString(root, "notification_type"), ReadString(root, "agent_id"),
-                ReadString(root, "session_id"));
+                ReadString(root, "session_id"), subagentsRunning, ReadString(root, "transcript_path"));
         }
         catch (Exception e) when (e is JsonException || e is InvalidOperationException)
         {
@@ -36,7 +40,11 @@ internal static class ClaudeAttention
             "UserPromptSubmit" => null,
             "PreToolUse" => hookEvent.ToolName == "AskUserQuestion" ? ClaudeWaitReason.Question : null,
             "PostToolUse" => null,
-            "Stop" => ClaudeWaitReason.Finished,
+            // /exit (or /clear) leaves the terminal at its prompt, so nothing waits on that claude any more.
+            "SessionEnd" => null,
+            // Ended only to wait for background agents: claude starts another turn when they finish, and that Stop is the done.
+            // Background shells and Monitors do not hold it back, since a dev server may run for good.
+            "Stop" => hookEvent.SubagentsRunning ? current : ClaudeWaitReason.Finished,
             "Notification" => hookEvent.NotificationType switch
             {
                 // AskUserQuestion is drawn as a permission dialog, so its prompt stays a question.

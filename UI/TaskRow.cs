@@ -4,8 +4,9 @@ using System.Globalization;
 
 namespace NoisLogTray;
 
-// One ticket on the Tasks board: key link + summary with the section's buttons at the right, then a line of
-// Due / P / ETA / status / Logged facts and a PR line. A narrow row puts the buttons under them instead.
+// One ticket on the Tasks board: key link + summary with the section's buttons at the right (Dismiss is an X, "+ Log"
+// leftmost), then Due / P / ETA / status / Logged as colored tags and a line of PR tags. A narrow row puts the buttons
+// under them. A ticket already in New entry gets an accent bar and an "In entry" button in place of "+ Log".
 internal sealed class TaskRow : Panel
 {
     private static readonly int ButtonH = UiScale.S(28);
@@ -16,7 +17,11 @@ internal sealed class TaskRow : Panel
     private static readonly Color Red = Color.FromArgb(230, 76, 76);
     private static readonly Color Orange = Color.FromArgb(255, 140, 50);
     private static readonly Color Indigo = Color.FromArgb(110, 110, 230);
-    private static readonly Color Gray = Color.FromArgb(150, 150, 156);
+    internal static readonly Color Gray = Color.FromArgb(150, 150, 156);
+
+    internal const string FactsName = "facts";
+    internal const string PrTagsName = "prs";
+    internal const string InEntryBarName = "inEntry";
 
     private static readonly Font KeyFont = UiScale.Font("Segoe UI", 9.5F, FontStyle.Bold);
     private static readonly Font SummaryFont = UiScale.Font("Segoe UI", 9.5F);
@@ -26,72 +31,90 @@ internal sealed class TaskRow : Panel
 
     internal string TicketKey { get; }
 
-    private static readonly ToolTip StepsTip = new();
+    private static readonly ThemedToolTip StepsTip = new();
 
     // isDismissed overrides section (Restore only); onMoved's flag says a keyboard press triggered the move.
     // A non-null busyText disables every button, replaces the facts line and hides the PR line.
+    // onLog (key, summary) adds the "+ Log" button, which isInEntry turns into a disabled "In entry".
     internal TaskRow(JiraTicket ticket, TicketSection section, bool isDismissed, string jiraBaseUrl,
         TicketBoard board, Action<string, bool> onMoved, Action<string> onStart, Action<string> onOpen,
-        bool isDevPrMerged, Action<string> onReadyToTest, string? busyText, int width, string prSummary = "")
+        bool isDevPrMerged, Action<string> onReadyToTest, string? busyText, int width, string prSummary = "", bool striped = false,
+        Action<string, string>? onLog = null, bool isInEntry = false)
     {
         TicketKey = ticket.Key;
         Margin = new Padding(0);
-        BackColor = Color.Transparent;
+        // Every other row is a shade off the card, and its buttons' corners blend into that.
+        BackColor = striped ? Theme.RowStripe(Theme.CardSurface) : Color.Transparent;
+        var surface = striped ? BackColor : Theme.CardSurface;
 
-        var buttons = BuildButtons(ticket, section, isDismissed, board, onMoved, onStart, onOpen);
+        var buttons = BuildButtons(ticket, section, isDismissed, board, onMoved, onStart, onOpen, surface);
         var readyToTestLabel = isDismissed ? null : ReadyToTestLabel(ticket, section, isDevPrMerged);
         if (readyToTestLabel != null)
         {
             // Last in the right-to-left list, so it sits leftmost.
             // Fixed label and width; the Jira steps it will walk are in the tooltip.
             var readyButton = MacButton.Tinted(ButtonWidths.ReadyToTestText, Theme.ActionReadyToTest);
+            readyButton.Surface = () => surface;
             readyButton.Size = new Size(ButtonWidths.ReadyToTestWidth(readyButton.Font), ButtonH);
             readyButton.AccessibleName = $"{readyToTestLabel} {ticket.Key}";
-            StepsTip.SetToolTip(readyButton, readyToTestLabel);
+            StepsTip.SetUntilDisposed(readyButton, readyToTestLabel);
             readyButton.Click += (_, _) => onReadyToTest(ticket.Key);
             buttons.Add(readyButton);
         }
-        var buttonsWidth = buttons.Sum(mb => mb.Width + ButtonGap);
+        MacButton? logButton = null;
+        if (onLog != null && !isDismissed)
+        {
+            logButton = MacButton.Secondary(isInEntry ? Lang.T("In entry", "Đã thêm") : "Log");
+            logButton.Glyph = isInEntry ? Icons.Checkmark : Icons.Add;
+            logButton.Surface = () => surface;
+            logButton.Size = new Size(ButtonWidths.ActionWidth(logButton.Font), ButtonH);
+            logButton.AccessibleName = isInEntry ? $"{ticket.Key} {Lang.T("is in New entry", "đã có trong ô Nhập mới")}" : $"Log {ticket.Key}";
+            StepsTip.SetUntilDisposed(logButton, Lang.T($"Put {ticket.Key} into New entry", $"Đưa {ticket.Key} vào ô Nhập mới"));
+            logButton.Click += (_, _) => onLog(ticket.Key, ticket.Summary);
+            buttons.Add(logButton); // last in the right-to-left list: leftmost
+        }
+        var buttonsWidth = buttons.Sum(b => b.Width + ButtonGap);
         var buttonsOnOwnLine = ButtonsOnOwnLine(width, buttonsWidth);
+        // Beside the buttons every line stops short of them, so they can sit centered on the row's height.
+        var contentRight = buttonsOnOwnLine ? width - Pad : width - Pad - buttonsWidth + ButtonGap - UiScale.S(8);
 
-        var lineWidth = width - 2 * Pad;
-        // Line 2: the facts, under the key line and across the whole row.
+        var lineWidth = contentRight - Pad;
+        // Line 2: the facts, under the key line.
         var facts = new FlowLayoutPanel
         {
-            Location = new Point(Pad - UiScale.S(3), Pad + ButtonH + LineGap),
+            Name = FactsName,
+            Location = new Point(Pad, Pad + ButtonH + LineGap),
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = true, // a long facts line wraps instead of being cut
             BackColor = Color.Transparent,
             Margin = new Padding(0),
         };
         if (busyText != null)
-            facts.Controls.Add(Fact(busyText, Theme.TextSecondary));
+            facts.Controls.Add(Fact(busyText, Theme.Accent));
         else
         {
+            // Due, P, ETA and Logged at fixed widths line up in columns across rows; the status after them is as wide as it is.
+            var columnWidths = RowColumns.FactWidths(FactFont);
             foreach (var (text, color) in Facts(ticket, section))
             {
-                var fact = Fact(text, color);
-                // The due date comes first; a fixed width lines up the facts after it across rows.
-                if (facts.Controls.Count == 0) fact.MinimumSize = new Size(RowColumns.DueWidth(FactFont), 0);
-                facts.Controls.Add(fact);
+                var column = facts.Controls.Count;
+                facts.Controls.Add(Fact(text, color, column < columnWidths.Count ? columnWidths[column] : 0));
             }
         }
-        facts.Size = new Size(lineWidth, Math.Max(FactFont.Height + UiScale.S(4), facts.GetPreferredSize(new Size(lineWidth, 0)).Height));
+        facts.Size = new Size(lineWidth, facts.GetPreferredSize(new Size(lineWidth, 0)).Height);
         var contentBottom = facts.Bottom;
         if (busyText == null && prSummary.Length != 0)
         {
-            // Same x as the facts panel, so the PR text lines up with the facts above it.
-            var prLine = PrLine(prSummary, new Rectangle(Pad - UiScale.S(3), contentBottom + LineGap, lineWidth, FactFont.Height + UiScale.S(4)));
-            Controls.Add(prLine);
-            contentBottom = prLine.Bottom;
+            var prTags = PrTags(prSummary, new Point(Pad, contentBottom), lineWidth);
+            Controls.Add(prTags);
+            contentBottom = prTags.Bottom;
         }
 
         var buttonLocations = new List<Point>();
         int rowHeight;
-        int summaryRight;
         if (buttonsOnOwnLine)
         {
-            var lines = ButtonLines(width, buttons.Select(mb => mb.Width).ToList(), Pad, ButtonGap);
+            var lines = ButtonLines(width, buttons.Select(b => b.Width).ToList(), Pad, ButtonGap);
             var firstLineY = contentBottom + LineGap;
             var buttonX = width - Pad;
             var previousLine = 0;
@@ -108,20 +131,17 @@ internal sealed class TaskRow : Panel
                 buttonX -= ButtonGap;
             }
             rowHeight = buttonLocations[^1].Y + ButtonH + Pad;
-            summaryRight = width - Pad;
         }
         else
         {
-            // Line 1 holds the buttons at its right; the summary stops short of them.
+            rowHeight = contentBottom + Pad;
             var buttonX = width - Pad;
             foreach (var button in buttons)
             {
                 buttonX -= button.Width;
-                buttonLocations.Add(new Point(buttonX, Pad));
+                buttonLocations.Add(new Point(buttonX, (rowHeight - ButtonH) / 2));
                 buttonX -= ButtonGap;
             }
-            rowHeight = contentBottom + Pad;
-            summaryRight = buttonX + ButtonGap - UiScale.S(8);
         }
         Size = new Size(width, rowHeight);
 
@@ -130,6 +150,11 @@ internal sealed class TaskRow : Panel
             buttons[buttonIndex].Location = buttonLocations[buttonIndex];
             buttons[buttonIndex].Enabled = busyText == null;
             Controls.Add(buttons[buttonIndex]);
+        }
+        if (isInEntry && logButton != null)
+        {
+            logButton.Enabled = false;
+            Controls.Add(new Panel { Name = InEntryBarName, Bounds = new Rectangle(0, Pad, UiScale.S(3), rowHeight - 2 * Pad), BackColor = Theme.Accent });
         }
 
         var keyLink = new LinkLabel
@@ -149,18 +174,18 @@ internal sealed class TaskRow : Panel
         _keyLink = keyLink;
 
         var summaryX = Pad + Math.Max(RowColumns.KeyWidth(KeyFont), keyLink.PreferredWidth) + UiScale.S(6);
-        // AutoEllipsis also shows the full text as a tooltip when it is cut.
-        Controls.Add(new Label
+        var summaryLabel = new Label
         {
             Text = ticket.Summary,
             Location = new Point(summaryX, keyLink.Top),
-            Size = new Size(Math.Max(UiScale.S(20), summaryRight - summaryX), keyLink.PreferredHeight),
+            Size = new Size(Math.Max(UiScale.S(20), contentRight - summaryX), keyLink.PreferredHeight),
             Font = SummaryFont,
             ForeColor = Theme.TextPrimary,
             BackColor = Color.Transparent,
-            AutoEllipsis = true,
             UseMnemonic = false,
-        });
+        };
+        ThemedToolTip.Track(summaryLabel); // cut with an ellipsis, the full text in a tooltip
+        Controls.Add(summaryLabel);
         Controls.Add(facts);
 
         Controls.Add(new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Divider });
@@ -194,68 +219,77 @@ internal sealed class TaskRow : Panel
     internal static string? ReadyToTestLabel(JiraTicket ticket, TicketSection section, bool isDevPrMerged)
         => JiraStatusFlow.ReadyToTestLabel(ticket, section, isDevPrMerged);
 
-    private static List<MacButton> BuildButtons(JiraTicket ticket, TicketSection section, bool isDismissed,
-        TicketBoard board, Action<string, bool> onMoved, Action<string> onStart, Action<string> onOpen)
+    private static List<Button> BuildButtons(JiraTicket ticket, TicketSection section, bool isDismissed,
+        TicketBoard board, Action<string, bool> onMoved, Action<string> onStart, Action<string> onOpen, Color surface)
     {
         var key = ticket.Key;
         // Listed right-to-left: the first entry sits at the right edge. IsMove = a board move
         // that is followed by onMoved; Start/Open only hand the key to the host.
-        var actions = new List<(string Text, Action<string> Action, bool IsMove, Color? Tint)>();
+        var actions = new List<(string Text, Action<string> Action, bool IsMove, Color? Tint, string? Glyph)>();
+        var buttons = new List<Button>();
         if (isDismissed)
-            actions.Add((Lang.T("Restore", "Khôi phục"), board.Restore, true, null));
+            actions.Add((Lang.T("Restore", "Khôi phục"), board.Restore, true, null, null));
         else
         {
-            actions.Add((Lang.T("Dismiss", "Ẩn"), board.Dismiss, true, null));
-            if (section == TicketSection.New) actions.Add((Lang.T("Start", "Bắt đầu"), onStart, false, Theme.ActionStart));
+            // An X at the right edge rather than a word, asked first; Restore under Dismissed brings the ticket back.
+            var dismissText = Lang.T("Dismiss", "Ẩn");
+            var dismiss = new CloseButton { Surface = () => surface, Size = new Size(ButtonH, ButtonH), AccessibleName = $"{dismissText} {key}" };
+            StepsTip.SetUntilDisposed(dismiss, dismissText);
+            OnMoveClick(dismiss, key, board.Dismiss, onMoved, () => ConfirmDialog.Ask(dismiss.FindForm(),
+                Lang.T($"Dismiss {key}?", $"Ẩn {key}?"),
+                Lang.T($"{key} {ticket.Summary} moves to Dismissed and leaves New and In progress. Restore there brings it back.",
+                    $"{key} {ticket.Summary} sẽ chuyển sang Đã ẩn, không còn ở Mới và Đang làm. Bấm Khôi phục ở đó để đưa lại."),
+                dismissText, destructive: true));
+            buttons.Add(dismiss);
+            if (section == TicketSection.New) actions.Add((Lang.T("Start", "Bắt đầu"), onStart, false, Theme.ActionStart, null));
             if (section == TicketSection.InProgress)
             {
-                var doneText = ticket.IsStatusDone ? Lang.T("→ Done", "→ Xong") : Lang.T("Done", "Xong");
-                actions.Add((doneText, board.MarkDone, true, Theme.ActionDone));
-                actions.Add((Lang.T("Open", "Mở"), onOpen, false, Theme.Accent));
+                // Done in Jira already: the arrow says "move it to Done".
+                actions.Add((Lang.T("Done", "Xong"), board.MarkDone, true, Theme.ActionDone, ticket.IsStatusDone ? Icons.ArrowRight : null));
+                actions.Add((Lang.T("Open", "Mở"), onOpen, false, Theme.Accent, null));
             }
         }
 
-        var buttons = new List<MacButton>();
-        foreach (var (text, run, isMove, tint) in actions)
+        foreach (var (text, run, isMove, tint, glyph) in actions)
         {
             var button = tint == null ? MacButton.Secondary(text) : MacButton.Tinted(text, tint.Value);
+            button.Glyph = glyph;
+            button.Surface = () => surface;
             button.Size = new Size(ButtonWidths.ActionWidth(button.Font), ButtonH);
             button.AccessibleName = $"{text} {key}";
-            if (!isMove)
-            {
-                button.Click += (_, _) => run(key);
-                buttons.Add(button);
-                continue;
-            }
-            button.Click += (_, _) =>
-            {
-                // A mouse click always lands inside the button; a keyboard press usually does not.
-                var fromKeyboard = !button.ClientRectangle.Contains(button.PointToClient(Cursor.Position));
-                try
-                {
-                    run(key);
-                }
-                catch (Exception ex)
-                {
-                    AppLogger.Error($"[tasks] Moving {key} failed: {ex.Message}");
-                }
-                // Reload even after a failure: the board may have saved part of the move.
-                onMoved(key, fromKeyboard);
-            };
+            if (isMove) OnMoveClick(button, key, run, onMoved);
+            else button.Click += (_, _) => run(key);
             buttons.Add(button);
         }
         return buttons;
     }
 
+    // A board move followed by onMoved, once confirm (when given) says yes.
+    private static void OnMoveClick(Button button, string key, Action<string> run, Action<string, bool> onMoved, Func<bool>? confirm = null)
+    {
+        button.Click += (_, _) =>
+        {
+            // A mouse click always lands inside the button; a keyboard press usually does not. Read before a dialog.
+            var fromKeyboard = !button.ClientRectangle.Contains(button.PointToClient(Cursor.Position));
+            if (confirm != null && !confirm()) return;
+            try
+            {
+                run(key);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error($"[tasks] Moving {key} failed: {ex.Message}");
+            }
+            // Reload even after a failure: the board may have saved part of the move.
+            onMoved(key, fromKeyboard);
+        };
+    }
+
+    // Each fact has its own tone, red/orange when it needs action, and gray when it is empty ("-"). The status, whose
+    // length has no bound, comes last, after the facts RowColumns gives fixed widths.
     internal static IEnumerable<(string Text, Color Color)> Facts(JiraTicket ticket, TicketSection section)
     {
-        var dueColor = ticket.GetDueUrgency(Hcm.Today()) switch
-        {
-            DueUrgency.Overdue => Red,
-            DueUrgency.Soon => Orange,
-            _ => Theme.TextSecondary,
-        };
-        yield return ($"{Lang.T("Due", "Hạn")} {ShortDate(ticket.DueDate)}", dueColor);
+        yield return DueFact(ticket);
 
         var priorityColor = ticket.DevPriorityLevel switch
         {
@@ -267,14 +301,30 @@ internal sealed class TaskRow : Panel
         var priority = ticket.DevPriority.HasValue ? ticket.DevPriority.Value.ToString("0.#") : "-";
         yield return ($"P {priority}", priorityColor);
 
-        yield return ($"ETA {ShortDate(ticket.Eta)}", Theme.TextSecondary);
-        var status = string.IsNullOrEmpty(ticket.Status) ? "-" : ticket.Status;
-        if (section == TicketSection.InProgress && ticket.IsStatusDone)
-            status = Lang.T($"Jira: {status} -- move to Done?", $"Jira: {status} -- chuyển sang Done?");
-        yield return (status, Theme.TextSecondary);
+        yield return ($"ETA {ShortDate(ticket.Eta)}", string.IsNullOrEmpty(ticket.Eta) ? Gray : Theme.ActionDone);
 
-        var loggedColor = ticket.IsTimeLogMissing ? Red : Theme.TextSecondary;
+        var loggedColor = ticket.IsTimeLogMissing ? Red : (ticket.TimeSpentSeconds ?? 0) == 0 ? Gray : WeekCard.Green;
         yield return ($"{Lang.T("Logged", "Đã log")} {JiraTicket.FormatTimeSpent(ticket.TimeSpentSeconds)}", loggedColor);
+
+        var status = string.IsNullOrEmpty(ticket.Status) ? "-" : ticket.Status;
+        var statusColor = string.IsNullOrEmpty(ticket.Status) ? Gray : Theme.ActionReadyToTest;
+        if (section == TicketSection.InProgress && ticket.IsStatusDone)
+        {
+            status = Lang.T($"Jira: {status} -- move to Done?", $"Jira: {status} -- chuyển sang Done?");
+            statusColor = Orange;
+        }
+        yield return (status, statusColor);
+    }
+
+    internal static (string Text, Color Color) DueFact(JiraTicket ticket)
+    {
+        var dueColor = ticket.GetDueUrgency(Hcm.Today()) switch
+        {
+            DueUrgency.Overdue => Red,
+            DueUrgency.Soon => Orange,
+            _ => string.IsNullOrEmpty(ticket.DueDate) ? Gray : Theme.Accent,
+        };
+        return ($"{Lang.T("Due", "Hạn")} {ShortDate(ticket.DueDate)}", dueColor);
     }
 
     // A Jira date ("2026-10-14") in the UI language's short form; other text as is, "-" when empty.
@@ -283,27 +333,42 @@ internal sealed class TaskRow : Panel
             ? Lang.ShortDate(date.ToDateTime(TimeOnly.MinValue))
             : string.IsNullOrEmpty(isoDate) ? "-" : isoDate;
 
-    internal static Label Fact(string text, Color color) => new()
-    {
-        Text = text,
-        AutoSize = true,
-        Margin = new Padding(0, 0, UiScale.S(14), 0),
-        Font = FactFont,
-        ForeColor = color,
-        BackColor = Color.Transparent,
-        UseMnemonic = false,
-    };
+    internal static FactTag Fact(string text, Color tone, int minTextWidth = 0) => new(text, tone, FactFont, minTextWidth);
 
-    // Line 3 of a ticket row: green once every PR shown is merged (or abandoned), nothing open on BE or FE.
-    internal static Label PrLine(string prSummary, Rectangle bounds)
+    // Line 3 of a ticket row: "PR" then one tag per repo of the summary ("BE main ✓ · dev ● | FE Portal dev ✓").
+    internal static FlowLayoutPanel PrTags(string prSummary, Point location, int width)
     {
-        var allClosed = !prSummary.Contains('●') && !prSummary.Contains('?');
-        var prLine = Fact($"PR  {prSummary}", allClosed ? WeekCard.Green : Theme.TextSecondary);
-        prLine.AutoSize = false;
-        prLine.AutoEllipsis = true; // the full text shows as a tooltip when cut
-        prLine.Bounds = bounds;
-        return prLine;
+        var prTags = new FlowLayoutPanel
+        {
+            Name = PrTagsName,
+            Location = location,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true,
+            BackColor = Color.Transparent,
+            Margin = new Padding(0),
+        };
+        prTags.Controls.Add(new Label
+        {
+            Text = "PR",
+            AutoSize = true,
+            Margin = new Padding(0, UiScale.S(2), UiScale.S(6), 0),
+            Font = FactFont,
+            ForeColor = Theme.TextSecondary,
+            BackColor = Color.Transparent,
+        });
+        foreach (var repoSummary in prSummary.Split(" | "))
+        {
+            var tag = Fact(repoSummary, PrTone(repoSummary));
+            tag.Width = Math.Min(tag.Width, width); // an oversized one is cut with an ellipsis rather than overflowing
+            prTags.Controls.Add(tag);
+        }
+        prTags.Size = new Size(width, prTags.GetPreferredSize(new Size(width, 0)).Height);
+        return prTags;
     }
+
+    // Green once the repo's PRs are all merged (or abandoned), blue while one is open, gray while a status is unknown.
+    internal static Color PrTone(string repoSummary) =>
+        repoSummary.Contains('?') ? Gray : repoSummary.Contains('●') ? Theme.Accent : WeekCard.Green;
 
     internal static void OpenUrl(string url)
     {
@@ -316,4 +381,10 @@ internal sealed class TaskRow : Panel
             AppLogger.Error($"[ui] Could not open {url}: {ex.Message}");
         }
     }
+
+    // A link from a web page: OpenUrl shell-executes, so only an http(s) URL may reach it, never a file or a script.
+    internal static string? WebUrl(string? text) =>
+        Uri.TryCreate(text, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttp || uri.Scheme == Uri.UriSchemeHttps)
+            ? uri.AbsoluteUri
+            : null;
 }

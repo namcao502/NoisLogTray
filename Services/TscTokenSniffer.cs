@@ -153,7 +153,7 @@ internal static class TscTokenSniffer
             if (seen.IsEmpty)
             {
                 Emit("[graph-sniff] No graph.microsoft.com Bearer seen - the saved TSC session is likely logged out. "
-                     + "Use \"Re-authenticate TSC\" from the tray menu to sign in again; queued entries retry automatically.");
+                     + "Use \"Re-authenticate TSC\" in the Work page's more (...) menu to sign in again; queued entries retry automatically.");
                 return null;
             }
 

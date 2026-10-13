@@ -24,23 +24,53 @@
   .folder { color: var(--muted); }
   .folder:hover, .file:hover { background: var(--line); }
   .file.selected { background: var(--selection); }
-  .twisty { flex: none; width: 0.8em; }
+  /* The app's icon set (UI/Icons.cs), and its thin themed scrollbars instead of Windows' own. */
+  @font-face { font-family: "FluentIcons"; src: url("../icons/FluentSystemIcons-Regular.ttf"); }
+  #tools button.icon { font-family: "FluentIcons"; font-size: 1.15em; line-height: 1; padding: 0.2em 0.4em; }
+  .twisty { flex: none; width: 1em; font-family: "FluentIcons"; display: flex; align-items: center; }
+  /* The app's one scrollbar look (UI/ThemedScrollBar.cs): a pill 8px thick, 11px under the mouse or while dragged,
+     3px in from the edge, in the secondary text color at 40% / 60% / 80%. The transparent borders place the thumb;
+     the radii keep its two sides round when the hovered thumb drops its inner border. */
+  ::-webkit-scrollbar { width: 14px; height: 14px; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--muted) 40%, transparent); background-clip: padding-box; border: 3px solid transparent; border-radius: 7px; }
+  ::-webkit-scrollbar-thumb:hover { background-color: color-mix(in srgb, var(--muted) 60%, transparent); }
+  ::-webkit-scrollbar-thumb:active { background-color: color-mix(in srgb, var(--muted) 80%, transparent); }
+  ::-webkit-scrollbar-thumb:vertical:hover, ::-webkit-scrollbar-thumb:vertical:active { border-left-width: 0; border-radius: 5.5px 8.5px 8.5px 5.5px; }
+  ::-webkit-scrollbar-thumb:horizontal:hover, ::-webkit-scrollbar-thumb:horizontal:active { border-top-width: 0; border-radius: 5.5px 5.5px 8.5px 8.5px; }
+  /* Monaco's own bars, the same way (its stylesheet loads later, hence body and !important). */
+  body .monaco-scrollable-element > .scrollbar > .slider { background: color-mix(in srgb, var(--muted) 40%, transparent) !important; border-radius: 6px; }
+  body .monaco-scrollable-element > .scrollbar > .slider:hover { background: color-mix(in srgb, var(--muted) 60%, transparent) !important; }
+  body .monaco-scrollable-element > .scrollbar > .slider.active { background: color-mix(in srgb, var(--muted) 80%, transparent) !important; }
+  body .monaco-scrollable-element > .scrollbar.vertical > .slider { width: 8px !important; left: auto !important; right: 3px; }
+  body .monaco-scrollable-element > .scrollbar.vertical:hover > .slider,
+  body .monaco-scrollable-element > .scrollbar.vertical > .slider.active { width: 11px !important; }
+  body .monaco-scrollable-element > .scrollbar.horizontal > .slider { height: 8px !important; top: auto !important; bottom: 3px; }
+  body .monaco-scrollable-element > .scrollbar.horizontal:hover > .slider,
+  body .monaco-scrollable-element > .scrollbar.horizontal > .slider.active { height: 11px !important; }
   .status { flex: none; width: 1em; font-weight: 600; }
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .file.A { color: #3fb950; }
   .file.M { color: #d29922; }
   .file.D { color: #f85149; }
 </style>
+<script>
+  // The app's colors also ride the URL, so the first paint is already themed: the theme message waits for Monaco.
+  {
+    const startColors = new URLSearchParams(location.search).get("colors");
+    if (startColors) for (const [name, value] of Object.entries(JSON.parse(startColors))) document.documentElement.style.setProperty("--" + name, value);
+  }
+</script>
 </head>
 <body>
 <div id="tools">
-  <button id="toggleList">☰</button>
+  <button id="toggleList" class="icon">&#xE8B0;</button>
   <button id="refresh"></button>
   <div id="current"></div>
-  <button id="previousChange">◀</button>
-  <button id="nextChange">▶</button>
-  <button id="previousFile">▲</button>
-  <button id="nextFile">▼</button>
+  <button id="previousChange" class="icon">&#xF19B;</button>
+  <button id="nextChange" class="icon">&#xF148;</button>
+  <button id="previousFile" class="icon">&#xE4E8;</button>
+  <button id="nextFile" class="icon">&#xE4E0;</button>
   <button id="inline"></button>
 </div>
 <div id="content">
@@ -57,9 +87,10 @@
   document.getElementById("loading").textContent = params.get("loading") || "";
 
   const post = (m) => window.chrome.webview.postMessage(JSON.stringify(m));
-  // Ctrl+1..5 switch app pages, as in the terminal (WebView2 keeps keys from the form).
+  const chevronRight = "\uF2B0", chevronDown = "\uF2A3"; // FluentIcons glyphs
+  // Ctrl+1..4 switch app pages, as in the terminal (WebView2 keeps keys from the form).
   window.addEventListener("keydown", (e) => {
-    if (!e.ctrlKey || e.shiftKey || e.altKey || !/^(Digit|Numpad)[1-5]$/.test(e.code)) return;
+    if (!e.ctrlKey || e.shiftKey || e.altKey || !/^(Digit|Numpad)[1-4]$/.test(e.code)) return;
     e.preventDefault(); e.stopPropagation(); post({ type: "page", index: Number(e.code.slice(-1)) });
   }, true);
 
@@ -97,8 +128,9 @@
 
     // Two columns even in a narrow window (Monaco goes inline below 900px by default); inline only when asked.
     const diff = monaco.editor.createDiffEditor(document.getElementById("editor"), {
-      readOnly: true, automaticLayout: true, minimap: { enabled: false }, fontSize,
+      theme: params.get("dark") === "1" ? "vs-dark" : "vs", readOnly: true, automaticLayout: true, minimap: { enabled: false }, fontSize,
       useInlineViewWhenSpaceIsLimited: false, renderSideBySide: !layout.inline,
+      scrollbar: { vertical: "visible", horizontal: "visible", useShadows: false, verticalScrollbarSize: 14, horizontalScrollbarSize: 14, verticalSliderSize: 8, horizontalSliderSize: 8 },
     });
 
     const clear = () => {
@@ -199,7 +231,7 @@
           const key = repository + "|" + path;
           const row = addText(container, "folder", "");
           row.style.paddingLeft = indent(depth);
-          const twisty = addText(row, "twisty", collapsed.has(key) ? "▸" : "▾");
+          const twisty = addText(row, "twisty", collapsed.has(key) ? chevronRight : chevronDown);
           addText(row, "name", name);
           row.title = path;
           const children = document.createElement("div");
@@ -207,7 +239,7 @@
           container.append(children);
           row.addEventListener("click", () => {
             children.hidden = !children.hidden;
-            twisty.textContent = children.hidden ? "▸" : "▾";
+            twisty.textContent = children.hidden ? chevronRight : chevronDown;
             if (children.hidden) collapsed.add(key); else collapsed.delete(key);
           });
           renderNode(children, child, path + "/", depth + 1);

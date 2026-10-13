@@ -113,17 +113,8 @@ internal sealed class ModernCalendar : Control
         }
     }
 
-    private static void DrawChevron(Graphics g, Rectangle area, bool left)
-    {
-        var cx = area.X + area.Width / 2;
-        var cy = area.Y + area.Height / 2;
-        var dx = UiScale.S(3);
-        var dy = UiScale.S(5);
-        using var pen = new Pen(Theme.TextSecondary, UiScale.S(1.8f)) { StartCap = LineCap.Round, EndCap = LineCap.Round };
-        g.DrawLines(pen, left
-            ? new[] { new Point(cx + dx, cy - dy), new Point(cx - dx, cy), new Point(cx + dx, cy + dy) }
-            : new[] { new Point(cx - dx, cy - dy), new Point(cx + dx, cy), new Point(cx - dx, cy + dy) });
-    }
+    private static void DrawChevron(Graphics g, Rectangle area, bool left) =>
+        Icons.Draw(g, left ? Icons.ChevronLeft : Icons.ChevronRight, Icons.Small, area, Theme.TextSecondary);
 
     protected override void OnMouseMove(MouseEventArgs e)
     {

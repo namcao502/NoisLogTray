@@ -126,10 +126,11 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
     {
         if (_reloadPending || _dataDay != Hcm.Today()) Reload();
         else RenderToday();
+        // Once per window show, sniffing a Graph token when none is cached; the week card's first read shares it.
         if (!_coverageLoaded)
         {
             _coverageLoaded = true;
-            ReloadCoverage(allowSniff: false);
+            ReloadCoverage(allowSniff: true);
         }
         _minuteTimer.Start();
     }
@@ -224,7 +225,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         var innerW = bounds.Width - 2 * CardPad;
 
         _todayDate.AutoSize = false;
-        _todayDate.AutoEllipsis = true;
+        ThemedToolTip.Track(_todayDate);
         _todayDate.Bounds = new Rectangle(CardPad, UiScale.S(10), innerW, UiScale.S(26)); // width set by ApplyTexts
         _todayDate.TextAlign = ContentAlignment.MiddleLeft;
         _todayDate.Font = DateFont;
@@ -233,7 +234,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         _logQueueBtn.Click += (_, _) => LogQueueRequested?.Invoke();
 
         _queueLine.AutoSize = false;
-        _queueLine.AutoEllipsis = true;
+        ThemedToolTip.Track(_queueLine);
         _queueLine.Bounds = new Rectangle(CardPad, LineY, innerW, LineH);
         _queueLine.TextAlign = ContentAlignment.MiddleLeft;
         _queueLine.Font = LabelFont;
@@ -271,7 +272,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         dot.Bounds = new Rectangle(StatusX - UiScale.S(18), y + (LineH - dotSize) / 2, dotSize, dotSize);
 
         status.AutoSize = false;
-        status.AutoEllipsis = true;
+        ThemedToolTip.Track(status);
         status.Bounds = new Rectangle(StatusX, y, statusW, LineH);
         status.TextAlign = ContentAlignment.MiddleLeft;
         status.Font = LabelFont;
@@ -303,6 +304,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         list.AutoScroll = true;
         list.Padding = new Padding(0);
         card.Controls.Add(list);
+        ThemedScrollBar.Attach(list);
         return card;
     }
 
@@ -315,14 +317,14 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         _viewTasksLink.LinkBehavior = LinkBehavior.HoverUnderline;
         _viewTasksLink.BackColor = Color.Transparent;
         _viewTasksLink.Visible = _store != null; // no Tasks page to open when Tasks is off
-        _viewTasksLink.LinkClicked += (_, _) => PageRequested?.Invoke(ShellPage.Tasks);
+        _viewTasksLink.LinkClicked += (_, _) => PageRequested?.Invoke(ShellPage.Work);
         card.Controls.Add(_viewTasksLink);
     }
 
     private void BuildNewTicketsHeader(Card card)
     {
         _checkedLabel.AutoSize = false;
-        _checkedLabel.AutoEllipsis = true;
+        ThemedToolTip.Track(_checkedLabel);
         _checkedLabel.TextAlign = ContentAlignment.MiddleRight;
         _checkedLabel.Font = LabelFont;
         _checkedLabel.BackColor = Color.Transparent;
@@ -370,7 +372,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         _recheckLink.Text = Lang.T("Re-check", "Kiểm tra lại");
         PlaceRightLink(_recheckLink, LineY + 2 * LineH, LineH);
         _hrmStatus.Width = Math.Max(UiScale.S(40), _recheckLink.Left - UiScale.S(8) - StatusX);
-        _viewTasksLink.Text = Lang.T("View Tasks →", "Xem Tasks →");
+        _viewTasksLink.Text = Lang.T("All tickets", "Tất cả ticket");
         PlaceRightLink(_viewTasksLink, UiScale.S(10), UiScale.S(24));
 
         _checkBtn.Text = Lang.T("Check", "Kiểm tra");
@@ -558,6 +560,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         _coverageDay = Hcm.Today();
         _coverageFailed = false;
         RenderCoverage();
+        using var busyWork = BusyWork.Shared.Begin(Lang.T("Reading today's logs...", "Đang đọc log hôm nay..."));
         try
         {
             var coverage = await _service.CheckWeekAsync(new[] { Hcm.Today() }, AppLogger.Info, allowSniff: allowSniff);
@@ -660,11 +663,12 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         }
         if (_data == null) return;
 
-        FillList(_inProgressList, _data.InProgress.Select(ip => InProgressRow(ip.Ticket, ip.PrSummary, RowWidth(_inProgressList))).ToList(),
+        // Every other row striped, counted per list.
+        FillList(_inProgressList, _data.InProgress.Select((ip, index) => InProgressRow(ip.Ticket, ip.PrSummary, RowWidth(_inProgressList), index % 2 == 1)).ToList(),
             Lang.T("No tickets in progress", "Không có ticket đang làm"));
-        FillList(_attentionList, _data.Attention.Select(ai => AttentionRow(ai, RowWidth(_attentionList))).ToList(),
+        FillList(_attentionList, _data.Attention.Select((ai, index) => AttentionRow(ai, RowWidth(_attentionList), index % 2 == 1)).ToList(),
             Lang.T("Nothing needs attention", "Không có gì cần xử lý"));
-        FillList(_newTicketsList, _data.NewTickets.Select(jt => NewTicketRow(jt, RowWidth(_newTicketsList))).ToList(),
+        FillList(_newTicketsList, _data.NewTickets.Select((jt, index) => NewTicketRow(jt, RowWidth(_newTicketsList), index % 2 == 1)).ToList(),
             Lang.T("No new tickets", "Không có ticket mới"));
     }
 

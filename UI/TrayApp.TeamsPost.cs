@@ -10,7 +10,8 @@ internal sealed partial class TrayApp
     {
         if (!_teams.CanPostAsUser)
         {
-            Notify(Lang.T("Set the Teams post workflow URL in Settings first.", "Hãy nhập URL Workflow đăng Teams trong Settings trước."), ToolTipIcon.Warning);
+            Notify(Lang.T("Set the Teams post workflow URL in Settings first.", "Hãy nhập URL Workflow đăng Teams trong Settings trước."), ToolTipIcon.Warning,
+                open: EditCredentials);
             return null;
         }
         // _teams is read at send time: a Settings save replaces it.
@@ -30,7 +31,8 @@ internal sealed partial class TrayApp
         settings.TeamsPostedAt = settings.TeamsPostedAt.Where(kvp => now - kvp.Value < TeamsPostedAtKeep).ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
         settings.TeamsPostedAt[ticketKey] = now;
         AppSettings.Save(settings);
-        Notify(Lang.T($"Posted {ticketKey} to Teams.", $"Đã đăng {ticketKey} lên Teams."), ToolTipIcon.Info, NoticeKind.Success);
+        Notify(Lang.T($"Posted {ticketKey} to Teams.", $"Đã đăng {ticketKey} lên Teams."), ToolTipIcon.Info, NoticeKind.Success,
+            () => ShowTicketTab(ticketKey));
     }
 
     // Summary and PRs from the local board; a store read failure only leaves them out.

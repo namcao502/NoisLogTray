@@ -29,10 +29,6 @@ internal sealed class AppConfig
 
     internal static readonly string[] DevTokenKeys = { "AZURE_DEVOPS_PAT", "TEAMS_WEBHOOK_URL" };
 
-    // Config key for the custom "My tickets" query (managed by its own JqlForm dialog,
-    // not the credentials dialog). Unset -> JiraClient.DefaultMyTicketsJql is used.
-    internal const string MyTicketsJqlKey = "JIRA_MY_TICKETS_JQL";
-
     internal string JiraBaseUrl { get; }
     internal string JiraEmail { get; }
     internal string JiraToken { get; }
@@ -41,7 +37,6 @@ internal sealed class AppConfig
     internal string? MsGraphToken { get; }
     internal TimeOnly LogTime { get; }
     internal string DevRepoPath { get; }
-    internal string? JiraMyTicketsJql { get; }
     internal string? AzureDevOpsPat { get; }
     internal string? TeamsWebhookUrl { get; }
     internal string? TeamsPostWorkflowUrl { get; }
@@ -57,7 +52,6 @@ internal sealed class AppConfig
         MsGraphToken = env.Get("MS_GRAPH_TOKEN");
         LogTime = ParseLogTime(env.Get("LOG_TIME"));
         DevRepoPath = ParseDevRepoPath(env.Get("DEV_REPO_PATH"));
-        JiraMyTicketsJql = env.Get(MyTicketsJqlKey);
         AzureDevOpsPat = env.Get("AZURE_DEVOPS_PAT");
         TeamsWebhookUrl = env.Get("TEAMS_WEBHOOK_URL");
         TeamsPostWorkflowUrl = env.Get("TEAMS_POST_WORKFLOW_URL");

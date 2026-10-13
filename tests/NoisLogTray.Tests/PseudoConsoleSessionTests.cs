@@ -47,6 +47,25 @@ public class PseudoConsoleSessionTests
         Assert.Contains("typed-ok", ScreenText(output));
     }
 
+    [Fact]
+    public void Session_RaisesExited_WhenTheCommandQuits()
+    {
+        var output = new StringBuilder();
+        using var exited = new ManualResetEventSlim();
+        using var session = new PseudoConsoleSession("cmd.exe /k echo ready", Environment.CurrentDirectory, 80, 25);
+        session.Output += bytes =>
+        {
+            lock (output) output.Append(Encoding.UTF8.GetString(bytes));
+        };
+        session.Exited += exited.Set;
+        WaitForScreenText(output, "ready");
+
+        // What typing exit (or claude's /exit) does: the process ends, while ConPTY keeps its output pipe open.
+        session.Write(Encoding.ASCII.GetBytes("exit\r"));
+
+        Assert.True(exited.Wait(TimeSpan.FromSeconds(10)), "Exited was not raised after the command quit");
+    }
+
     private static void WaitForScreenText(StringBuilder output, string text)
     {
         var deadline = DateTime.UtcNow.AddSeconds(10);

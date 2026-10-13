@@ -8,10 +8,6 @@ internal sealed class LoggingService
     private readonly AppConfig _config;
     private readonly IJiraClient _jira;
 
-    // Effective "My tickets" query, seeded from config (default when unset) and updatable
-    // at runtime via SetMyTicketsJql so an edit takes effect without rebuilding the service.
-    private string _myTicketsJql;
-
     // Cached sniffed Graph token, reused until shortly before it expires so repeated
     // TSC operations do not each relaunch headless Chrome. Guarded by _tokenLock.
     private static readonly TimeSpan TokenSafetyBuffer = TimeSpan.FromMinutes(2);
@@ -23,22 +19,7 @@ internal sealed class LoggingService
     {
         _config = config;
         _jira = new JiraClient(config.JiraBaseUrl, config.JiraEmail, config.JiraToken);
-        _myTicketsJql = NormalizeJql(config.JiraMyTicketsJql);
     }
-
-    // The current effective "My tickets" query (always concrete; never empty), for
-    // pre-filling the editor.
-    internal string MyTicketsJql => _myTicketsJql;
-
-    // Apply a new query at runtime; empty/blank falls back to the built-in default.
-    internal void SetMyTicketsJql(string? jql) => _myTicketsJql = NormalizeJql(jql);
-
-    private static string NormalizeJql(string? jql)
-        => string.IsNullOrWhiteSpace(jql) ? JiraClient.DefaultMyTicketsJql : jql.Trim();
-
-    // Check a candidate query against Jira before it is saved (see JqlCheckResult).
-    internal Task<JqlCheckResult> ValidateMyTicketsJqlAsync(string jql, CancellationToken ct = default)
-        => _jira.ValidateJqlAsync(jql, ct);
 
     internal TimeOnly LogTime => _config.LogTime;
     internal string DevRepoPath => _config.DevRepoPath;
@@ -49,9 +30,6 @@ internal sealed class LoggingService
 
     internal Task<JiraVerifyResult> VerifyAsync(string ticketId, CancellationToken ct = default)
         => _jira.VerifyTicketAsync(ticketId, ct);
-
-    internal Task<IReadOnlyList<JiraSuggestion>> GetMyTicketsAsync(CancellationToken ct = default)
-        => _jira.GetMyTicketsAsync(_myTicketsJql, ct);
 
     // Prefer MS_GRAPH_TOKEN override; otherwise return a cached sniffed token while
     // it is still valid, and only sniff a fresh one (launches headless Chrome once,

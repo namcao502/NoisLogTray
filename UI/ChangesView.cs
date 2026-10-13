@@ -75,7 +75,8 @@ internal sealed class ChangesView : UserControl
             var settings = AppSettings.Load();
             var listWidth = settings.DiffListWidthEm?.ToString(CultureInfo.InvariantCulture) ?? "";
             core.Navigate(WebViewSetup.PageUrl($"diff/index.html?fontSize={fontSize}&loading={loading}&listWidth={listWidth}"
-                + $"&listHidden={(settings.DiffListHidden ? 1 : 0)}&inline={(settings.DiffInline ? 1 : 0)}"));
+                + $"&listHidden={(settings.DiffListHidden ? 1 : 0)}&inline={(settings.DiffInline ? 1 : 0)}"
+                + $"&dark={(Theme.Dark ? 1 : 0)}&colors={Uri.EscapeDataString(JsonSerializer.Serialize(ThemeColors()))}"));
             _webView.Visible = true;
             _status.Visible = false;
         }
@@ -160,6 +161,7 @@ internal sealed class ChangesView : UserControl
             return;
         }
         _loading = true;
+        var busyWork = BusyWork.Shared.Begin(Lang.T($"Listing the changes of {_ticketKey}...", $"Đang liệt kê thay đổi của {_ticketKey}..."));
         try
         {
             await ListChangesAsync();
@@ -171,6 +173,7 @@ internal sealed class ChangesView : UserControl
         finally
         {
             _loading = false;
+            busyWork.Dispose();
         }
         if (_refreshAgain && !IsDisposed)
         {
@@ -262,14 +265,16 @@ internal sealed class ChangesView : UserControl
         BackColor = Theme.WindowBg;
         _status.ForeColor = Theme.TextSecondary;
         if (!_ready || _webView.CoreWebView2 == null) return;
-        var colors = new
-        {
-            bg = ColorTranslator.ToHtml(Theme.WindowBg),
-            fg = ColorTranslator.ToHtml(Theme.TextPrimary),
-            muted = ColorTranslator.ToHtml(Theme.TextSecondary),
-            line = ColorTranslator.ToHtml(Theme.Divider),
-            selection = Theme.Dark ? "#3a5a8c" : "#b4d2ff",
-        };
-        Post(new { type = "theme", dark = Theme.Dark, colors });
+        Post(new { type = "theme", dark = Theme.Dark, colors = ThemeColors() });
     }
+
+    // Also put on the page's URL, so its first paint has these colors: the theme message only follows Monaco's load.
+    private static object ThemeColors() => new
+    {
+        bg = ColorTranslator.ToHtml(Theme.WindowBg),
+        fg = ColorTranslator.ToHtml(Theme.TextPrimary),
+        muted = ColorTranslator.ToHtml(Theme.TextSecondary),
+        line = ColorTranslator.ToHtml(Theme.Divider),
+        selection = Theme.Dark ? "#3a5a8c" : "#b4d2ff",
+    };
 }

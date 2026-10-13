@@ -2,23 +2,29 @@ using System.Drawing;
 
 namespace NoisLogTray;
 
-// The Tasks board: assigned Jira tickets in New / In progress / Done / Dismissed sections,
-// with search, a manual Add, and a "Check now" that asks the host to poll Jira.
+// The Tasks board, the left side of the Work page: assigned Jira tickets in New / In progress / Done / Dismissed
+// sections and "+ Log" for New entry. Its search, Add by key and "Check now" (the host polls Jira) sit in the shell
+// header (HeaderControl), leaving the page to the list.
 internal sealed class TasksPage : UserControl, IShellPage
 {
-    private static readonly int W = UiScale.S(640);
-    private static readonly int H = UiScale.S(640);
+    // Logical px, since ShellLayout's Work page rules are built from them; scale before use.
+    internal const int DesignWidth = 640;
+    internal const int DesignHeight = 640;
+
+    private static readonly int W = UiScale.S(DesignWidth);
+    private static readonly int H = UiScale.S(DesignHeight);
     private static readonly int Inner = UiScale.S(600); // card width
     private static readonly int ButtonH = UiScale.S(28);
     private static readonly int ListInset = UiScale.S(8); // lists sit this far inside the card
+    private static readonly int SearchMaxWidth = UiScale.S(280);
+    private static readonly int SearchMinWidth = UiScale.S(140);
+    private static readonly int AddBoxWidth = UiScale.S(120);
+    private static readonly int ToolbarGap = UiScale.S(8);
 
     private const string NewId = "new";
     private const string InProgressId = "inprogress";
     private const string DoneId = "done";
     private const string DismissedId = "dismissed";
-
-    private static readonly Color Green = Color.FromArgb(46, 160, 80);
-    private static readonly Color Red = Color.FromArgb(230, 76, 76);
 
     private static readonly Font InputFont = UiScale.Font("Segoe UI", 9F);
     private static readonly Font LabelFont = UiScale.Font("Segoe UI", 8.5F);
@@ -34,6 +40,10 @@ internal sealed class TasksPage : UserControl, IShellPage
     internal event Action<int>? AttentionChanged;
     // Raised after this page moved or added a ticket, so the host refreshes the other ticket views (Dashboard, Ticket page).
     internal event Action? BoardChanged;
+    // Add by key's result, as a notice: the header has no room for a result line.
+    internal event Action<string, NoticeKind>? StatusRaised;
+    // Raised by a row's "+ Log" with the ticket's key and summary; the Work page puts it into New entry.
+    internal event Action<string, string>? LogRequested;
 
     private readonly TicketStore _ticketStore;
     private readonly TicketBoard _ticketBoard;
@@ -41,36 +51,30 @@ internal sealed class TasksPage : UserControl, IShellPage
     private readonly HashSet<string> _collapsed = new() { DismissedId };
     // Sections the user toggled during the current search; their choice beats auto-expand.
     private readonly HashSet<string> _toggledDuringSearch = new();
-    private readonly System.Windows.Forms.Timer _searchTimer = new() { Interval = 200 };
+    // Debounces renders asked for while typing: the search box, and the tickets typed in New entry.
+    private readonly System.Windows.Forms.Timer _renderTimer = new() { Interval = 200 };
     private readonly Dictionary<string, StartStage> _busyTickets = new();
+    private HashSet<string> _entryKeys = new(); // tickets in New entry: their rows read "In entry"
     private List<SectionView> _sections = new();
     private HashSet<string> _devPrMergedKeys = new();
-    private Dictionary<string, string> _prSummaries = new(); // ticket key -> "BE main ✓ · dev ● | FE dev ✓"
+    private Dictionary<string, string> _prSummaries = new(); // ticket key -> "BE main ✓ · dev ● | FE Portal dev ✓"
     private DateTime? _checkedAt;
     private Size _renderedCardSize;
     private bool _renderPending = true; // rows not rendered since the last data/size change while hidden
     private bool _renderPosted;
-    private bool _boardMode;
-    private Color? _addResultColor; // null = theme secondary text
     private string? _focusSectionId;
     private string? _focusTicketKey;
 
-    private readonly Card _top = new();
+    private readonly HeaderToolbar _toolbar = new();
+    private readonly RoundedHost _searchHost = new() { OnWindow = true };
     private readonly TextBox _search = new();
+    private readonly RoundedHost _addHost = new() { OnWindow = true };
     private readonly TextBox _addBox = new();
     private readonly MacButton _addBtn = MacButton.Primary(string.Empty);
     private readonly MacButton _checkBtn = MacButton.Secondary(string.Empty);
-    private readonly Label _addResult = new();
     private readonly Label _checkedLabel = new();
     private readonly Card _card = new();
     private readonly FlowLayoutPanel _body = new();
-    private readonly FlowLayoutPanel _newColumn = new();
-    private readonly FlowLayoutPanel _inProgressColumn = new();
-    private readonly FlowLayoutPanel _doneColumn = new();
-    private readonly Panel _newDivider = new() { Visible = false };
-    private readonly Panel _inProgressDivider = new() { Visible = false };
-    // Holds the three board columns; scrolls sideways when they don't fit the card.
-    private readonly Panel _boardHost = new() { AutoScroll = true, Visible = false };
 
     private sealed record SectionView(string Id, string Title, bool IsDismissed,
         List<(JiraTicket Ticket, TicketSection Origin)> Tickets);
@@ -92,7 +96,8 @@ internal sealed class TasksPage : UserControl, IShellPage
         {
             Theme.Changed -= OnThemeChanged;
             Lang.Changed -= OnLangChanged;
-            _searchTimer.Dispose();
+            _renderTimer.Dispose();
+            _toolbar.Dispose(); // it lives in the shell header, not among this page's controls
         }
         base.Dispose(disposing);
     }
@@ -101,24 +106,21 @@ internal sealed class TasksPage : UserControl, IShellPage
     {
         BackColor = Theme.WindowBg;
 
-        _top.Size = new Size(Inner, UiScale.S(64));
-        _top.Location = UiScale.S(new Point(20, 12));
-
-        var searchHost = InputHost(_search, UiScale.S(new Point(12, 10)), UiScale.S(220));
+        SetUpInput(_searchHost, _search, SearchMaxWidth);
         // Debounced: each render allocates fresh rows and buttons.
         _search.TextChanged += (_, _) =>
         {
             _toggledDuringSearch.Clear();
-            _searchTimer.Stop();
-            _searchTimer.Start();
+            _renderTimer.Stop();
+            _renderTimer.Start();
         };
-        _searchTimer.Tick += (_, _) =>
+        _renderTimer.Tick += (_, _) =>
         {
-            _searchTimer.Stop();
+            _renderTimer.Stop();
             Render();
         };
 
-        var addHost = InputHost(_addBox, UiScale.S(new Point(240, 10)), UiScale.S(120));
+        SetUpInput(_addHost, _addBox, AddBoxWidth);
         _addBox.PlaceholderText = "MDP-1234";
         _addBox.KeyDown += (_, e) =>
         {
@@ -127,52 +129,31 @@ internal sealed class TasksPage : UserControl, IShellPage
             AddAsync();
         };
 
+        _addBtn.OnWindow = true;
         _addBtn.Click += (_, _) => AddAsync();
+        _checkBtn.OnWindow = true;
         _checkBtn.Click += (_, _) => CheckAsync();
 
-        _addResult.AutoSize = false;
-        _addResult.AutoEllipsis = true;
-        _addResult.Location = UiScale.S(new Point(240, 40));
-        _addResult.Size = UiScale.S(new Size(186, 18));
-        _addResult.Font = LabelFont;
-        _addResult.BackColor = Color.Transparent;
-        _addResult.UseMnemonic = false;
-
         _checkedLabel.AutoSize = false;
-        _checkedLabel.Location = UiScale.S(new Point(430, 40));
-        _checkedLabel.Size = new Size(Inner - UiScale.S(12) - UiScale.S(430), UiScale.S(18));
-        _checkedLabel.TextAlign = ContentAlignment.MiddleRight;
+        _checkedLabel.TextAlign = ContentAlignment.MiddleLeft;
         _checkedLabel.Font = LabelFont;
         _checkedLabel.BackColor = Color.Transparent;
 
-        _top.Controls.Add(searchHost);
-        _top.Controls.Add(addHost);
-        _top.Controls.Add(_addBtn);
-        _top.Controls.Add(_checkBtn);
-        _top.Controls.Add(_addResult);
-        _top.Controls.Add(_checkedLabel);
+        _toolbar.Controls.AddRange(new Control[] { _searchHost, _addHost, _addBtn, _checkBtn, _checkedLabel });
+        _toolbar.Resize += (_, _) => LayoutToolbar();
 
-        _card.Location = UiScale.S(new Point(20, 84));
-        _card.Size = new Size(Inner, H - UiScale.S(84) - UiScale.S(12));
+        // The 20px bottom margin lines the card up with the log column's week card beside it.
+        _card.Location = UiScale.S(new Point(20, 14));
+        _card.Size = new Size(Inner, H - UiScale.S(14) - UiScale.S(20));
 
-        // No anchors on the lists: Render places them for the current card size and mode.
-        foreach (var list in new[] { _body, _newColumn, _inProgressColumn, _doneColumn })
-        {
-            list.FlowDirection = FlowDirection.TopDown;
-            list.WrapContents = false;
-            list.AutoScroll = true;
-            list.Padding = new Padding(0);
-            list.Visible = list == _body;
-        }
+        // No anchor on the list: Render places it for the current card size.
+        _body.FlowDirection = FlowDirection.TopDown;
+        _body.WrapContents = false;
+        _body.AutoScroll = true;
+        _body.Padding = new Padding(0);
         _card.Controls.Add(_body);
-        foreach (var boardControl in new Control[] { _newColumn, _inProgressColumn, _doneColumn, _newDivider, _inProgressDivider })
-        {
-            boardControl.Visible = true;
-            _boardHost.Controls.Add(boardControl);
-        }
-        _card.Controls.Add(_boardHost);
+        ThemedScrollBar.Attach(_body);
 
-        Controls.Add(_top);
         Controls.Add(_card);
 
         ApplyTexts();
@@ -181,10 +162,38 @@ internal sealed class TasksPage : UserControl, IShellPage
         // Sized before anchoring: WinForms records each anchor's edge distances when Anchor is set.
         Size = new Size(W, H);
         MinimumSize = Size;
-        _top.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         _card.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-        _checkBtn.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        _checkedLabel.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+    }
+
+    internal Control HeaderControl => _toolbar;
+
+    // Left to right: search, Add by key, Add, Check now, the last check's time. A narrow header drops the time, then
+    // Add by key (Check now stays), and the search box takes what is left.
+    private void LayoutToolbar()
+    {
+        var y = (_toolbar.ClientSize.Height - ButtonH) / 2;
+        var addWidth = _addHost.Width + ToolbarGap + _addBtn.Width;
+        var labelWidth = _checkedLabel.Text.Length == 0 ? 0 : TextRenderer.MeasureText(_checkedLabel.Text, LabelFont).Width;
+        // A gap before the header's own buttons at the right.
+        var room = _toolbar.ClientSize.Width - ToolbarGap - _checkBtn.Width - ToolbarGap;
+        var showAdd = room - addWidth - ToolbarGap >= SearchMinWidth;
+        if (showAdd) room -= addWidth + ToolbarGap;
+        var showLabel = labelWidth != 0 && room - labelWidth - ToolbarGap >= SearchMinWidth;
+        if (showLabel) room -= labelWidth + ToolbarGap;
+
+        _searchHost.SetBounds(0, y, Math.Clamp(room, UiScale.S(60), SearchMaxWidth), ButtonH);
+        var nextLeft = _searchHost.Right + ToolbarGap;
+        _addHost.Visible = showAdd;
+        _addBtn.Visible = showAdd;
+        if (showAdd)
+        {
+            _addHost.Location = new Point(nextLeft, y);
+            _addBtn.Location = new Point(_addHost.Right + ToolbarGap, y);
+            nextLeft = _addBtn.Right + ToolbarGap;
+        }
+        _checkBtn.Location = new Point(nextLeft, y);
+        _checkedLabel.Visible = showLabel;
+        _checkedLabel.Bounds = new Rectangle(_checkBtn.Right + ToolbarGap, y, labelWidth, ButtonH);
     }
 
     // Rows and lists are sized from the card, so any card resize rebuilds them, once per burst.
@@ -208,48 +217,48 @@ internal sealed class TasksPage : UserControl, IShellPage
         };
     }
 
-    private static RoundedHost InputHost(TextBox box, Point location, int width)
+    private static void SetUpInput(RoundedHost host, TextBox box, int width)
     {
-        var host = new RoundedHost { Location = location, Size = new Size(width, ButtonH) };
+        host.Size = new Size(width, ButtonH);
         box.BorderStyle = BorderStyle.None;
         box.Font = InputFont;
         var boxH = box.PreferredHeight;
         box.SetBounds(UiScale.S(8), (host.Height - boxH) / 2, host.Width - UiScale.S(16), boxH);
+        // Sized before anchoring, so the search box follows its host as the header gives it more or less room.
+        box.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         host.Controls.Add(box);
-        return host;
     }
 
     private void ApplyTexts()
     {
-        _search.PlaceholderText = Lang.T("Search", "Tìm kiếm");
+        _search.PlaceholderText = Lang.T("Search tickets", "Tìm ticket");
+        _search.AccessibleName = Lang.T("Search tickets", "Tìm ticket");
+        _addBox.AccessibleName = Lang.T("Add a ticket by key or Jira link", "Thêm ticket bằng mã hoặc link Jira");
         _addBtn.Text = Lang.T("Add", "Thêm");
         _checkBtn.Text = Lang.T("Check now", "Kiểm tra");
-        var buttonY = UiScale.S(10);
-        _addBtn.Bounds = new Rectangle(UiScale.S(366), buttonY, ButtonWidth(_addBtn), ButtonH);
-        var checkWidth = ButtonWidth(_checkBtn);
-        _checkBtn.Bounds = new Rectangle(_top.ClientSize.Width - UiScale.S(12) - checkWidth, buttonY, checkWidth, ButtonH);
+        _addBtn.Size = new Size(FitWidth(_addBtn, "Add", "Thêm"), ButtonH);
+        _checkBtn.Size = new Size(FitWidth(_checkBtn, "Check now", "Kiểm tra"), ButtonH);
         _checkedLabel.Text = _checkedAt.HasValue
-            ? Lang.T($"Checked at {_checkedAt.Value:HH:mm:ss}", $"Kiểm tra lúc {_checkedAt.Value:HH:mm:ss}")
+            ? Lang.T($"Checked {_checkedAt.Value:HH:mm}", $"Kiểm tra lúc {_checkedAt.Value:HH:mm}")
             : string.Empty;
+        LayoutToolbar();
     }
 
-    private static int ButtonWidth(MacButton button)
-        => ButtonWidths.ToolbarWidth(button.Font);
+    // As wide as the longer of its two labels, so a language switch never moves the toolbar.
+    private static int FitWidth(MacButton button, string english, string vietnamese) =>
+        Math.Max(TextRenderer.MeasureText(english, button.Font).Width, TextRenderer.MeasureText(vietnamese, button.Font).Width)
+        + UiScale.S(28);
 
     private void ApplyColors()
     {
         BackColor = Theme.WindowBg;
-        foreach (var list in new Control[] { _body, _newColumn, _inProgressColumn, _doneColumn, _boardHost })
-            list.BackColor = Theme.CardSurface;
-        _newDivider.BackColor = Theme.Divider;
-        _inProgressDivider.BackColor = Theme.Divider;
+        _body.BackColor = Theme.CardSurface;
         foreach (var box in new[] { _search, _addBox })
         {
             box.BackColor = Theme.InputBg;
             box.ForeColor = Theme.TextPrimary;
         }
         _checkedLabel.ForeColor = Theme.TextSecondary;
-        _addResult.ForeColor = _addResultColor ?? Theme.TextSecondary;
     }
 
     private void OnThemeChanged()
@@ -262,7 +271,6 @@ internal sealed class TasksPage : UserControl, IShellPage
     private void OnLangChanged()
     {
         ApplyTexts();
-        _addResult.Text = string.Empty; // the last result was worded in the old language
         Reload();
     }
 
@@ -281,6 +289,20 @@ internal sealed class TasksPage : UserControl, IShellPage
         if (stage.HasValue) _busyTickets[ticketKey] = stage.Value;
         else _busyTickets.Remove(ticketKey);
         Render();
+    }
+
+    // The tickets typed in New entry; the rows re-render (debounced, since it follows each keystroke) only on a change.
+    internal void SetEntryKeys(IReadOnlyCollection<string> ticketKeys)
+    {
+        if (IsDisposed || _entryKeys.SetEquals(ticketKeys)) return;
+        _entryKeys = ticketKeys.ToHashSet();
+        if (!Visible)
+        {
+            _renderPending = true;
+            return;
+        }
+        _renderTimer.Stop();
+        _renderTimer.Start();
     }
 
     internal static string StageText(StartStage stage) => stage switch
@@ -330,87 +352,34 @@ internal sealed class TasksPage : UserControl, IShellPage
     }
 
     // Rebuilds the rows from the cached sections (no store read), so search stays cheap.
+    // One list across the whole card, the sections stacked (no kanban columns).
     private void Render()
     {
         _renderPending = false;
-        // Mode and bounds first: each list's ClientSize below must reflect this render's layout.
-        var listWidth = _card.ClientSize.Width - 2 * ListInset;
-        var listHeight = _card.ClientSize.Height - 2 * ListInset;
-        var board = ShellLayout.UseTaskBoard(UiScale.Logical(listWidth));
-        var isSameMode = board == _boardMode;
-        _boardMode = board;
+        // Bounds first: the list's ClientSize below must reflect this render's layout.
+        _body.Bounds = new Rectangle(ListInset, ListInset, _card.ClientSize.Width - 2 * ListInset, _card.ClientSize.Height - 2 * ListInset);
         _renderedCardSize = _card.ClientSize;
 
         var query = _search.Text.Trim();
-        // Filtered first: an empty column (after search) shrinks, so the layout needs the counts.
-        var shownBySection = _sections.ToDictionary(sv => sv.Id, sv => query.Length == 0
-            ? sv.Tickets
-            : sv.Tickets.Where(jt => TicketSearch.Matches(jt.Ticket, query)).ToList());
-
-        _body.Visible = !board;
-        _boardHost.Visible = board;
-        var boardScroll = _boardHost.AutoScrollPosition;
-        if (board)
-        {
-            _boardHost.Bounds = new Rectangle(ListInset, ListInset, listWidth, listHeight);
-            // A collapsed Dismissed header alone still counts as empty: there is nothing to read in the column.
-            var dismissedShown = shownBySection[DismissedId].Count != 0
-                && (query.Length != 0 && !_toggledDuringSearch.Contains(DismissedId) || !_collapsed.Contains(DismissedId));
-            var doneEmpty = shownBySection[DoneId].Count == 0 && !dismissedShown;
-            var (newLogical, inProgressLogical, doneLogical) = ShellLayout.TaskBoardColumnBounds(
-                UiScale.Logical(listWidth), UiScale.Logical(listHeight),
-                shownBySection[NewId].Count == 0, shownBySection[InProgressId].Count == 0, doneEmpty);
-            var boardWidth = UiScale.S(doneLogical.Right);
-            // A sideways scrollbar takes height from the columns, so they don't also scroll the host vertically.
-            var columnHeight = boardWidth > listWidth ? listHeight - SystemInformation.HorizontalScrollBarHeight : listHeight;
-            var newBounds = new Rectangle(UiScale.S(newLogical.X), 0, UiScale.S(newLogical.Width), columnHeight);
-            var inProgressBounds = new Rectangle(UiScale.S(inProgressLogical.X), 0, UiScale.S(inProgressLogical.Width), columnHeight);
-            var doneX = UiScale.S(doneLogical.X);
-            // Fitting boards end exactly at the card edge; rounding never leaves a gap.
-            var doneBounds = new Rectangle(doneX, 0, Math.Max(boardWidth, listWidth) - doneX, columnHeight);
-            _boardHost.AutoScrollPosition = Point.Empty;
-            _newColumn.Bounds = newBounds;
-            _inProgressColumn.Bounds = inProgressBounds;
-            _doneColumn.Bounds = doneBounds;
-            var halfGap = UiScale.S(ShellLayout.TaskColumnGap) / 2;
-            _newDivider.Bounds = new Rectangle(newBounds.Right + halfGap, 0, 1, columnHeight);
-            _inProgressDivider.Bounds = new Rectangle(inProgressBounds.Right + halfGap, 0, 1, columnHeight);
-        }
-        else
-            _body.Bounds = new Rectangle(ListInset, ListInset, listWidth, listHeight);
-
-        var allLists = new[] { _body, _newColumn, _inProgressColumn, _doneColumn };
-        var activeLists = board ? new[] { _newColumn, _inProgressColumn, _doneColumn } : new[] { _body };
-        var scrollPositions = activeLists.ToDictionary(flp => flp, flp => flp.AutoScrollPosition);
-        var rowWidths = activeLists.ToDictionary(flp => flp,
-            flp => flp.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - UiScale.S(2));
+        var scrollPosition = _body.AutoScrollPosition;
+        var rowWidth = _body.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - UiScale.S(2);
         var jiraBaseUrl = _getService()?.JiraBaseUrl ?? AppConfig.DefaultJiraBaseUrl;
         Control? focusHeader = null;
         TaskRow? focusRow = null;
 
-        foreach (var list in allLists)
-        {
-            list.SuspendLayout();
-            ClearRows(list);
-        }
+        _body.SuspendLayout();
+        ClearRows(_body);
         foreach (var section in _sections)
         {
-            // Board mode: Dismissed shares the Done column, after Done.
-            var container = !board ? _body : section.Id switch
-            {
-                NewId => _newColumn,
-                InProgressId => _inProgressColumn,
-                _ => _doneColumn,
-            };
-            var rowWidth = rowWidths[container];
-            var shown = shownBySection[section.Id];
+            var shown = query.Length == 0 ? section.Tickets : section.Tickets.Where(jt => TicketSearch.Matches(jt.Ticket, query)).ToList();
             var isAutoExpanded = query.Length != 0 && shown.Count != 0 && !_toggledDuringSearch.Contains(section.Id);
             var isExpanded = isAutoExpanded || !_collapsed.Contains(section.Id);
             var header = SectionHeader(section, shown.Count, isExpanded, rowWidth);
-            container.Controls.Add(header);
+            _body.Controls.Add(header);
             if (section.Id == _focusSectionId) focusHeader = header;
             if (!isExpanded) continue;
 
+            var rowIndex = 0;
             foreach (var (ticket, origin) in shown)
             {
                 // Stage text is resolved per render so a language switch re-words it.
@@ -419,18 +388,14 @@ internal sealed class TasksPage : UserControl, IShellPage
                     OnTicketMoved, tk => RaiseTicketRequest(StartRequested, tk, "Start"),
                     tk => RaiseTicketRequest(OpenRequested, tk, "Open"), _devPrMergedKeys.Contains(ticket.Key),
                     tk => RaiseTicketRequest(ReadyToTestRequested, tk, "Ready to Test"), busyText, rowWidth,
-                    _prSummaries.GetValueOrDefault(ticket.Key, ""));
-                container.Controls.Add(row);
+                    _prSummaries.GetValueOrDefault(ticket.Key, ""), striped: rowIndex++ % 2 == 1,
+                    onLog: RaiseLogRequest, isInEntry: _entryKeys.Contains(ticket.Key));
+                _body.Controls.Add(row);
                 if (ticket.Key == _focusTicketKey) focusRow = row;
             }
         }
-        foreach (var list in allLists) list.ResumeLayout();
-        if (isSameMode)
-        {
-            foreach (var (list, scroll) in scrollPositions)
-                list.AutoScrollPosition = new Point(-scroll.X, -scroll.Y);
-            if (board) _boardHost.AutoScrollPosition = new Point(-boardScroll.X, -boardScroll.Y);
-        }
+        _body.ResumeLayout();
+        _body.AutoScrollPosition = new Point(-scrollPosition.X, -scrollPosition.Y);
 
         _focusSectionId = null;
         _focusTicketKey = null;
@@ -466,6 +431,10 @@ internal sealed class TasksPage : UserControl, IShellPage
         }));
     }
 
+    // Deferred: putting the ticket into New entry re-renders the rows, disposing the clicked button.
+    private void RaiseLogRequest(string ticketKey, string summary) =>
+        BeginInvoke(new Action(() => LogRequested?.Invoke(ticketKey, summary)));
+
     private List<SectionView> LoadSections()
     {
         return new List<SectionView>
@@ -487,7 +456,8 @@ internal sealed class TasksPage : UserControl, IShellPage
 
     private Control SectionHeader(SectionView section, int count, bool isExpanded, int width)
     {
-        var text = $"{(isExpanded ? "▾" : "▸")}  {section.Title} ({count})";
+        var text = $"{section.Title} ({count})";
+        var twisty = isExpanded ? Icons.ChevronDown : Icons.ChevronRight;
         var headerHeight = SectionFont.Height + UiScale.S(14);
         var header = new ClickableRow
         {
@@ -495,11 +465,16 @@ internal sealed class TasksPage : UserControl, IShellPage
             Margin = new Padding(0),
             BackColor = Color.Transparent,
             Cursor = Cursors.Hand,
-            AccessibleName = text,
+            AccessibleName = isExpanded ? text : $"{text}, {Lang.T("collapsed", "đã thu gọn")}",
         };
-        header.Paint += (_, e) => TextRenderer.DrawText(e.Graphics, text, SectionFont,
-            new Rectangle(UiScale.S(6), 0, width - UiScale.S(12), headerHeight), Theme.TextSecondary,
-            TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        header.Paint += (_, e) =>
+        {
+            var twistyWidth = Icons.Small.Height;
+            Icons.Draw(e.Graphics, twisty, Icons.Small, new Rectangle(UiScale.S(2), 0, twistyWidth, headerHeight), Theme.TextSecondary);
+            var textLeft = UiScale.S(2) + twistyWidth + UiScale.S(4);
+            TextRenderer.DrawText(e.Graphics, text, SectionFont, new Rectangle(textLeft, 0, width - textLeft - UiScale.S(6), headerHeight),
+                Theme.TextSecondary, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        };
         header.Click += (_, _) =>
         {
             if (isExpanded) _collapsed.Add(section.Id);
@@ -525,50 +500,44 @@ internal sealed class TasksPage : UserControl, IShellPage
         var service = _getService();
         if (service == null)
         {
-            ShowAddResult(Lang.T("Config not loaded", "Chưa có cấu hình"), Red);
+            StatusRaised?.Invoke(Lang.T("Config not loaded; cannot add a ticket.", "Chưa có cấu hình; không thêm được ticket."), NoticeKind.Error);
             return;
         }
         if (!TicketParser.TryParseKey(_addBox.Text, out var key))
         {
-            ShowAddResult(Lang.T("Invalid ticket key", "Mã ticket không hợp lệ"), Red);
+            StatusRaised?.Invoke(Lang.T("Not a ticket key or Jira link.", "Không phải mã ticket hay link Jira."), NoticeKind.Error);
             return;
         }
 
         _addBtn.Enabled = false;
+        using var busyWork = BusyWork.Shared.Begin(Lang.T($"Adding {key}...", $"Đang thêm {key}..."));
         try
         {
             var ticket = await service.Jira.GetTicketAsync(key);
             if (IsDisposed) return;
 
             if (ticket == null)
-                ShowAddResult(Lang.T("Ticket not found", "Không tìm thấy ticket"), Red);
+                StatusRaised?.Invoke(Lang.T($"{key} was not found in Jira.", $"Không tìm thấy {key} trên Jira."), NoticeKind.Error);
             else if (_ticketBoard.Add(ticket))
             {
-                ShowAddResult(Lang.T("Added", "Đã thêm"), Green);
+                StatusRaised?.Invoke(Lang.T($"{key} added to the board.", $"Đã thêm {key} vào bảng."), NoticeKind.Success);
                 _addBox.Text = string.Empty;
                 Reload();
                 BoardChanged?.Invoke();
             }
             else
-                ShowAddResult(Lang.T("Already on the board", "Đã có trong danh sách"), null);
+                StatusRaised?.Invoke(Lang.T($"{key} is already on the board.", $"{key} đã có trên bảng."), NoticeKind.Info);
         }
         catch (Exception ex)
         {
             AppLogger.Error($"[tasks] Add {key} failed: {ex.Message}");
             if (IsDisposed) return;
-            ShowAddResult(Lang.T($"Failed: {ex.Message}", $"Lỗi: {ex.Message}"), Red);
+            StatusRaised?.Invoke(Lang.T($"Adding {key} failed: {ex.Message}", $"Thêm {key} lỗi: {ex.Message}"), NoticeKind.Error);
         }
         finally
         {
             if (!IsDisposed) _addBtn.Enabled = true;
         }
-    }
-
-    private void ShowAddResult(string text, Color? color)
-    {
-        _addResultColor = color;
-        _addResult.Text = text;
-        _addResult.ForeColor = color ?? Theme.TextSecondary;
     }
 
     private async void CheckAsync()

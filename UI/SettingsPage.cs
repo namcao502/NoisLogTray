@@ -19,6 +19,7 @@ internal sealed class SettingsPage : UserControl, IShellPage
     internal SettingsPage()
     {
         AutoScroll = true;
+        ThemedScrollBar.Attach(this); // sits in the shell's page host beside this page
         BackColor = Theme.WindowBg;
         MinimumSize = UiScale.S(new Size(480, 300));
         _card.Location = new Point(PageMargin, UiScale.S(14));

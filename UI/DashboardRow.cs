@@ -4,7 +4,7 @@ using System.Drawing;
 namespace NoisLogTray;
 
 // One ticket on the Dashboard: key link + summary with up to two buttons at the right, a line of
-// facts beneath and an optional PR line. Same look as TaskRow; the page decides texts and actions.
+// fact tags beneath and an optional line of PR tags. Same look as TaskRow; the page decides texts and actions.
 internal sealed class DashboardRow : Panel
 {
     private static readonly int ButtonH = UiScale.S(28);
@@ -20,19 +20,23 @@ internal sealed class DashboardRow : Panel
     // buttons are listed right-to-left: the first one sits at the right edge.
     internal DashboardRow(string ticketKey, string linkUrl, string summary,
         IReadOnlyList<(string Text, Color Color)> facts, string prSummary,
-        IReadOnlyList<(string Text, Color? Tint, bool Enabled, Action OnClick)> buttons,
-        int width)
+        IReadOnlyList<(string Text, Color? Tint, bool Enabled, Action OnClick, string? Glyph)> buttons,
+        int width, bool striped = false)
     {
         if (buttons.Count > MaxButtons)
             throw new ArgumentException($"A dashboard row holds at most {MaxButtons} buttons.", nameof(buttons));
 
         Margin = new Padding(0);
-        BackColor = Color.Transparent;
+        // Every other row is a shade off the card, and its buttons' corners blend into that.
+        BackColor = striped ? Theme.RowStripe(Theme.CardSurface) : Color.Transparent;
+        var surface = striped ? BackColor : Theme.CardSurface;
 
         var builtButtons = new List<(MacButton Button, int Width)>();
-        foreach (var (text, tint, enabled, onClick) in buttons)
+        foreach (var (text, tint, enabled, onClick, glyph) in buttons)
         {
             var button = tint == null ? MacButton.Secondary(text) : MacButton.Tinted(text, tint.Value);
+            button.Glyph = glyph;
+            button.Surface = () => surface;
             // Fixed widths: a label change (Queue -> Queued) must not shift the row.
             // Ready to Test is the one label wider than the shared action width.
             var buttonW = text == ButtonWidths.ReadyToTestText ? ButtonWidths.ReadyToTestWidth(button.Font) : ButtonWidths.ActionWidth(button.Font);
@@ -41,11 +45,15 @@ internal sealed class DashboardRow : Panel
             button.Click += (_, _) => onClick();
             builtButtons.Add((button, buttonW));
         }
-        var lineWidth = width - 2 * Pad;
-        // Line 2: the facts, under the key line and across the whole row.
+        // Every line stops short of the buttons, so they can sit centered on the row's height.
+        var buttonsWidth = builtButtons.Sum(bb => bb.Width + ButtonGap);
+        var contentRight = builtButtons.Count == 0 ? width - Pad : width - Pad - buttonsWidth + ButtonGap - UiScale.S(8);
+        var lineWidth = contentRight - Pad;
+        // Line 2: the facts, under the key line.
         var factsPanel = new FlowLayoutPanel
         {
-            Location = new Point(Pad - UiScale.S(3), Pad + ButtonH + LineGap),
+            Name = TaskRow.FactsName,
+            Location = new Point(Pad, Pad + ButtonH + LineGap),
             FlowDirection = FlowDirection.LeftToRight,
             WrapContents = true, // a long facts line wraps instead of being cut
             BackColor = Color.Transparent,
@@ -53,32 +61,28 @@ internal sealed class DashboardRow : Panel
         };
         foreach (var (text, color) in facts)
         {
-            var fact = Fact(text, color);
             // The first fact is the due date on most rows; a fixed width lines up what follows across rows.
-            if (factsPanel.Controls.Count == 0) fact.MinimumSize = new Size(RowColumns.DueWidth(FactFont), 0);
-            factsPanel.Controls.Add(fact);
+            factsPanel.Controls.Add(TaskRow.Fact(text, color, factsPanel.Controls.Count == 0 ? RowColumns.DueWidth(FactFont) : 0));
         }
-        factsPanel.Size = new Size(lineWidth, Math.Max(FactFont.Height + UiScale.S(4), factsPanel.GetPreferredSize(new Size(lineWidth, 0)).Height));
+        factsPanel.Size = new Size(lineWidth, factsPanel.GetPreferredSize(new Size(lineWidth, 0)).Height);
         var contentBottom = factsPanel.Bottom;
         if (prSummary.Length != 0)
         {
-            var prLine = TaskRow.PrLine(prSummary, new Rectangle(Pad - UiScale.S(3), contentBottom + LineGap, lineWidth, FactFont.Height + UiScale.S(4)));
-            Controls.Add(prLine);
-            contentBottom = prLine.Bottom;
+            var prTags = TaskRow.PrTags(prSummary, new Point(Pad, contentBottom), lineWidth);
+            Controls.Add(prTags);
+            contentBottom = prTags.Bottom;
         }
         var rowHeight = contentBottom + Pad;
         Size = new Size(width, rowHeight);
 
-        // Line 1 holds the buttons at its right; the summary stops short of the leftmost (or at the edge with none).
         var buttonX = width - Pad;
         foreach (var (button, buttonW) in builtButtons)
         {
             buttonX -= buttonW;
-            button.Bounds = new Rectangle(buttonX, Pad, buttonW, ButtonH);
+            button.Bounds = new Rectangle(buttonX, (rowHeight - ButtonH) / 2, buttonW, ButtonH);
             buttonX -= ButtonGap;
             Controls.Add(button);
         }
-        var summaryRight = builtButtons.Count == 0 ? width - Pad : buttonX + ButtonGap - UiScale.S(8);
 
         var keyLink = new LinkLabel
         {
@@ -96,34 +100,23 @@ internal sealed class DashboardRow : Panel
         Controls.Add(keyLink);
 
         var summaryX = Pad + Math.Max(RowColumns.KeyWidth(KeyFont), keyLink.PreferredWidth) + UiScale.S(6);
-        // AutoEllipsis also shows the full text as a tooltip when it is cut.
-        Controls.Add(new Label
+        var summaryLabel = new Label
         {
             Text = summary,
             Location = new Point(summaryX, keyLink.Top),
-            Size = new Size(Math.Max(UiScale.S(20), summaryRight - summaryX), keyLink.PreferredHeight),
+            Size = new Size(Math.Max(UiScale.S(20), contentRight - summaryX), keyLink.PreferredHeight),
             Font = SummaryFont,
             ForeColor = Theme.TextPrimary,
             BackColor = Color.Transparent,
-            AutoEllipsis = true,
             UseMnemonic = false,
-        });
+        };
+        ThemedToolTip.Track(summaryLabel); // cut with an ellipsis, the full text in a tooltip
+        Controls.Add(summaryLabel);
 
         Controls.Add(factsPanel);
 
         Controls.Add(new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Divider });
     }
-
-    private static Label Fact(string text, Color color) => new()
-    {
-        Text = text,
-        AutoSize = true,
-        Margin = new Padding(0, 0, UiScale.S(14), 0),
-        Font = FactFont,
-        ForeColor = color,
-        BackColor = Color.Transparent,
-        UseMnemonic = false,
-    };
 
     private static void OpenUrl(string url)
     {

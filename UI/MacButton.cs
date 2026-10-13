@@ -31,6 +31,20 @@ internal sealed class MacButton : Button
 
     internal int Radius = UiScale.S(6);
     internal bool OnWindow; // true = sits on the window body (blend corners to WindowBg)
+    internal Func<Color>? Surface; // what the corners blend into when it is neither (a striped list row)
+
+    // An Icons glyph: alone when Text is empty, else before the text (after it with GlyphAfterText, a dropdown's chevron).
+    private string? _glyph;
+
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    internal string? Glyph
+    {
+        get => _glyph;
+        set { _glyph = value; Invalidate(); }
+    }
+
+    internal bool GlyphAfterText;
+    internal Font GlyphFont = Icons.Small;
 
     private MacButton(bool secondary, Color? tint = null)
     {
@@ -69,11 +83,16 @@ internal sealed class MacButton : Button
     // already handles Space/Enter activation and tab order; this only adds the visual.
     protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
     protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    protected override void OnChangeUICues(UICuesEventArgs e) { Invalidate(); base.OnChangeUICues(e); }
+
+    // Only while Windows shows keyboard focus cues (after Tab): a clicked button keeps focus, and a ring left on it
+    // after the mouse moves on reads as a stuck state. The other owner-drawn controls follow the same rule.
+    internal bool FocusRingVisible => Focused && Enabled && ShowFocusCues;
 
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.Clear(OnWindow ? Theme.WindowBg : Theme.CardSurface); // corners blend into the surface behind
+        g.Clear(Surface?.Invoke() ?? (OnWindow ? Theme.WindowBg : Theme.CardSurface)); // corners blend into the surface behind
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var rect = new Rectangle(0, 0, Width - 1, Height - 1);
         using var path = Rounded(rect, Radius);
@@ -97,8 +116,19 @@ internal sealed class MacButton : Button
         }
 
         using (var brush = new SolidBrush(fill)) g.FillPath(brush, path);
-        TextRenderer.DrawText(g, Text, Font, rect, textColor,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        if (_glyph == null)
+        {
+            TextRenderer.DrawText(g, Text, Font, rect, textColor,
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+        }
+        else
+        {
+            var textWidth = Text.Length == 0 ? 0 : TextRenderer.MeasureText(Text, Font).Width;
+            var (textBounds, glyphBounds) = ContentBounds(Size, textWidth, GlyphFont.Height, UiScale.S(2), GlyphAfterText);
+            if (textWidth != 0)
+                TextRenderer.DrawText(g, Text, Font, textBounds, textColor, TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
+            Icons.Draw(g, _glyph, GlyphFont, glyphBounds, textColor);
+        }
 
         if (_showDot)
         {
@@ -109,13 +139,24 @@ internal sealed class MacButton : Button
 
         // Keyboard-focus ring: a dotted inset outline, white on a primary or tinted fill,
         // accent-coloured on the neutral secondary fill.
-        if (Focused && Enabled)
+        if (FocusRingVisible)
         {
             var focusRect = Rectangle.Inflate(rect, -UiScale.S(3), -UiScale.S(3));
             using var focusPath = Rounded(focusRect, Math.Max(UiScale.S(2), Radius - UiScale.S(2)));
             using var pen = new Pen(_secondary && !_selected ? Theme.Accent : Color.White, UiScale.S(1.4f)) { DashStyle = DashStyle.Dot };
             g.DrawPath(pen, focusPath);
         }
+    }
+
+    // The text and the glyph side by side, the pair centered; a lone glyph (no text) is centered by itself.
+    internal static (Rectangle Text, Rectangle Glyph) ContentBounds(Size button, int textWidth, int glyphWidth, int gap, bool glyphAfterText)
+    {
+        var pairWidth = textWidth == 0 ? glyphWidth : textWidth + gap + glyphWidth;
+        var left = (button.Width - pairWidth) / 2;
+        if (textWidth == 0) return (Rectangle.Empty, new Rectangle(left, 0, glyphWidth, button.Height));
+        var glyphLeft = glyphAfterText ? left + textWidth + gap : left;
+        var textLeft = glyphAfterText ? left : left + glyphWidth + gap;
+        return (new Rectangle(textLeft, 0, textWidth, button.Height), new Rectangle(glyphLeft, 0, glyphWidth, button.Height));
     }
 
     // Hover: 8% toward white, as AccentHover is to Accent.

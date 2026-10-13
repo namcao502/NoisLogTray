@@ -13,6 +13,51 @@ public class TicketWorkspaceViewTests
         tickets.ToDictionary(ticket => ticket.Key);
 
     [Fact]
+    public void KeyRow_PutsTheFactsRightAfterAShortSummary()
+    {
+        Assert.Equal((300, true), TicketWorkspaceView.KeyRow(available: 900, summaryTextWidth: 300, factsWidth: 350, minSummaryWidth: 120, gap: 8));
+    }
+
+    [Fact]
+    public void KeyRow_CutsALongSummary_SoTheFactsStillFit()
+    {
+        Assert.Equal((192, true), TicketWorkspaceView.KeyRow(available: 500, summaryTextWidth: 400, factsWidth: 300, minSummaryWidth: 120, gap: 8));
+    }
+
+    [Fact]
+    public void KeyRow_MovesTheFactsToTheirOwnRow_RatherThanSqueezeTheSummary()
+    {
+        Assert.Equal((400, false), TicketWorkspaceView.KeyRow(available: 400, summaryTextWidth: 600, factsWidth: 350, minSummaryWidth: 120, gap: 8));
+    }
+
+    [Fact]
+    public void PrGroups_OneRowPerRepo_InTheGivenOrder()
+    {
+        var prs = new[]
+        {
+            new TicketPr(AzureDevOpsClient.BackendRepository, "main", 1, "active", 0),
+            new TicketPr(AzureDevOpsClient.BackendRepository, "dev", 2, "completed", 0),
+            new TicketPr("ExternalPortal-Angular", "main", 3, "active", 4),
+            new TicketPr("Portal-Angular", "dev", 4, "active", 0),
+        };
+
+        var groups = TicketWorkspaceView.PrGroups(prs);
+
+        Assert.Equal(new[] { "BE", "FE External", "FE Portal" }, groups.Select(g => g.RepoName));
+        Assert.Equal(new[] { 1, 2 }, groups[0].Prs.Select(tp => tp.PullRequestId));
+    }
+
+    [Fact]
+    public void PrTagText_LeavesTheRepoToItsRowLabel()
+    {
+        var pr = new TicketPr("Portal-Angular", "main", 54991, "active", 6);
+
+        Assert.Equal("main ● #54991 · 6 comments", TicketWorkspaceView.PrTagText(pr, vietnamese: false));
+        Assert.Equal("main ● #54991 · 6 bình luận", TicketWorkspaceView.PrTagText(pr, vietnamese: true));
+        Assert.Equal("dev ✓ #2", TicketWorkspaceView.PrTagText(new TicketPr("Portal-Angular", "dev", 2, "completed", 0), vietnamese: false));
+    }
+
+    [Fact]
     public void FindTicket_PrefersStartedThenDoneThenPending()
     {
         var started = Map(Ticket("MDP-1", "started"));

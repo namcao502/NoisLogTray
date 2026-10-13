@@ -11,7 +11,7 @@ internal sealed class ClaudeHookServer : IDisposable
 {
     private const long MaxBodyBytes = 8L << 20;
     private const int HookTimeoutSeconds = 5;
-    private static readonly string[] HookEvents = { "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop" };
+    private static readonly string[] HookEvents = { "UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SessionEnd" };
     private static readonly byte[] EmptyReply = "{}"u8.ToArray();
 
     private readonly HttpListener _listener;

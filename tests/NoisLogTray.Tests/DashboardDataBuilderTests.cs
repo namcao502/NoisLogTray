@@ -148,7 +148,7 @@ public class DashboardDataBuilderTests
             ["MDP-1|dev|2"] = new("active", 0, "Backend-DotNet"),
         };
 
-        Assert.Equal("BE main ✓ · dev ● | FE dev ✓", DashboardDataBuilder.PrSummary("MDP-1", prs));
+        Assert.Equal("BE main ✓ · dev ● | FE Portal dev ✓", DashboardDataBuilder.PrSummary("MDP-1", prs));
     }
 
     [Fact]
@@ -195,14 +195,28 @@ public class DashboardDataBuilderTests
     }
 
     [Fact]
-    public void PrSummary_TwoFrontendReposOnOneBranch_ShowTheNewestOnce()
+    public void PrSummary_NamesEachFrontendApp_WhenTwoShareABranch()
     {
         var prs = new Dictionary<string, TrackedPr>
         {
             ["MDP-1|dev|5"] = new("completed", 0, "Portal-Angular"),
-            ["MDP-1|dev|8"] = new("active", 0, "WebApp-Angular"),
+            ["MDP-1|dev|8"] = new("active", 0, "ExternalPortal-Angular"),
+            ["MDP-1|main|7"] = new("active", 0, "ExternalPortal-Angular"),
         };
 
-        Assert.Equal("FE dev ●", DashboardDataBuilder.PrSummary("MDP-1", prs));
+        Assert.Equal("FE External main ● · dev ● | FE Portal dev ✓", DashboardDataBuilder.PrSummary("MDP-1", prs));
+    }
+
+    [Theory]
+    [InlineData(null, "BE")]
+    [InlineData("Backend-DotNet", "BE")]
+    [InlineData("Portal-Angular", "FE Portal")]
+    [InlineData("ExternalPortal-Angular", "FE External")]
+    [InlineData("MobileApp-Angular", "FE Mobile")]
+    [InlineData("Foo-Angular", "FE Foo")]
+    [InlineData("Other", "Other")]
+    public void RepoName_NamesTheFrontendApp(string? repository, string expected)
+    {
+        Assert.Equal(expected, DashboardDataBuilder.RepoName(repository));
     }
 }

@@ -22,6 +22,7 @@ internal sealed class WillLogRow : Control
     private static readonly int TextGap = UiScale.S(12);    // between key, slots and summary
 
     private readonly CloseButton _remove = new();
+    private readonly Color _surface;
     private readonly SummaryTip _summaryTip = new();
 
     internal Color DotColor = Color.FromArgb(150, 150, 156);
@@ -35,14 +36,17 @@ internal sealed class WillLogRow : Control
     // Raised when the row's [X] is clicked (removes this ticket from the queue).
     internal event Action? RemoveClicked;
 
-    internal WillLogRow()
+    // striped: every other row of its date, a shade off the list.
+    internal WillLogRow(bool striped = false)
     {
+        _surface = striped ? Theme.RowStripe(Theme.InputBg) : Theme.InputBg;
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint
             | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
         Height = UiScale.S(22);
         Margin = new Padding(0);
 
         _remove.Size = new Size(RemoveSize, RemoveSize);
+        _remove.Surface = () => _surface;
         _remove.Click += (_, _) => RemoveClicked?.Invoke();
         Controls.Add(_remove);
     }
@@ -65,7 +69,7 @@ internal sealed class WillLogRow : Control
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.Clear(Theme.InputBg);
+        g.Clear(_surface);
         g.SmoothingMode = SmoothingMode.AntiAlias;
 
         var dotSize = UiScale.S(8f);

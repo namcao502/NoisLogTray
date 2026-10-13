@@ -10,16 +10,6 @@ internal static class TeamsPost
     private const string NewLine = "\r\n";
     private static readonly Regex UrlPattern = new(@"https?://[^\s<>""']+", RegexOptions.Compiled);
 
-    // The teams-post skill's header names per front-end repo.
-    private static readonly Dictionary<string, string> FrontendAppNames = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["Portal-Angular"] = "Portal",
-        ["ExternalPortal-Angular"] = "External",
-        ["LicensorPortal-Angular"] = "Licensor",
-        ["MobileApp-Angular"] = "Mobile",
-        ["WebApp-Angular"] = "WebApp",
-    };
-
     // Title, a blank line, then the (empty) description line the user fills in; prs come ordered by LatestPrs.
     internal static string Build(string ticketKey, string? summary, IReadOnlyList<TicketPr> prs)
     {
@@ -33,13 +23,7 @@ internal static class TeamsPost
         return builder.ToString();
     }
 
-    internal static string SectionHeader(TicketPr pr)
-    {
-        if (pr.RepoLabel == "BE") return "[BE]";
-        if (pr.RepoLabel != "FE") return $"[{pr.RepoLabel}]";
-        if (FrontendAppNames.TryGetValue(pr.Repository, out var appName)) return $"[FE {appName}]";
-        return $"[FE {pr.Repository[..^"-Angular".Length]}]";
-    }
+    internal static string SectionHeader(TicketPr pr) => $"[{pr.RepoName}]";
 
     // The skill writes docs\<KEY>\teams-post.md with LF endings; worktree docs are mirrored to the dev repo, so it is checked first.
     internal static string? ReadDraft(string devRepoPath, string worktreePath, string ticketKey)

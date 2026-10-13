@@ -12,6 +12,17 @@ public class TicketLauncherTests
         Assert.Equal("C--Project-Backend-DotNet--claude-worktrees-MDP-8961", name);
     }
 
+    [Theory]
+    [InlineData(@"C:\Users\me\.claude\projects\C--Project-Backend-DotNet\0b5f2b8e.jsonl", true)]
+    [InlineData(@"C:\Users\me\.claude\projects\c--project-backend-dotnet\0b5f2b8e.jsonl", true)]
+    [InlineData(@"C:\Users\me\.claude\projects\C--Project-Backend-DotNet-src\0b5f2b8e.jsonl", false)]
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    public void IsTranscriptOfFolder_MatchesTheFoldersProjectDirectory(string? transcriptPath, bool expected)
+    {
+        Assert.Equal(expected, TicketLauncher.IsTranscriptOfFolder(transcriptPath, @"C:\Project\Backend-DotNet"));
+    }
+
     [Fact]
     public void GetIdlePrompt_ReturnsContinue_WhenWorktreeHasSession()
     {
@@ -74,6 +85,9 @@ public class TicketLauncherTests
     [InlineData("CLAUDE_CODE_CHILD_SESSION")]
     [InlineData("CLAUDE_CODE_SESSION_ID")]
     [InlineData("ANTHROPIC_BASE_URL")]
+    [InlineData("NO_COLOR")]
+    [InlineData("AI_AGENT")]
+    [InlineData("DISABLE_AUTOUPDATER")]
     public void IsClaudeSessionVariable_ReturnsTrue_ForInheritedClaudeVariables(string name)
     {
         Assert.True(TicketLauncher.IsClaudeSessionVariable(name));
@@ -85,5 +99,27 @@ public class TicketLauncherTests
     public void IsClaudeSessionVariable_ReturnsFalse_ForOtherVariables(string name)
     {
         Assert.False(TicketLauncher.IsClaudeSessionVariable(name));
+    }
+
+    [Fact]
+    public void VsCodeStartInfo_PassesThePathThroughAVariable_SoCmdKeepsItLiteral()
+    {
+        // A Jira attachment may be named anything; on the cmd line itself %USERNAME% would be expanded.
+        const string path = @"C:\docs\MDP-1\%USERNAME% a & b.md";
+
+        var startInfo = TicketLauncher.VsCodeStartInfo(path);
+
+        Assert.Equal("/c code \"%NOIS_VSCODE_TARGET%\"", startInfo.Arguments);
+        Assert.Equal(path, startInfo.Environment["NOIS_VSCODE_TARGET"]);
+        Assert.DoesNotContain(startInfo.Environment.Keys, TicketLauncher.IsClaudeSessionVariable);
+    }
+
+    [Fact]
+    public void VsCodeStartInfo_GoesToTheLine_WhenOneIsGiven()
+    {
+        var startInfo = TicketLauncher.VsCodeStartInfo(@"C:\wt\UI\a.cs", 42);
+
+        Assert.Equal("/c code -g \"%NOIS_VSCODE_TARGET%\"", startInfo.Arguments);
+        Assert.Equal(@"C:\wt\UI\a.cs:42", startInfo.Environment["NOIS_VSCODE_TARGET"]);
     }
 }

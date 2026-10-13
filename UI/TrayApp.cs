@@ -10,6 +10,8 @@ namespace NoisLogTray;
 internal sealed partial class TrayApp : ApplicationContext
 {
     private readonly NotifyIcon _tray;
+    private Action? _balloonOpen; // where a click on the last balloon goes; null opens the window
+    private bool _balloonClicked; // set while that click runs: only then may the window take the foreground from another app
     private readonly Control _marshal;
     private LoggingService? _service;
     private string? _configError;
@@ -21,8 +23,9 @@ internal sealed partial class TrayApp : ApplicationContext
     private UpdateInfo? _pendingUpdate; // set when a newer GitHub Release is found
     private ShellForm? _shell;
     private DashboardPage? _dashboardPage;
-    private LogPage? _logPage;
-    private TasksPage? _tasksPage; // null when Tasks is disabled this session
+    private LogPage? _logPage; // the Work page's log column
+    private TasksPage? _tasksPage; // the Work page's board; null when Tasks is disabled this session
+    private WorkPage? _workPage;
     private ClaudePage? _claudePage;
     private ClaudeSessionHost? _claudeHost;
     private TicketWorkspacePage? _ticketPage;
@@ -37,8 +40,8 @@ internal sealed partial class TrayApp : ApplicationContext
     private DateTime? _lastTicketCheck;
     // Tickets with a Start / Ready to Test in flight; outlives TasksPage so a rebuilt page shows them busy.
     private readonly Dictionary<string, StartStage> _launchStages = new();
-    private const string TasksDisabledEnglish = "Tasks are disabled this session (setup failed; see log).";
-    private const string TasksDisabledVietnamese = "Tasks đang tắt trong phiên này (khởi tạo lỗi; xem log).";
+    internal const string TasksDisabledEnglish = "Tasks are disabled this session (setup failed; see log).";
+    internal const string TasksDisabledVietnamese = "Tasks đang tắt trong phiên này (khởi tạo lỗi; xem log).";
     private int _draining; // 0 = idle, 1 = a drain is running
     private int _redrainPending; // 1 = a drain was requested while one ran; run one more pass
     private static readonly TimeSpan DrainTimeout = TimeSpan.FromMinutes(5);
@@ -57,7 +60,7 @@ internal sealed partial class TrayApp : ApplicationContext
         (_teams, _ado) = CreatePrIntegrations(config);
         StartHookServer();
 
-        var menu = new ContextMenuStrip();
+        var menu = ThemedMenuRenderer.CreateMenu();
         // Hidden until the startup check finds a newer release; then it sits at the top.
         _updateItem = new ToolStripMenuItem("", null, (_, _) => OpenUpdatePage())
         {
@@ -66,12 +69,8 @@ internal sealed partial class TrayApp : ApplicationContext
         _updateSeparator = new ToolStripSeparator { Visible = false };
         menu.Items.Add(_updateItem);
         menu.Items.Add(_updateSeparator);
-        // Only what has no other home: logging and TSC actions live in the window, and
-        // startup / log folder sit in Settings.
+        // Just Open and Quit: every page, Settings included, is one click away in the window.
         AddMenuItem(menu, "Open", "Mở", (_, _) => OpenShell());
-        AddMenuItem(menu, "Weekly check...", "Kiểm tra tuần...", (_, _) => ShowWeeklyCheck());
-        AddMenuItem(menu, "Tasks...", "Công việc...", (_, _) => ShowTasks());
-        AddMenuItem(menu, "Settings...", "Cài đặt...", (_, _) => EditCredentials());
         menu.Items.Add(new ToolStripSeparator());
         AddMenuItem(menu, "Quit", "Thoát", (_, _) => Quit());
 
@@ -87,6 +86,18 @@ internal sealed partial class TrayApp : ApplicationContext
         _tray.MouseClick += (_, e) =>
         {
             if (e.Button == MouseButtons.Left) OpenShell();
+        };
+        _tray.BalloonTipClicked += (_, _) =>
+        {
+            _balloonClicked = true;
+            try
+            {
+                (_balloonOpen ?? OpenShell)();
+            }
+            finally
+            {
+                _balloonClicked = false;
+            }
         };
 
         ApplyLanguage();
@@ -139,8 +150,8 @@ internal sealed partial class TrayApp : ApplicationContext
     {
         if (!PromptForCredentials(firstRun: true))
         {
-            Notify(Lang.T("Setup skipped - logging is disabled. Use \"Settings...\" in the tray menu to set it up.",
-                "Đã bỏ qua thiết lập - chưa log được. Dùng \"Cài đặt...\" trong menu khay để thiết lập."), ToolTipIcon.Warning);
+            Notify(Lang.T("Setup skipped - logging is disabled. Click here to set it up.",
+                "Đã bỏ qua thiết lập - chưa log được. Bấm vào đây để thiết lập."), ToolTipIcon.Warning, open: EditCredentials);
             return;
         }
         ReloadServiceAndShow();
@@ -161,7 +172,7 @@ internal sealed partial class TrayApp : ApplicationContext
         (_teams, _ado) = CreatePrIntegrations(config);
         _scheduler.SetFireTime(config?.LogTime ?? AppConfig.DefaultLogTime);
 
-        var page = _shell?.CurrentPage ?? ShellPage.Log;
+        var page = _shell?.CurrentPage ?? ShellPage.Work;
         if (_shell != null && !_shell.IsDisposed)
         {
             _shell.Close(); // the UserClosing path: saves bounds, tells pages they are hidden
@@ -171,6 +182,7 @@ internal sealed partial class TrayApp : ApplicationContext
         _dashboardPage = null;
         _logPage = null;
         _tasksPage = null;
+        _workPage = null;
         _claudePage = null;
         _ticketPage = null;
         _settingsPage = null;
@@ -235,17 +247,10 @@ internal sealed partial class TrayApp : ApplicationContext
             foreach (var (ticketKey, stage) in _launchStages) _dashboardPage.SetTicketBusy(ticketKey, stage);
             _dashboardPage.Reload();
             _logPage = new LogPage(_service, _configError);
-            _shell.AddPage(ShellPage.Log, _logPage);
-            // Only Tasks can be missing (its page is not added when the state setup failed); any other page stays silent.
             _shell.PageViewed += AcknowledgeSeenWaits;
-            _shell.PageUnavailable += unavailablePage =>
-            {
-                if (unavailablePage == ShellPage.Tasks) Notify(Lang.T(TasksDisabledEnglish, TasksDisabledVietnamese), ToolTipIcon.Warning);
-            };
             if (_ticketStore != null && _ticketBoard != null)
             {
                 _tasksPage = new TasksPage(_ticketStore, _ticketBoard, () => _service);
-                _shell.AddPage(ShellPage.Tasks, _tasksPage);
                 _tasksPage.CheckRequested += CheckTicketsAsync;
                 _tasksPage.StartRequested += StartTicketAsync;
                 _tasksPage.OpenRequested += OpenTicketAsync;
@@ -256,14 +261,21 @@ internal sealed partial class TrayApp : ApplicationContext
                     _dashboardPage?.Reload();
                     _ticketPage?.Reload();
                 };
-                _tasksPage.AttentionChanged += count => shell.SetBadge(ShellPage.Tasks, count);
+                _tasksPage.AttentionChanged += count => shell.SetBadge(ShellPage.Work, count);
+                _tasksPage.StatusRaised += (message, kind) =>
+                    Notify(message, kind == NoticeKind.Error ? ToolTipIcon.Warning : ToolTipIcon.Info, kind);
+            }
+            _workPage = new WorkPage(_logPage, _tasksPage);
+            _shell.AddPage(ShellPage.Work, _workPage, _workPage.HeaderControl);
+            if (_tasksPage != null)
+            {
                 _tasksPage.SetChecking(_checkingTickets, _lastTicketCheck);
                 foreach (var (ticketKey, stage) in _launchStages) _tasksPage.SetTicketBusy(ticketKey, stage);
                 _tasksPage.Reload(); // after subscribing, so the badge has a value right away
             }
             PruneTicketTabs();
             _ticketPage = new TicketWorkspacePage(_ticketStore, _service?.JiraBaseUrl ?? AppConfig.DefaultJiraBaseUrl, () => DevRepoPath, SessionFor, CreateTeamsPostView);
-            _shell.AddPage(ShellPage.Ticket, _ticketPage);
+            _shell.AddPage(ShellPage.Ticket, _ticketPage, _ticketPage.HeaderControl);
             // Deferred: the x button is on the Click stack and SetTabs disposes it.
             _ticketPage.CloseRequested += ticketKey => shell.BeginInvoke(() => CloseTicketTab(ticketKey));
             _ticketPage.VsCodeRequested += OpenInVsCode;
@@ -278,7 +290,7 @@ internal sealed partial class TrayApp : ApplicationContext
                 TrackClaudeSession(ClaudeAttention.GeneralSessionName, _claudeHost);
             }
             _claudePage = new ClaudePage(_claudeHost, ClaudeFolderChoices);
-            _shell.AddPage(ShellPage.Claude, _claudePage);
+            _shell.AddPage(ShellPage.Claude, _claudePage, _claudePage.HeaderControl);
             _claudePage.PageRequested += ShowShell;
             _claudePage.FolderChosen += OnClaudeFolderChosen;
             RefreshClaudeAttention();
@@ -290,7 +302,7 @@ internal sealed partial class TrayApp : ApplicationContext
             _logPage.ReauthSucceeded += CatchUpIfDue; // retry due entries once TSC is signed in
             _logPage.DrainRequested += () => _ = DrainAsync(fromUser: true); // "Log queue now"
             _logPage.StatusRaised += (message, kind) =>
-                Notify(message, kind == NoticeKind.Error ? ToolTipIcon.Warning : ToolTipIcon.Info, kind);
+                Notify(message, kind == NoticeKind.Error ? ToolTipIcon.Warning : ToolTipIcon.Info, kind, ShowWorkPage);
             _logPage.BusyChanged += text => { if (!shell.IsDisposed) shell.ShowBusy(text); };
             _shell.WindowState = startMaximized ? FormWindowState.Maximized : FormWindowState.Normal;
         }
@@ -299,7 +311,9 @@ internal sealed partial class TrayApp : ApplicationContext
         if (_shell.WindowState == FormWindowState.Minimized)
             _shell.WindowState = ShellLayout.StartMaximized(AppSettings.Load()) ? FormWindowState.Maximized : FormWindowState.Normal;
         if (!_shell.Visible) _shell.Show();
-        _shell.Activate();
+        // A background call (the 18:00 reminder) must not steal focus while the user types elsewhere.
+        if (_balloonClicked) _shell.ForceForeground();
+        else _shell.Activate();
         _shell.BringToFront();
     }
 
@@ -310,24 +324,8 @@ internal sealed partial class TrayApp : ApplicationContext
         else ShowShell(ShellPage.Dashboard);
     }
 
-    // Tray "Weekly check...": the Log page, scrolled to its week card.
-    private void ShowWeeklyCheck()
-    {
-        if (_service == null) { Notify(Lang.T("Config not loaded; set up credentials first.", "Chưa có cấu hình; hãy thiết lập thông tin đăng nhập trước."), ToolTipIcon.Warning); return; }
-        ShowShell(ShellPage.Log);
-        _logPage?.RevealWeek();
-    }
-
-    // Tray "Tasks...": the window on the Tasks page.
-    private void ShowTasks()
-    {
-        if (_ticketStore == null || _ticketBoard == null)
-        {
-            Notify(Lang.T(TasksDisabledEnglish, TasksDisabledVietnamese), ToolTipIcon.Warning);
-            return;
-        }
-        ShowShell(ShellPage.Tasks);
-    }
+    // Every log, queue and new-ticket notice. With Tasks off, the page says so in the board's place.
+    private void ShowWorkPage() => ShowShell(ShellPage.Work);
 
     // Start and the Dashboard's queue button; a refusal becomes a notice.
     private void QueueTicketForToday(string ticketKey)
@@ -352,7 +350,7 @@ internal sealed partial class TrayApp : ApplicationContext
             {
                 AppLogger.Error($"[tasks] Queueing {ticketKey} failed: {e}");
                 Notify(Lang.T($"{ticketKey} not queued: the queue could not be saved (see log).",
-                    $"Chưa thêm {ticketKey} vào queue: không lưu được queue (xem log)."), ToolTipIcon.Warning);
+                    $"Chưa thêm {ticketKey} vào queue: không lưu được queue (xem log)."), ToolTipIcon.Warning, open: ShowWorkPage);
                 return;
             }
             var reason = queueResult switch
@@ -367,7 +365,7 @@ internal sealed partial class TrayApp : ApplicationContext
             };
             if (reason != null)
                 Notify(Lang.T($"{ticketKey} not queued: {reason} - log it in the window.",
-                    $"Chưa thêm {ticketKey} vào queue: {reason} - hãy log trong cửa sổ."), ToolTipIcon.Info);
+                    $"Chưa thêm {ticketKey} vào queue: {reason} - hãy log trong cửa sổ."), ToolTipIcon.Info, open: ShowWorkPage);
             UpdateTooltip();
             if (_logPage != null && !_logPage.IsDisposed) _logPage.RefreshQueuedView();
         }
@@ -421,8 +419,15 @@ internal sealed partial class TrayApp : ApplicationContext
     private async Task MoveToReadyToTestAsync(string ticketKey)
     {
         if (_service == null || _ticketBoard == null || _launchStages.ContainsKey(ticketKey)) return;
+        // Testers see the move and it cannot be walked back from here, so a stray click must not do it.
+        var moveInJira = ConfirmDialog.Ask(_shell, Lang.T($"Move {ticketKey} to Ready to Test?", $"Chuyển {ticketKey} sang Ready to Test?"),
+            Lang.T($"{ticketKey} is walked through Jira's statuses up to Ready to Test. The team sees the change.",
+                $"{ticketKey} sẽ được chuyển qua các trạng thái Jira đến Ready to Test. Cả team sẽ thấy thay đổi này."),
+            ButtonWidths.ReadyToTestText, confirmByDefault: true);
+        if (!moveInJira) return;
         var jira = _service.Jira; // captured: a Settings save may replace _service mid-walk
         SetLaunchStage(ticketKey, StartStage.UpdatingJira);
+        using var busyWork = BusyWork.Shared.Begin(Lang.T($"Moving {ticketKey} to Ready to Test...", $"Đang chuyển {ticketKey} sang Ready to Test..."));
         try
         {
             try
@@ -468,7 +473,7 @@ internal sealed partial class TrayApp : ApplicationContext
 
     private void NotifyRepoNotFound(string repoPath) =>
         Notify(Lang.T($"Dev repo not found: {repoPath}. Set it in Settings.",
-            $"Không thấy repo dev: {repoPath}. Đặt lại trong Cài đặt."), ToolTipIcon.Warning);
+            $"Không thấy repo dev: {repoPath}. Đặt lại trong Cài đặt."), ToolTipIcon.Warning, open: EditCredentials);
 
     // A null stage clears the ticket's busy state.
     private void SetLaunchStage(string ticketKey, StartStage? stage)
@@ -487,6 +492,7 @@ internal sealed partial class TrayApp : ApplicationContext
         _checkingTickets = true;
         _tasksPage?.SetChecking(true, _lastTicketCheck);
         _dashboardPage?.SetChecking(true, _lastTicketCheck);
+        using var busyWork = BusyWork.Shared.Begin(Lang.T("Checking Jira and PRs...", "Đang kiểm tra Jira và PR..."));
         try
         {
             try
@@ -504,10 +510,10 @@ internal sealed partial class TrayApp : ApplicationContext
                     _ticketPollFailures = 0;
                     _lastTicketCheck = DateTime.Now;
                     if (result.NewTickets.Count != 0)
-                        Notify(Lang.T("New ticket(s): ", "Ticket mới: ") + string.Join(", ", result.NewTickets.Select(jt => jt.Key)), ToolTipIcon.Info);
+                        Notify(Lang.T("New ticket(s): ", "Ticket mới: ") + string.Join(", ", result.NewTickets.Select(jt => jt.Key)), ToolTipIcon.Info, open: ShowWorkPage);
                     if (result.FinishedTickets.Count != 0)
                         Notify(Lang.T("Done in Jira (move them to Done in Tasks): ", "Đã Done trên Jira (chuyển sang Done trong Tasks): ")
-                            + string.Join(", ", result.FinishedTickets.Select(jt => jt.Key)), ToolTipIcon.Info);
+                            + string.Join(", ", result.FinishedTickets.Select(jt => jt.Key)), ToolTipIcon.Info, open: ShowWorkPage);
                     foreach (var ticket in result.NewTickets) await _teams.PostNewTicketAsync(ticket);
                 }
             }
@@ -557,25 +563,28 @@ internal sealed partial class TrayApp : ApplicationContext
         var commentAlertsToAdd = new List<(string TicketKey, int NewCommentCount, string PrUrl)>();
         foreach (var (ticketKey, notification) in prs.Notifications)
         {
-            var branch = $"{DashboardDataBuilder.RepoLabel(notification.Pr.Repository)} {notification.Pr.Branch}"; // e.g. "FE dev"
+            var branch = $"{DashboardDataBuilder.RepoName(notification.Pr.Repository)} {notification.Pr.Branch}"; // e.g. "FE Portal dev"
             var url = notification.Pr.Url;
             if (notification.IsMerged)
             {
-                Notify(Lang.T($"{ticketKey}: PR ({branch}) merged.", $"{ticketKey}: PR ({branch}) đã merge."), ToolTipIcon.Info);
+                Notify(Lang.T($"{ticketKey}: PR ({branch}) merged.", $"{ticketKey}: PR ({branch}) đã merge."), ToolTipIcon.Info,
+                    open: () => ShowShell(ShellPage.Dashboard));
                 await teams.PostPrMergedAsync(ticketKey, branch, url);
             }
             if (notification.NewCommentCount != 0)
             {
                 var newCommentCount = notification.NewCommentCount;
                 commentAlertsToAdd.Add((ticketKey, newCommentCount, url));
-                Notify(Lang.T($"{ticketKey}: {newCommentCount} new PR comment(s) ({branch}).", $"{ticketKey}: {newCommentCount} comment PR mới ({branch})."), ToolTipIcon.Info);
+                Notify(Lang.T($"{ticketKey}: {newCommentCount} new PR comment(s) ({branch}).", $"{ticketKey}: {newCommentCount} comment PR mới ({branch})."), ToolTipIcon.Info,
+                    open: () => TaskRow.OpenUrl(url));
                 await teams.PostNewPrCommentAsync(ticketKey, branch, url, newCommentCount);
             }
         }
         MergePrCommentAlerts(commentAlertsToAdd);
         foreach (var ticketKey in prs.DevMergedNeedingReadyToTest)
             Notify(Lang.T($"{ticketKey} merged into development - move it to Ready to Test once CI deployed.",
-                $"{ticketKey} đã merge vào development - chuyển sang Ready to Test khi CI deploy xong."), ToolTipIcon.Info);
+                $"{ticketKey} đã merge vào development - chuyển sang Ready to Test khi CI deploy xong."), ToolTipIcon.Info,
+                open: () => ShowShell(ShellPage.Dashboard));
     }
 
     // Synchronous on purpose (no await): a "seen"/Open handled during the Teams awaits above is not overwritten.
@@ -619,7 +628,7 @@ internal sealed partial class TrayApp : ApplicationContext
             _updateSeparator.Visible = true;
         });
         Notify(Lang.T($"Update v{update.Latest} available - open the tray menu to download.",
-            $"Có bản cập nhật v{update.Latest} - mở menu khay để tải."), ToolTipIcon.Info);
+            $"Có bản cập nhật v{update.Latest} - mở menu khay để tải."), ToolTipIcon.Info, open: OpenUpdatePage);
     }
 
     // Open the release page in the default browser so the user can download the new build.
@@ -675,9 +684,9 @@ internal sealed partial class TrayApp : ApplicationContext
         Log("[scheduler] Nothing queued on a weekday; opening the window as a reminder.");
         RunOnUi(() =>
         {
-            ShowShell(ShellPage.Log);
+            ShowShell(ShellPage.Work);
             Notify(Lang.T("Reminder: nothing is queued for today - log your work before you leave.",
-                "Nhắc nhở: hôm nay chưa có gì trong hàng đợi - hãy log công việc trước khi về."), ToolTipIcon.Info);
+                "Nhắc nhở: hôm nay chưa có gì trong hàng đợi - hãy log công việc trước khi về."), ToolTipIcon.Info, open: ShowWorkPage);
         });
     }
 
@@ -688,7 +697,7 @@ internal sealed partial class TrayApp : ApplicationContext
     {
         if (_service == null)
         {
-            if (fromUser) Notify(Lang.T("Config not loaded; cannot log.", "Chưa có cấu hình; không log được."), ToolTipIcon.Warning);
+            if (fromUser) Notify(Lang.T("Config not loaded; cannot log.", "Chưa có cấu hình; không log được."), ToolTipIcon.Warning, open: EditCredentials);
             return;
         }
         if (Interlocked.CompareExchange(ref _draining, 1, 0) != 0)
@@ -696,12 +705,13 @@ internal sealed partial class TrayApp : ApplicationContext
             // A drain is already running; its snapshot may predate work just requested,
             // so flag one more pass to run after it finishes.
             Interlocked.Exchange(ref _redrainPending, 1);
-            if (fromUser) Notify(Lang.T("A logging run is already in progress.", "Đang có một lượt log chạy."), ToolTipIcon.Info);
+            if (fromUser) Notify(Lang.T("A logging run is already in progress.", "Đang có một lượt log chạy."), ToolTipIcon.Info, open: ShowWorkPage);
             return;
         }
         RunOnUi(() => { if (_dashboardPage != null && !_dashboardPage.IsDisposed) _dashboardPage.SetDraining(true); });
 
         var hadToday = false;
+        var busyWork = BusyWork.Shared.Begin(Lang.T("Logging the queue...", "Đang log hàng đợi..."));
         try
         {
             var todayApiDate = Hcm.ApiDate(Hcm.Today());
@@ -713,17 +723,17 @@ internal sealed partial class TrayApp : ApplicationContext
 
             if (r.Total == 0)
             {
-                if (fromUser) Notify(Lang.T("Queue is empty.", "Hàng đợi trống."), ToolTipIcon.Info);
+                if (fromUser) Notify(Lang.T("Queue is empty.", "Hàng đợi trống."), ToolTipIcon.Info, open: ShowWorkPage);
             }
             else if (r.Kept > 0)
             {
                 Notify(Lang.T($"Auto-log: {r.Logged} logged, {r.Kept} kept. Check TSC sign-in (Re-authenticate) - it retries automatically.",
                     $"Tự log: đã log {r.Logged}, giữ lại {r.Kept}. Kiểm tra đăng nhập TSC (Đăng nhập lại) - app sẽ tự thử lại."),
-                    ToolTipIcon.Warning);
+                    ToolTipIcon.Warning, open: ShowWorkPage);
             }
             else
             {
-                Notify(Lang.T($"Auto-log: {r.Logged} logged.", $"Tự log: đã log {r.Logged}."), ToolTipIcon.Info);
+                Notify(Lang.T($"Auto-log: {r.Logged} logged.", $"Tự log: đã log {r.Logged}."), ToolTipIcon.Info, open: ShowWorkPage);
             }
         }
         catch (OperationCanceledException)
@@ -733,7 +743,7 @@ internal sealed partial class TrayApp : ApplicationContext
             Log($"[drain] Timed out after {DrainTimeout.TotalMinutes:0} min; kept unlogged entries for retry.");
             Notify(Lang.T("Auto-log timed out; kept entries for retry. Check TSC sign-in if this repeats.",
                 "Tự log quá thời gian; đã giữ lại để thử lại. Nếu lặp lại, hãy kiểm tra đăng nhập TSC."),
-                ToolTipIcon.Warning);
+                ToolTipIcon.Warning, open: ShowWorkPage);
         }
         catch (Exception e)
         {
@@ -741,10 +751,11 @@ internal sealed partial class TrayApp : ApplicationContext
             UpdateTooltip();
             RunOnUi(() => RefreshAfterDrain(hadToday));
             Log($"[drain] Error: {e.Message}");
-            Notify(Lang.T($"Auto-log error: {e.Message}", $"Tự log lỗi: {e.Message}"), ToolTipIcon.Error);
+            Notify(Lang.T($"Auto-log error: {e.Message}", $"Tự log lỗi: {e.Message}"), ToolTipIcon.Error, open: ShowWorkPage);
         }
         finally
         {
+            busyWork.Dispose();
             Interlocked.Exchange(ref _draining, 0);
             RunOnUi(() => { if (_dashboardPage != null && !_dashboardPage.IsDisposed) _dashboardPage.SetDraining(false); });
         }
@@ -794,7 +805,7 @@ internal sealed partial class TrayApp : ApplicationContext
         }
     }
 
-    // Tray "Settings...": the Settings page; the dialog only while there is no working config (no window to host it).
+    // Config notices: the Settings page; the dialog only while there is no working config.
     private void EditCredentials()
     {
         if (_service != null)
@@ -830,16 +841,16 @@ internal sealed partial class TrayApp : ApplicationContext
 
     private void Quit()
     {
-        // Quitting stops every ticket's Claude, maybe mid-`ship`; ask the way closing a running tab does.
+        // Quitting stops every ticket's terminal, maybe mid-`ship`; ask the way closing a running tab does.
         var runningTickets = _ticketSessions.Where(kvp => kvp.Value.IsRunning).Select(kvp => kvp.Key).ToList();
         if (runningTickets.Count != 0)
         {
             var owner = _shell != null && _shell.Visible ? _shell : null;
-            var answer = MessageBox.Show(owner,
-                Lang.T($"Claude is still running in {string.Join(", ", runningTickets)}. Quit and stop it?",
-                    $"Claude vẫn đang chạy trong {string.Join(", ", runningTickets)}. Thoát và dừng nó?"),
-                Lang.T("Quit", "Thoát"), MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
-            if (answer != DialogResult.Yes) return;
+            var quit = ConfirmDialog.Ask(owner, Lang.T("Quit NOIS Workday?", "Thoát NOIS Workday?"),
+                Lang.T($"The terminal is still running in {string.Join(", ", runningTickets)}. Quit and stop it?",
+                    $"Terminal vẫn đang chạy trong {string.Join(", ", runningTickets)}. Thoát và dừng nó?"),
+                Lang.T("Quit", "Thoát"), destructive: true);
+            if (!quit) return;
         }
         _scheduler.Dispose();
         _tasksTimer.Dispose();
@@ -871,13 +882,19 @@ internal sealed partial class TrayApp : ApplicationContext
 
     // Every notice lands in the window's bell history and shows in-window while the window is
     // on screen; a Windows balloon is added unless the window is the one in the foreground.
-    private void Notify(string message, ToolTipIcon icon, NoticeKind? kind = null) =>
+    // A click on the toast, the history line or the balloon runs open (the place the notice is about).
+    private void Notify(string message, ToolTipIcon icon, NoticeKind? kind = null, Action? open = null) =>
         RunOnUi(() =>
         {
             var noticeKind = kind ?? (icon == ToolTipIcon.Info ? NoticeKind.Info : NoticeKind.Error);
             var shell = _shell != null && !_shell.IsDisposed ? _shell : null;
-            shell?.PostNotice(message, noticeKind);
-            if (shell == null || !shell.IsForeground) _tray.ShowBalloonTip(5000, "NOIS Workday", message, icon);
+            shell?.PostNotice(message, noticeKind, open);
+            if (shell == null || !shell.IsForeground)
+            {
+                // Not cleared on BalloonTipClosed: the replaced balloon's close can arrive after this one is set.
+                _balloonOpen = open;
+                _tray.ShowBalloonTip(5000, "NOIS Workday", message, icon);
+            }
         });
 
     private void RunOnUi(Action action)

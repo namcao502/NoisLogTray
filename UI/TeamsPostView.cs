@@ -50,7 +50,7 @@ internal sealed class TeamsPostView : UserControl
         foreach (var label in new[] { _help, _posted, _status })
         {
             label.AutoSize = false;
-            label.AutoEllipsis = true;
+            ThemedToolTip.Track(label);
             label.Font = HelpFont;
             label.BackColor = Color.Transparent;
             label.TextAlign = ContentAlignment.MiddleLeft;
@@ -63,6 +63,7 @@ internal sealed class TeamsPostView : UserControl
         _box.Font = InputFont;
         _box.KeyDown += OnBoxKeyDown;
         _host.Controls.Add(_box);
+        ThemedScrollBar.Attach(_box);
         _reloadButton.Click += (_, _) => LoadDraft();
         _sendButton.Click += async (_, _) => await SendAsync();
         _card.Controls.AddRange(new Control[] { _help, _posted, _host, _status, _reloadButton, _sendButton });
@@ -168,12 +169,14 @@ internal sealed class TeamsPostView : UserControl
         _sending = new CancellationTokenSource();
         SetSending(true);
         bool sent;
+        var busyWork = BusyWork.Shared.Begin(Lang.T($"Posting {_ticketKey} to Teams...", $"Đang đăng {_ticketKey} lên Teams..."));
         try
         {
             sent = await _send(text, _sending.Token);
         }
         finally
         {
+            busyWork.Dispose();
             _sending.Dispose();
             _sending = null;
         }

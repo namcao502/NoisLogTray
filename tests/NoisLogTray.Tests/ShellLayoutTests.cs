@@ -6,10 +6,39 @@ namespace NoisLogTray.Tests;
 public class ShellLayoutTests
 {
     [Fact]
-    public void LogColumns_SwitchesAtTwoColumnMinWidth()
+    public void DashboardColumns_SwitchesAtTwoColumnMinWidth()
     {
-        Assert.Equal(1, ShellLayout.LogColumns(1179));
-        Assert.Equal(2, ShellLayout.LogColumns(1180));
+        Assert.Equal(1, ShellLayout.DashboardColumns(1179));
+        Assert.Equal(2, ShellLayout.DashboardColumns(1180));
+    }
+
+    [Fact]
+    public void WorkSideBySide_NeedsTheBoardAndTheLogColumn()
+    {
+        Assert.Equal(TasksPage.DesignWidth + LogPage.CardW + 20, ShellLayout.WorkSideBySideMinWidth);
+        Assert.False(ShellLayout.WorkSideBySide(ShellLayout.WorkSideBySideMinWidth - 1));
+        Assert.True(ShellLayout.WorkSideBySide(ShellLayout.WorkSideBySideMinWidth));
+    }
+
+    [Fact]
+    public void WorkBounds_SideBySide_LogColumnOnTheRight()
+    {
+        var (tasks, log) = ShellLayout.WorkBounds(1400, 900, 602, 640);
+
+        Assert.Equal(new Rectangle(0, 0, 820, 900), tasks);
+        Assert.Equal(new Rectangle(820, 0, 580, 900), log);
+    }
+
+    [Fact]
+    public void WorkBounds_Narrow_StacksLogFirst()
+    {
+        var (tasks, log) = ShellLayout.WorkBounds(1000, 900, 602, 640);
+
+        Assert.Equal(new Rectangle(0, 0, 1000, 602), log);
+        Assert.Equal(new Rectangle(0, 602, 1000, 640), tasks); // at least its minimum height; the page scrolls
+
+        var (tallTasks, _) = ShellLayout.WorkBounds(1000, 1400, 602, 640);
+        Assert.Equal(new Rectangle(0, 602, 1000, 798), tallTasks);
     }
 
     [Fact]
@@ -32,39 +61,6 @@ public class ShellLayoutTests
         var rect = ShellLayout.MaximizedRect(new Rectangle(1920, 0, 1920, 1080), new Rectangle(1960, 0, 1880, 1080));
 
         Assert.Equal(new Rectangle(40, 0, 1880, 1080), rect);
-    }
-
-    [Fact]
-    public void LogCardBounds_OneColumn_StacksCards()
-    {
-        var (newEntry, queue, week, myTickets) = ShellLayout.LogCardBounds(1100, 900, 142, 162, 246, 264, 164);
-
-        Assert.Equal(new Rectangle(20, 14, 1060, 142), newEntry);
-        Assert.Equal(new Rectangle(20, 14 + 142 + 12, 1060, 162), queue);
-        Assert.Equal(new Rectangle(20, 342, 1060, 246), week);
-        Assert.Equal(new Rectangle(20, 600, 1060, 280), myTickets);
-    }
-
-    [Fact]
-    public void LogCardBounds_OneColumn_ReproducesBuiltLayout()
-    {
-        var (newEntry, queue, week, myTickets) = ShellLayout.LogCardBounds(600, 884, 142, 162, 246, 264, 164);
-
-        Assert.Equal(new Rectangle(20, 14, 560, 142), newEntry);
-        Assert.Equal(new Rectangle(20, 168, 560, 162), queue);
-        Assert.Equal(new Rectangle(20, 342, 560, 246), week);
-        Assert.Equal(new Rectangle(20, 600, 560, 264), myTickets);
-    }
-
-    [Fact]
-    public void LogCardBounds_TwoColumns_WeekAndMyTicketsShareTheRightColumn()
-    {
-        var (newEntry, queue, week, myTickets) = ShellLayout.LogCardBounds(1400, 900, 142, 162, 246, 264, 164);
-
-        Assert.Equal(new Rectangle(20, 14, 670, 142), newEntry);
-        Assert.Equal(new Rectangle(20, 168, 670, 712), queue);
-        Assert.Equal(new Rectangle(710, 14, 670, 246), week);
-        Assert.Equal(new Rectangle(710, 272, 670, 608), myTickets);
     }
 
     [Fact]
@@ -112,52 +108,42 @@ public class ShellLayoutTests
     }
 
     [Fact]
-    public void LogCardBounds_OneColumn_MyTicketsKeepsItsBuiltHeight()
+    public void LogCardBounds_ReproducesBuiltLayout()
     {
-        var (_, _, _, myTickets) = ShellLayout.LogCardBounds(600, 400, 142, 162, 246, 264, 164);
+        var (newEntry, queue, week) = ShellLayout.LogCardBounds(600, 608, 20, 142, 162, 246);
 
-        Assert.Equal(new Rectangle(20, 600, 560, 264), myTickets);
+        Assert.Equal(new Rectangle(20, 14, 560, 142), newEntry);
+        Assert.Equal(new Rectangle(20, 168, 560, 162), queue);
+        Assert.Equal(new Rectangle(20, 342, 560, 246), week);
     }
 
     [Fact]
-    public void UseTaskBoard_SwitchesAtMinWidth()
+    public void LogCardBounds_QueueTakesTheExtraHeight()
     {
-        Assert.False(ShellLayout.UseTaskBoard(1223));
-        Assert.True(ShellLayout.UseTaskBoard(1224));
+        var (newEntry, queue, week) = ShellLayout.LogCardBounds(580, 900, 0, 142, 162, 246);
+
+        Assert.Equal(new Rectangle(0, 14, 560, 142), newEntry);
+        Assert.Equal(new Rectangle(0, 168, 560, 454), queue);
+        Assert.Equal(new Rectangle(0, 634, 560, 246), week);
+        Assert.Equal(900 - 20, week.Bottom);
     }
 
     [Fact]
-    public void TaskBoardColumnBounds_EmptyColumnShrinks()
+    public void LogCardBounds_ShortColumn_KeepsBuiltHeights()
     {
-        // 1600 wide, New empty: New 180, then (1600 - 24 - 180) / 2 = 698 each.
-        var (newColumn, inProgress, done) = ShellLayout.TaskBoardColumnBounds(1600, 700, newEmpty: true);
+        var (_, queue, week) = ShellLayout.LogCardBounds(580, 400, 0, 142, 162, 246);
 
-        Assert.Equal(new Rectangle(0, 0, 180, 700), newColumn);
-        Assert.Equal(new Rectangle(192, 0, 698, 700), inProgress);
-        Assert.Equal(new Rectangle(902, 0, 698, 700), done);
+        Assert.Equal(162, queue.Height);
+        Assert.Equal(new Rectangle(0, 342, 560, 246), week);
     }
 
     [Fact]
-    public void TaskBoardColumnBounds_KeepsMinWidthAndOverflows()
+    public void LogNaturalHeight_FitsTheBuiltCards()
     {
-        // 1224 wide, only Done empty: two filled columns would be 510 each, above the 400 minimum.
-        var (_, inProgress, done) = ShellLayout.TaskBoardColumnBounds(1224, 700, doneEmpty: true);
-        Assert.Equal(510, inProgress.Width);
-        Assert.Equal(1224, done.Right);
+        var natural = ShellLayout.LogNaturalHeight(142, 162, 246);
 
-        // 900 wide with nothing empty: each keeps 400, so the board runs past the width.
-        var (_, _, wideDone) = ShellLayout.TaskBoardColumnBounds(900, 700);
-        Assert.Equal(400, wideDone.Width);
-        Assert.True(wideDone.Right > 900);
-    }
-
-    [Fact]
-    public void TaskBoardColumnBounds_ThreeEqualColumns()
-    {
-        var (newColumn, inProgress, done) = ShellLayout.TaskBoardColumnBounds(1300, 700);
-
-        Assert.Equal(new Rectangle(0, 0, 425, 700), newColumn);
-        Assert.Equal(new Rectangle(437, 0, 425, 700), inProgress);
-        Assert.Equal(new Rectangle(874, 0, 426, 700), done);
+        Assert.Equal(14 + 142 + 12 + 162 + 12 + 246 + 14, natural);
+        var (_, queue, _) = ShellLayout.LogCardBounds(1000, natural, 20, 142, 162, 246);
+        Assert.Equal(162, queue.Height);
     }
 }

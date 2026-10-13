@@ -17,14 +17,12 @@ internal sealed class SidebarNav : Panel
     private const int RowRadius = 8;
     private const int GlyphColumn = CollapsedWidth - 2 * Inset; // a collapsed row is just the glyph cell
 
-    // Segoe MDL2 Assets draws every icon in the same em box, unlike Segoe UI Symbol glyphs.
-    private static readonly Font GlyphFont = UiScale.Font("Segoe MDL2 Assets", 12F);
     private static readonly Font LabelFont = UiScale.Font("Segoe UI", 9.5F);
     private static readonly Font BadgeFont = UiScale.Font("Segoe UI", 7.5F, FontStyle.Bold);
 
     private readonly List<(ShellPage Page, string Glyph, Func<string> Label, ClickableRow Row)> _items = new();
     private readonly Dictionary<ShellPage, int> _badges = new();
-    private readonly ToolTip _tips = new();
+    private readonly ThemedToolTip _tips = new();
     private ClickableRow? _hoverRow;
     private ShellPage? _selected;
     private bool _collapsed;
@@ -38,12 +36,11 @@ internal sealed class SidebarNav : Panel
         BackColor = Theme.WindowBg;
         Width = ScaledWidth;
 
-        AddItem(ShellPage.Dashboard, "", () => PageLabel(ShellPage.Dashboard));
-        AddItem(ShellPage.Log, "", () => PageLabel(ShellPage.Log));
-        AddItem(ShellPage.Tasks, "", () => PageLabel(ShellPage.Tasks));
-        AddItem(ShellPage.Claude, "", () => PageLabel(ShellPage.Claude));
-        AddItem(ShellPage.Ticket, "", () => PageLabel(ShellPage.Ticket));
-        AddItem(ShellPage.Settings, "", () => PageLabel(ShellPage.Settings));
+        AddItem(ShellPage.Dashboard, Icons.Board, Icons.BoardFilled, () => PageLabel(ShellPage.Dashboard));
+        AddItem(ShellPage.Work, Icons.TaskList, Icons.TaskListFilled, () => PageLabel(ShellPage.Work));
+        AddItem(ShellPage.Claude, Icons.WindowConsole, Icons.WindowConsoleFilled, () => PageLabel(ShellPage.Claude));
+        AddItem(ShellPage.Ticket, Icons.Ticket, Icons.TicketFilled, () => PageLabel(ShellPage.Ticket));
+        AddItem(ShellPage.Settings, Icons.Settings, Icons.SettingsFilled, () => PageLabel(ShellPage.Settings));
 
         ApplyLanguage();
         Theme.Changed += ApplyTheme;
@@ -64,9 +61,8 @@ internal sealed class SidebarNav : Panel
     internal static string PageLabel(ShellPage page) => page switch
     {
         ShellPage.Dashboard => "Dashboard",
-        ShellPage.Log => "Log",
-        ShellPage.Tasks => "Tasks",
-        ShellPage.Claude => "Claude",
+        ShellPage.Work => Lang.T("Work", "Công việc"),
+        ShellPage.Claude => "Terminal", // the general Claude session's page, plus a plain shell from its header
         ShellPage.Ticket => "Ticket",
         ShellPage.Settings => Lang.T("Settings", "Cài đặt"),
         _ => throw new ArgumentOutOfRangeException(nameof(page)),
@@ -75,7 +71,7 @@ internal sealed class SidebarNav : Panel
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal ShellPage Selected
     {
-        get => _selected ?? ShellPage.Log;
+        get => _selected ?? ShellPage.Work;
         set
         {
             _selected = value;
@@ -111,10 +107,11 @@ internal sealed class SidebarNav : Panel
 
     private int Scaled(int value) => UiScale.S(value);
 
-    private void AddItem(ShellPage page, string glyph, Func<string> label)
+    // The selected row shows the filled glyph.
+    private void AddItem(ShellPage page, string glyph, string selectedGlyph, Func<string> label)
     {
         var row = new ClickableRow { BackColor = Theme.WindowBg, Cursor = Cursors.Hand };
-        row.Paint += (_, e) => PaintRow(e.Graphics, row, page, glyph, label());
+        row.Paint += (_, e) => PaintRow(e.Graphics, row, page, page == _selected ? selectedGlyph : glyph, label());
         row.MouseEnter += (_, _) => { _hoverRow = row; row.Invalidate(); };
         row.MouseLeave += (_, _) =>
         {
@@ -180,8 +177,7 @@ internal sealed class SidebarNav : Panel
 
         var textColor = selected ? Color.White : Theme.TextPrimary;
         var glyphRect = new Rectangle(0, 0, Math.Min(row.Width, Scaled(GlyphColumn)), row.Height);
-        TextRenderer.DrawText(g, glyph, GlyphFont, glyphRect, textColor,
-            TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
+        Icons.Draw(g, glyph, selected ? Icons.MediumFilled : Icons.Medium, glyphRect, textColor);
 
         var badge = _badges.GetValueOrDefault(page);
         using var badgeBrush = new SolidBrush(Theme.Badge);

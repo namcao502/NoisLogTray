@@ -39,8 +39,8 @@ internal sealed class WeekCard : Card
     private readonly Label _dayHeader = new();
     private readonly Label _hrmHeader = new();
     private readonly Label _tscHeader = new();
-    private readonly MacButton _prev = MacButton.Secondary("<");
-    private readonly MacButton _next = MacButton.Secondary(">");
+    private readonly MacButton _prev = MacButton.Secondary("");
+    private readonly MacButton _next = MacButton.Secondary("");
     private readonly MacButton _refresh = MacButton.Secondary(Lang.T("Refresh", "Làm mới"));
     private readonly FlowLayoutPanel _rows = new();
 
@@ -64,14 +64,14 @@ internal sealed class WeekCard : Card
         base.Dispose(disposing);
     }
 
-    // The first show after the window was shown reads without Chrome (a cached or override Graph token only),
-    // so a background sniff never takes the browser from Log now; only Refresh may launch it.
+    // The first show after the window was shown reads TSC too: with no cached Graph token it sniffs one (headless
+    // Chrome, at most once per token lifetime), and a Log now meanwhile waits for that token instead of a browser.
     internal void LoadIfNeeded()
     {
         if (_loaded) return;
         _loaded = true;
         if (_busy) _reloadPending = true; // a read from before the hide is still running
-        else LoadWeekAsync(allowSniff: false);
+        else LoadWeekAsync(allowSniff: true);
     }
 
     // After a log run: HRM is re-read, and TSC with the Graph token still cached (a lapsed one reads "not read").
@@ -108,9 +108,11 @@ internal sealed class WeekCard : Card
         _refresh.Location = new Point(UiScale.S(16 + 528) - _refresh.Width, buttonY);
         _refresh.Click += (_, _) => LoadWeekAsync(allowSniff: true);
         _next.Size = new Size(UiScale.S(34), buttonH);
+        _next.Glyph = Icons.ChevronRight;
         _next.Location = new Point(_refresh.Left - UiScale.S(8) - _next.Width, buttonY);
         _next.Click += (_, _) => Shift(7);
         _prev.Size = new Size(UiScale.S(34), buttonH);
+        _prev.Glyph = Icons.ChevronLeft;
         _prev.Location = new Point(_next.Left - UiScale.S(4) - _prev.Width, buttonY);
         _prev.Click += (_, _) => Shift(-7);
 
@@ -127,7 +129,7 @@ internal sealed class WeekCard : Card
         _rows.BackColor = Theme.CardSurface;
 
         _status.AutoSize = false;
-        _status.AutoEllipsis = true;
+        ThemedToolTip.Track(_status);
         _status.Location = UiScale.S(new Point(16, StatusY));
         _status.Size = UiScale.S(new Size(528, 18));
         _status.Font = LabelFont;
@@ -228,6 +230,7 @@ internal sealed class WeekCard : Card
 
         SetBusy(true);
         SetStatus(Lang.T("Reading TSC + HRM ...", "Đang đọc TSC + HRM ..."));
+        using var busyWork = BusyWork.Shared.Begin(Lang.T("Reading the week's logs...", "Đang đọc log của tuần..."));
         try
         {
             var coverage = await _service.CheckWeekAsync(days, AppendLog, allowSniff: allowSniff);
@@ -261,11 +264,11 @@ internal sealed class WeekCard : Card
         _rows.Controls.Clear();
         foreach (var c in stale) c.Dispose();
 
-        foreach (var day in coverage)
-            _rows.Controls.Add(BuildRow(day));
+        for (var dayIndex = 0; dayIndex < coverage.Count; dayIndex++)
+            _rows.Controls.Add(BuildRow(coverage[dayIndex], striped: dayIndex % 2 == 1));
     }
 
-    private Control BuildRow(DayCoverage c)
+    private Control BuildRow(DayCoverage c, bool striped)
     {
         var future = c.Date > Hcm.Today();
         var (hColor, hText) = HrmStatus(c, future);
@@ -287,7 +290,7 @@ internal sealed class WeekCard : Card
         row.Width = rowWidth;
         row.Height = RowH;
         row.Margin = new Padding(0);
-        row.BackColor = Color.Transparent;
+        row.BackColor = striped ? Theme.RowStripe(Theme.CardSurface) : Color.Transparent;
 
         // Accent bar on the left marks an actionable row (a subtle affordance).
         if (actionable)
@@ -322,11 +325,12 @@ internal sealed class WeekCard : Card
     {
         row.Cursor = Cursors.Hand;
         void Fire(object? s, EventArgs e) => DayRequested?.Invoke(date);
+        var restingColor = row.BackColor;
         void Enter(object? s, EventArgs e) => row.BackColor = Theme.Hover;
         void Leave(object? s, EventArgs e)
         {
             if (!row.ClientRectangle.Contains(row.PointToClient(Cursor.Position)))
-                row.BackColor = Color.Transparent;
+                row.BackColor = restingColor;
         }
 
         row.Click += Fire;
@@ -348,18 +352,22 @@ internal sealed class WeekCard : Card
         BackColor = color,
     };
 
-    private static Label StatusLabel(string text, Color color, int x, int width) => new()
+    private static Label StatusLabel(string text, Color color, int x, int width)
     {
-        Text = text,
-        Location = new Point(x, 0),
-        Size = new Size(Math.Max(UiScale.S(40), width), RowH),
-        TextAlign = ContentAlignment.MiddleLeft,
-        Font = LabelFont,
-        ForeColor = color,
-        BackColor = Color.Transparent,
-        AutoEllipsis = true,
-        UseMnemonic = false,
-    };
+        var statusLabel = new Label
+        {
+            Text = text,
+            Location = new Point(x, 0),
+            Size = new Size(Math.Max(UiScale.S(40), width), RowH),
+            TextAlign = ContentAlignment.MiddleLeft,
+            Font = LabelFont,
+            ForeColor = color,
+            BackColor = Color.Transparent,
+            UseMnemonic = false,
+        };
+        ThemedToolTip.Track(statusLabel);
+        return statusLabel;
+    }
 
     // A clickable row jumps into logging its date. A day off ignores `future` so a planned
     // leave can be marked ahead; an unread TSC cell is unknown, not outstanding.

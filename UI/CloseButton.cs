@@ -3,8 +3,8 @@ using System.Drawing.Drawing2D;
 
 namespace NoisLogTray;
 
-// A small owner-drawn remove/close button: an X glyph (two strokes) drawn with GDI+,
-// not a text character, with a soft round hover/focus highlight. Theme-aware and fully
+// A small owner-drawn remove/close button: the Icons X with a soft round hover/focus
+// highlight. Theme-aware and fully
 // keyboard/screen-reader operable (the Button base gives Space/Enter activation, tab
 // order, and a settable AccessibleName). Used for the per-date remove control in the
 // "Will log" list, so it clears to the list surface (Theme.InputBg) to blend in.
@@ -42,6 +42,7 @@ internal sealed class CloseButton : Button
     protected override void OnMouseLeave(EventArgs e) { _hover = false; Invalidate(); base.OnMouseLeave(e); }
     protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
     protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    protected override void OnChangeUICues(UICuesEventArgs e) { Invalidate(); base.OnChangeUICues(e); }
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -52,27 +53,18 @@ internal sealed class CloseButton : Button
         var rect = new Rectangle(0, 0, Width - 1, Height - 1);
 
         // Soft round highlight on hover/focus.
-        if (_hover || Focused)
+        if (_hover || Focused && ShowFocusCues)
         {
             using var bg = new SolidBrush(Theme.Hover);
             g.FillEllipse(bg, rect);
         }
 
-        // The X glyph: two diagonal strokes inset from the edges; brighter on hover.
-        var inset = Math.Max(UiScale.S(4), Width / 4);
-        var left = inset;
-        var right = Width - inset;
-        var top = inset;
-        var bottom = Height - inset;
+        // Brighter on hover.
         var color = Enabled ? (_hover ? Theme.TextPrimary : Theme.TextSecondary) : Theme.TextSecondary;
-        using (var pen = new Pen(color, UiScale.S(1.6f)) { StartCap = LineCap.Round, EndCap = LineCap.Round })
-        {
-            g.DrawLine(pen, left, top, right, bottom);
-            g.DrawLine(pen, right, top, left, bottom);
-        }
+        Icons.Draw(g, Icons.Dismiss, Icons.Small, ClientRectangle, color);
 
         // Keyboard-focus ring: a dotted accent ellipse just inside the edge.
-        if (Focused && Enabled)
+        if (Focused && Enabled && ShowFocusCues)
         {
             using var ring = new Pen(Theme.Accent, UiScale.S(1.2f)) { DashStyle = DashStyle.Dot };
             g.DrawEllipse(ring, Rectangle.Inflate(rect, -1, -1));

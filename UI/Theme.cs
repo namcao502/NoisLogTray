@@ -36,6 +36,15 @@ internal static class Theme
     internal static readonly Color ActionDone = Color.FromArgb(0, 128, 128); // teal: tells Done from Start at a glance
     internal static readonly Color ActionReadyToTest = Color.FromArgb(124, 77, 255);
 
+    // Every other row of a list, on the surface behind it: a shade darker in both themes, so the hover color (lighter
+    // in dark, a deeper gray in light) still tells a hovered row from a striped one.
+    internal static Color RowStripe(Color surface) => Mix(surface, Color.Black, Dark ? 0.18 : 0.025);
+
+    internal static Color Mix(Color color, Color toward, double amount) => Color.FromArgb(
+        (int)Math.Round(color.R + (toward.R - color.R) * amount),
+        (int)Math.Round(color.G + (toward.G - color.G) * amount),
+        (int)Math.Round(color.B + (toward.B - color.B) * amount));
+
     // Load the persisted choice (defaults to dark when there is no saved setting).
     internal static void Load() => Dark = AppSettings.Load().Dark;
 

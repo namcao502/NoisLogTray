@@ -2,7 +2,6 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
 namespace NoisLogTray;
 
@@ -10,18 +9,6 @@ namespace NoisLogTray;
 internal sealed class JiraClient : IJiraClient
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(15) };
-    private const int PageSize = 100; // Jira search page size
-    private const int MaxTickets = 500; // "My tickets" safety cap
-    private static readonly JsonSerializerOptions OmitNulls = new() { DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull };
-
-    // Default "My tickets" query when the user has not set a custom JIRA_MY_TICKETS_JQL:
-    // assigned to AND contributing on, excluding done-ish statuses, ordered by due then
-    // backlog rank (cf[10012]).
-    internal const string DefaultMyTicketsJql =
-        "project = MDP AND assignee = currentUser() AND " +
-        "\"contributors[user picker (multiple users)]\" = currentUser() AND " +
-        "status NOT IN (\"Deployed to Production\", \"QA Confirmed\", Done) " +
-        "ORDER BY due ASC, cf[10012] ASC";
 
     private const int AssignedTicketsMaxResults = 50;
     private const string EtaFieldId = "customfield_10735"; // MDP's "ETA Date" (10880 belongs to another project)
@@ -85,74 +72,6 @@ internal sealed class JiraClient : IJiraClient
 
             throw new InvalidOperationException($"Jira API error: {(int)res.StatusCode} {res.ReasonPhrase}");
         }, ct: ct);
-
-    // Fetch every ticket the JQL matches, following nextPageToken across pages. MaxTickets
-    // is a safety cap so a too-broad custom query cannot page forever.
-    public async Task<IReadOnlyList<JiraSuggestion>> GetMyTicketsAsync(string? jql = null, CancellationToken ct = default)
-    {
-        var effectiveJql = string.IsNullOrWhiteSpace(jql) ? DefaultMyTicketsJql : jql;
-        var list = new List<JiraSuggestion>();
-        string? pageToken = null;
-        do
-        {
-            var body = JsonSerializer.Serialize(new
-            {
-                jql = effectiveJql,
-                maxResults = PageSize,
-                fields = new[] { "summary", "duedate" },
-                nextPageToken = pageToken,
-            }, OmitNulls); // first page sends no token at all, not null
-
-            // A read-only search; retry transient transport failures.
-            var json = await Retry.OnTransientAsync(async c =>
-            {
-                using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/rest/api/3/search/jql")
-                {
-                    Content = new StringContent(body, Encoding.UTF8, "application/json"),
-                };
-                AddHeaders(req);
-                using var res = await Http.SendAsync(req, c);
-
-                if (!res.IsSuccessStatusCode)
-                    throw new InvalidOperationException($"Jira API error: {(int)res.StatusCode} {res.ReasonPhrase}");
-
-                return await res.Content.ReadAsStringAsync(c);
-            }, ct: ct);
-
-            pageToken = ParseTicketsPage(json, list);
-        }
-        while (pageToken != null && list.Count < MaxTickets);
-        return list;
-    }
-
-    // Append one search page's issues to list; returns the next page token, or null on
-    // the last page.
-    internal static string? ParseTicketsPage(string json, List<JiraSuggestion> list)
-    {
-        using var doc = JsonDocument.Parse(json);
-        var root = doc.RootElement;
-        if (root.TryGetProperty("issues", out var issues) && issues.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var issue in issues.EnumerateArray())
-            {
-                var key = issue.TryGetProperty("key", out var k) ? k.GetString() ?? "" : "";
-                var hasFields = issue.TryGetProperty("fields", out var f);
-                var summary = hasFields && f.TryGetProperty("summary", out var s)
-                    ? s.GetString() ?? ""
-                    : "";
-                var due = hasFields && f.TryGetProperty("duedate", out var d) && d.ValueKind == JsonValueKind.String
-                    ? d.GetString()
-                    : null;
-                list.Add(new JiraSuggestion(key, summary, due));
-            }
-        }
-
-        var isLast = root.TryGetProperty("isLast", out var last) && last.ValueKind == JsonValueKind.True;
-        if (isLast) return null;
-        return root.TryGetProperty("nextPageToken", out var next) && next.ValueKind == JsonValueKind.String
-            ? next.GetString()
-            : null;
-    }
 
     // Single page of the user's active assigned tickets, keyed by ticket key. Throws on failure.
     public async Task<Dictionary<string, JiraTicket>> GetAssignedTicketsAsync(CancellationToken ct = default)
@@ -310,54 +229,6 @@ internal sealed class JiraClient : IJiraClient
         => fields.TryGetProperty(propertyName, out var value) && value.ValueKind == JsonValueKind.Number
             ? value.GetDouble()
             : null;
-
-    // Check a custom "My tickets" JQL by running it (maxResults = 1) before it is saved.
-    // 200 = Valid; a non-success (Jira returns 400 for bad JQL) = Invalid with Jira's
-    // own error text; a network/timeout error = Unreachable so the caller can offer to
-    // save anyway rather than block an offline user.
-    public async Task<JqlCheckResult> ValidateJqlAsync(string jql, CancellationToken ct = default)
-    {
-        try
-        {
-            var body = JsonSerializer.Serialize(new { jql, maxResults = 1, fields = new[] { "summary" } });
-            return await Retry.OnTransientAsync(async c =>
-            {
-                using var req = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/rest/api/3/search/jql")
-                {
-                    Content = new StringContent(body, Encoding.UTF8, "application/json"),
-                };
-                AddHeaders(req);
-                using var res = await Http.SendAsync(req, c);
-                if (res.IsSuccessStatusCode) return new JqlCheckResult(JqlCheck.Valid, null);
-
-                var json = await res.Content.ReadAsStringAsync(c);
-                var reason = TryExtractJiraError(json) ?? $"Jira rejected the query ({(int)res.StatusCode}).";
-                return new JqlCheckResult(JqlCheck.Invalid, reason);
-            }, ct: ct);
-        }
-        catch
-        {
-            return new JqlCheckResult(JqlCheck.Unreachable, null);
-        }
-    }
-
-    // Pull the first message out of a Jira error body ({ "errorMessages": [...] }); null
-    // if the body is not the expected shape.
-    private static string? TryExtractJiraError(string json)
-    {
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            if (doc.RootElement.TryGetProperty("errorMessages", out var msgs)
-                && msgs.ValueKind == JsonValueKind.Array && msgs.GetArrayLength() != 0)
-                return msgs[0].GetString();
-        }
-        catch
-        {
-            // Not JSON, or not the shape we expect: fall through to the caller's default.
-        }
-        return null;
-    }
 
     private void AddHeaders(HttpRequestMessage req)
     {

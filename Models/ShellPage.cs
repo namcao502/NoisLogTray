@@ -4,8 +4,7 @@ namespace NoisLogTray;
 internal enum ShellPage
 {
     Dashboard,
-    Log,
-    Tasks,
+    Work,
     Claude,
     Ticket,
     Settings,

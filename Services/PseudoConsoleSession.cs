@@ -1,5 +1,6 @@
 using System.Collections;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 
@@ -26,6 +27,7 @@ internal sealed class PseudoConsoleSession : IDisposable
     private SafeFileHandle? _outputRead;
     private FileStream? _inputStream;
     private ProcessInformation _process;
+    private Process? _child; // its own handle, watched for the exit that ConPTY never reports on the output pipe
     private Thread? _readThread;
     private bool _disposed;
 
@@ -76,6 +78,34 @@ internal sealed class PseudoConsoleSession : IDisposable
         _inputStream = new FileStream(_inputWrite, FileAccess.Write, 1);
         _readThread = new Thread(ReadLoop) { IsBackground = true, Name = "pty-read" };
         _readThread.Start();
+        WatchForExit(_process.dwProcessId);
+    }
+
+    // ConPTY keeps its output pipe open after the child exits, so the read loop would wait forever: closing the
+    // console once the child is gone flushes its last output and breaks the pipe, and the loop then raises Exited.
+    private void WatchForExit(int processId)
+    {
+        try
+        {
+            _child = Process.GetProcessById(processId);
+            _child.EnableRaisingEvents = true;
+            _child.Exited += (_, _) => CloseConsole();
+            // An exit before the handler was hooked raises no event.
+            if (_child.HasExited) CloseConsole();
+        }
+        catch (ArgumentException)
+        {
+            CloseConsole(); // already gone
+        }
+    }
+
+    // Once, from whichever comes first: the child's exit or Dispose.
+    private void CloseConsole()
+    {
+        var pseudoConsole = Interlocked.Exchange(ref _pseudoConsole, IntPtr.Zero);
+        if (pseudoConsole == IntPtr.Zero) return;
+        if (UsesBundledConpty) ConptyClosePseudoConsole(pseudoConsole);
+        else ClosePseudoConsole(pseudoConsole);
     }
 
     // The tray's environment minus the variables that would make claude think it runs inside another Claude Code
@@ -109,9 +139,10 @@ internal sealed class PseudoConsoleSession : IDisposable
 
     internal void Resize(short columns, short rows)
     {
-        if (_disposed || columns <= 0 || rows <= 0) return;
-        if (UsesBundledConpty) ConptyResizePseudoConsole(_pseudoConsole, new Coord(columns, rows));
-        else ResizePseudoConsole(_pseudoConsole, new Coord(columns, rows));
+        var pseudoConsole = _pseudoConsole;
+        if (_disposed || pseudoConsole == IntPtr.Zero || columns <= 0 || rows <= 0) return;
+        if (UsesBundledConpty) ConptyResizePseudoConsole(pseudoConsole, new Coord(columns, rows));
+        else ResizePseudoConsole(pseudoConsole, new Coord(columns, rows));
     }
 
     private void ReadLoop()
@@ -141,13 +172,9 @@ internal sealed class PseudoConsoleSession : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        if (_pseudoConsole != IntPtr.Zero)
-        {
-            // Closing the console ends the child's console session and breaks the output pipe.
-            if (UsesBundledConpty) ConptyClosePseudoConsole(_pseudoConsole);
-            else ClosePseudoConsole(_pseudoConsole);
-            _pseudoConsole = IntPtr.Zero;
-        }
+        // Closing the console ends the child's console session and breaks the output pipe.
+        CloseConsole();
+        _child?.Dispose();
         if (_process.hProcess != IntPtr.Zero)
         {
             TerminateProcess(_process.hProcess, 0);

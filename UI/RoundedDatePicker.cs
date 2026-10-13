@@ -58,6 +58,7 @@ internal sealed class RoundedDatePicker : Control
 
     protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
     protected override void OnLostFocus(EventArgs e) { Invalidate(); base.OnLostFocus(e); }
+    protected override void OnChangeUICues(UICuesEventArgs e) { Invalidate(); base.OnChangeUICues(e); }
     protected override void OnMouseDown(MouseEventArgs e) { Focus(); base.OnMouseDown(e); }
 
     private void OnThemeChanged()
@@ -131,15 +132,10 @@ internal sealed class RoundedDatePicker : Control
         TextRenderer.DrawText(g, DateText, Font, textRect, Theme.TextPrimary,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPrefix);
 
-        var cx = Width - UiScale.S(18);
-        var cy = Height / 2;
-        var arm = UiScale.S(4);
-        var rise = UiScale.S(2);
-        using var chevron = new Pen(Theme.TextSecondary, UiScale.S(1.6f));
-        g.DrawLines(chevron, new[] { new Point(cx - arm, cy - rise), new Point(cx, cy + rise), new Point(cx + arm, cy - rise) });
+        Icons.Draw(g, Icons.ChevronDown, Icons.Small, new Rectangle(Width - UiScale.S(28), 0, UiScale.S(20), Height), Theme.TextSecondary);
 
         // Keyboard-focus ring: a dotted accent outline just inside the field border.
-        if (Focused)
+        if (Focused && ShowFocusCues)
         {
             var focusRect = Rectangle.Inflate(rect, -UiScale.S(2), -UiScale.S(2));
             using var path2 = new GraphicsPath();

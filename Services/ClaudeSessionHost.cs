@@ -1,7 +1,7 @@
 namespace NoisLogTray;
 
-// Owns one Claude session (the general page's, or a ticket's) for the life of the tray, so rebuilding the
-// window (a Settings save) does not kill it. Keeps recent output so a new view can replay the screen on attach.
+// Owns one terminal (the Terminal page's, or a ticket's) for the life of the tray, so rebuilding the window (a Settings
+// save) does not kill it. Keeps recent output so a new view can replay the screen on attach.
 internal sealed class ClaudeSessionHost : IDisposable
 {
     private const int ReplayLimitBytes = 1 << 20;
@@ -11,6 +11,7 @@ internal sealed class ClaudeSessionHost : IDisposable
     private readonly Func<string?>? _argument;
     private readonly Func<string?>? _settingsFile;
     private readonly bool _fallBackToProfile;
+    private readonly string? _claudeExecutable;
     private readonly LinkedList<byte[]> _replay = new();
     private int _replayBytes;
     private PseudoConsoleSession? _session;
@@ -25,13 +26,15 @@ internal sealed class ClaudeSessionHost : IDisposable
     // Raised on the caller's thread when Start begins, before the old session stops; Start may still throw after it.
     internal event Action? Starting;
 
+    // claudeExecutable: null runs the installed claude (tests pass a stand-in).
     internal ClaudeSessionHost(Func<string> workingDirectory, Func<string?>? argument = null, bool fallBackToProfile = true,
-        Func<string?>? settingsFile = null)
+        Func<string?>? settingsFile = null, string? claudeExecutable = null)
     {
         _workingDirectory = workingDirectory;
         _argument = argument;
         _settingsFile = settingsFile;
         _fallBackToProfile = fallBackToProfile;
+        _claudeExecutable = claudeExecutable;
     }
 
     internal bool IsRunning
@@ -66,17 +69,27 @@ internal sealed class ClaudeSessionHost : IDisposable
         }
     }
 
-    // A flag ("--continue") goes bare; a prompt is quoted so the CLI gets it as one argument (so it must hold no quote).
-    // The settings file (the app's hooks) is a path, so it is always quoted.
-    internal static string BuildCommandLine(string executable, string? settingsFile, string? argument)
+    // A PowerShell that runs claude at once and stays at its prompt after /exit. Its `claude` function adds the hook
+    // settings, so a claude typed there later reports to the app too. A flag ("--continue") goes bare; a prompt is
+    // quoted as one argument. Nothing here may hold a double quote, which would end the -Command string.
+    internal static string BuildCommandLine(string? powerShell7Path, string claudeExecutable, string? settingsFile, string? argument)
     {
-        var command = $"\"{executable}\"";
-        if (!string.IsNullOrEmpty(settingsFile)) command += $" --settings \"{settingsFile}\"";
-        if (string.IsNullOrEmpty(argument)) return command;
-        return argument.StartsWith("--", StringComparison.Ordinal) ? $"{command} {argument}" : $"{command} \"{argument}\"";
+        var shell = powerShell7Path != null ? $"\"{powerShell7Path}\"" : "powershell.exe";
+        var settings = string.IsNullOrEmpty(settingsFile) ? "" : $" --settings {PowerShellQuote(settingsFile)}";
+        var script = $"function global:claude {{ & {PowerShellQuote(claudeExecutable)}{settings} @args }}; claude";
+        if (!string.IsNullOrEmpty(argument))
+        {
+            script += argument.StartsWith("--", StringComparison.Ordinal) ? $" {argument}" : $" {PowerShellQuote(argument)}";
+        }
+        return $"{shell} -NoLogo -NoExit -Command \"{script}\"";
     }
 
-    // Starts claude in the working directory (the user profile if it is missing and fallBackToProfile).
+    private static string PowerShellQuote(string text)
+    {
+        return "'" + text.Replace("'", "''") + "'";
+    }
+
+    // Starts the terminal in the working directory (the user profile if it is missing and fallBackToProfile).
     // Throws Win32Exception, or DirectoryNotFoundException when the directory is missing and there is no fallback.
     internal void Start(short columns, short rows)
     {
@@ -88,9 +101,15 @@ internal sealed class ClaudeSessionHost : IDisposable
             if (!_fallBackToProfile) throw new DirectoryNotFoundException($"Directory not found: {directory}");
             directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         }
-        // The native installer puts claude.exe here; otherwise CreateProcess searches PATH.
+        // The native installer puts claude.exe here; otherwise PowerShell searches PATH. Always the .exe, since a bare
+        // `claude` inside the function would call the function itself.
         var localClaude = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "bin", "claude.exe");
-        var commandLine = BuildCommandLine(File.Exists(localClaude) ? localClaude : "claude.exe", _settingsFile?.Invoke(), _argument?.Invoke());
+        var claudeExecutable = _claudeExecutable ?? (File.Exists(localClaude) ? localClaude : "claude.exe");
+        var powerShell7 = (Environment.GetEnvironmentVariable("PATH") ?? "")
+            .Split(';', StringSplitOptions.RemoveEmptyEntries)
+            .Select(directoryOnPath => Path.Combine(directoryOnPath.Trim(), "pwsh.exe"))
+            .FirstOrDefault(File.Exists);
+        var commandLine = BuildCommandLine(powerShell7, claudeExecutable, _settingsFile?.Invoke(), _argument?.Invoke());
 
         var session = new PseudoConsoleSession(commandLine, directory, columns, rows);
         lock (_lock)

@@ -36,6 +36,7 @@ internal sealed partial class TrayApp
         else
         {
             SetLaunchStage(ticketKey, StartStage.Fetching);
+            using var busyWork = BusyWork.Shared.Begin(Lang.T($"Creating the {ticketKey} worktree...", $"Đang tạo worktree {ticketKey}..."));
             // Created on the UI thread so reports come back here; a report after the finally is ignored.
             var progress = new Progress<StartStage>(stage =>
             {
@@ -114,6 +115,13 @@ internal sealed partial class TrayApp
         ShowShell(ShellPage.Ticket);
     }
 
+    // A notice's target: the ticket's tab while it is still open, else just the Ticket page (a click never starts Claude).
+    private void ShowTicketTab(string ticketKey)
+    {
+        if (_openTickets.Contains(ticketKey)) OpenTicketTab(ticketKey);
+        else ShowShell(ShellPage.Ticket);
+    }
+
     // A running session (maybe a long `ship`) is only stopped after a Yes. The view is disposed (detaching
     // from the host) by SetTabs before the host stops.
     private void CloseTicketTab(string ticketKey)
@@ -121,11 +129,11 @@ internal sealed partial class TrayApp
         var host = _ticketSessions.GetValueOrDefault(ticketKey);
         if (host != null && host.IsRunning)
         {
-            var answer = MessageBox.Show(_shell,
-                Lang.T($"Claude is still running in {ticketKey}. Close the tab and stop it?",
-                    $"Claude vẫn đang chạy trong {ticketKey}. Đóng tab và dừng nó?"),
-                Lang.T("Close tab", "Đóng tab"), MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2);
-            if (answer != DialogResult.Yes) return;
+            var closeTab = ConfirmDialog.Ask(_shell, Lang.T($"Close {ticketKey}?", $"Đóng {ticketKey}?"),
+                Lang.T($"The terminal is still running in {ticketKey}. Close the tab and stop it?",
+                    $"Terminal vẫn đang chạy trong {ticketKey}. Đóng tab và dừng nó?"),
+                Lang.T("Close tab", "Đóng tab"), destructive: true);
+            if (!closeTab) return;
         }
         _openTickets.Remove(ticketKey);
         SaveOpenTickets();

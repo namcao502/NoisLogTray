@@ -33,10 +33,12 @@ internal sealed partial class TrayApp
     }
 
     // From the general session's hooks: /clear starts a new session id, which the next hook brings in.
-    private void RememberClaudeSessionId(string? sessionId)
+    private void RememberClaudeSessionId(ClaudeHookEvent hookEvent)
     {
         var directory = _claudeHost?.CurrentDirectory;
+        var sessionId = hookEvent.SessionId;
         if (directory == null || sessionId == null || !Guid.TryParse(sessionId, out _)) return;
+        if (!TicketLauncher.IsTranscriptOfFolder(hookEvent.TranscriptPath, directory)) return;
         if (_claudeSessionIds.TryGetValue(directory, out var knownSessionId) && knownSessionId == sessionId) return;
         _claudeSessionIds[directory] = sessionId;
         var settings = AppSettings.Load();

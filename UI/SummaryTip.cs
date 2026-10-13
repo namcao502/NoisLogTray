@@ -7,7 +7,7 @@ namespace NoisLogTray;
 // the tooltip follows resizes; the last text is cached to avoid re-registering per paint.
 internal sealed class SummaryTip : IDisposable
 {
-    private readonly ToolTip _tip = new();
+    private readonly ThemedToolTip _tip = new();
     private string? _shownText;
 
     internal void Update(Control row, string summary, bool isCut)

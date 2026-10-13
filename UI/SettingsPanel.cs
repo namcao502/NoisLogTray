@@ -33,7 +33,6 @@ internal sealed class SettingsPanel : UserControl
     private readonly MacButton _vietnamese = MacButton.Secondary("Tiếng Việt");
     private readonly MacButton _startupOn = MacButton.Secondary("");
     private readonly MacButton _startupOff = MacButton.Secondary("");
-    private readonly MacButton[] _zoomPills = UiScale.ZoomChoices.Select(percent => MacButton.Secondary($"{percent}%")).ToArray();
     private readonly MacButton _save = MacButton.Primary("");
     private bool _statusIsError;
     private int _y;
@@ -54,30 +53,22 @@ internal sealed class SettingsPanel : UserControl
 
         if (_wide)
         {
-            // The three option groups share one row, a third of the width each.
+            // The two option groups share one row, half the width each.
             var y = _y;
-            var column = (_innerW + Gap) / 3;
+            var column = (_innerW + Gap) / 2;
             AddOptionGroup("Language", "Ngôn ngữ", Pad, _vietnamese, _english);
             _y = y;
             AddOptionGroup("Start with Windows", "Khởi động cùng Windows", Pad + column, _startupOn, _startupOff);
-            _y = y;
-            AddOptionGroup("Zoom", "Thu phóng", Pad + 2 * column, _zoomPills);
         }
         else
         {
             AddOptionGroup("Language", "Ngôn ngữ", Pad, _vietnamese, _english);
             AddOptionGroup("Start with Windows", "Khởi động cùng Windows", Pad, _startupOn, _startupOff);
-            AddOptionGroup("Zoom", "Thu phóng", Pad, _zoomPills);
         }
         _english.Click += (_, _) => SetLanguage(vietnamese: false);
         _vietnamese.Click += (_, _) => SetLanguage(vietnamese: true);
         _startupOn.Click += (_, _) => SetStartup(true);
         _startupOff.Click += (_, _) => SetStartup(false);
-        for (var index = 0; index < _zoomPills.Length; index++)
-        {
-            var percent = UiScale.ZoomChoices[index];
-            _zoomPills[index].Click += (_, _) => SetZoom(percent);
-        }
         AddDivider();
 
         AddLabel("Account - applies when you press Save", "Tài khoản - áp dụng khi bấm Lưu", LabelFont, _primaryLabels);
@@ -357,28 +348,6 @@ internal sealed class SettingsPanel : UserControl
         var startup = StartupService.IsEnabled();
         _startupOn.Selected = startup;
         _startupOff.Selected = !startup;
-        var zoom = SavedZoomPercent();
-        for (var index = 0; index < _zoomPills.Length; index++)
-            _zoomPills[index].Selected = UiScale.ZoomChoices[index] == zoom;
-    }
-
-    // The saved choice, not UiScale.Factor: a pick made this session shows before the restart applies it.
-    private static int SavedZoomPercent()
-    {
-        var saved = AppSettings.Load().UiZoomPercent;
-        return Array.IndexOf(UiScale.ZoomChoices, saved) >= 0 ? saved : UiScale.DefaultZoomPercent;
-    }
-
-    private void SetZoom(int percent)
-    {
-        var settings = AppSettings.Load(); // read-modify-write to keep other keys
-        settings.UiZoomPercent = percent;
-        AppSettings.Save(settings);
-        ShowSelections();
-        if (UiScale.ToFactor(percent) != UiScale.Factor)
-            ShowInfo(Lang.T("Zoom applies after restarting the app.", "Thu phóng áp dụng sau khi mở lại app."));
-        else
-            ShowInfo("");
     }
 
     private void SetLanguage(bool vietnamese)
@@ -431,6 +400,7 @@ internal sealed class SettingsPanel : UserControl
         // is caught here rather than silently failing later.
         CredentialCheck jira, hrm;
         SetBusy(true, Lang.T("Verifying credentials...", "Đang kiểm tra thông tin đăng nhập..."));
+        var busyWork = BusyWork.Shared.Begin(Lang.T("Verifying credentials...", "Đang kiểm tra thông tin đăng nhập..."));
         try
         {
             var jiraTask = new JiraClient(baseUrl, email, token).ValidateAsync();
@@ -441,6 +411,7 @@ internal sealed class SettingsPanel : UserControl
         }
         finally
         {
+            busyWork.Dispose();
             if (!IsDisposed) SetBusy(false, "");
         }
         // The host may have closed the dialog or rebuilt the shell mid-verify; never save abandoned values.
@@ -464,11 +435,11 @@ internal sealed class SettingsPanel : UserControl
             var which = jira == CredentialCheck.Unreachable && hrm == CredentialCheck.Unreachable
                 ? Lang.T("Jira and the HRM server", "Jira và máy chủ HRM")
                 : jira == CredentialCheck.Unreachable ? "Jira" : Lang.T("the HRM server", "máy chủ HRM");
-            var answer = MessageBox.Show(FindForm(),
-                Lang.T($"Could not reach {which} to verify your details (are you online?).\n\nSave anyway?",
-                    $"Không kết nối được {which} để kiểm tra thông tin (bạn có đang online không?).\n\nVẫn lưu?"),
-                Lang.T("Couldn't verify", "Không kiểm tra được"), MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
-            if (answer != DialogResult.Yes) return;
+            var saveAnyway = ConfirmDialog.Ask(FindForm(), Lang.T("Couldn't verify", "Không kiểm tra được"),
+                Lang.T($"Could not reach {which} to verify your details (are you online?). Save them anyway?",
+                    $"Không kết nối được {which} để kiểm tra thông tin (bạn có đang online không?). Vẫn lưu?"),
+                Lang.T("Save anyway", "Vẫn lưu"), confirmByDefault: true);
+            if (!saveAnyway) return;
             if (IsDisposed) return; // the host closed the dialog or rebuilt the shell while the box was open
         }
 

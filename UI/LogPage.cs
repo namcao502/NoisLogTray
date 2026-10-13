@@ -3,15 +3,12 @@ using System.Globalization;
 
 namespace NoisLogTray;
 
-// The Log page of the shell: four cards -- "New entry" (date/ticket + actions),
-// "Will log" (preview + queue), the week (WeekCard) and "My tickets".
-internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
+// The log column of the Work page: three cards -- "New entry" (date/ticket + actions), "Will log" (preview + queue)
+// and the week (WeekCard). The board beside it puts tickets into New entry (AddTicketToInput).
+internal sealed class LogPage : UserControl, IShellPage
 {
     private static readonly Font TicketsFont = UiScale.Font("Segoe UI", 9.5F);
     private static readonly Font HoursHintFont = UiScale.Font("Segoe UI", 8.5F, FontStyle.Bold);
-    private static readonly Font SearchFont = UiScale.Font("Segoe UI", 9F);
-    private static readonly Font KeyFont = UiScale.Font("Segoe UI", 9F, FontStyle.Bold);
-    private static readonly Font SummaryFont = UiScale.Font("Segoe UI", 9F);
     private static readonly Font SectionFont = UiScale.Font("Segoe UI", 8.5F, FontStyle.Bold);
     private static readonly Font WillLogFont = UiScale.Font("Segoe UI", 8.5F, FontStyle.Bold);
 
@@ -41,31 +38,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         Color.FromArgb(180, 83, 9),     // amber
     };
 
-    // Due-date "temperature" ramp for the My-tickets list: cool (far out / no due date)
-    // to hot (due today / overdue), tuned per theme so the key text stays readable.
-    private static readonly Color[] HeatDark =
-    {
-        Color.FromArgb(88, 166, 255),   // blue   - coolest
-        Color.FromArgb(57, 197, 207),   // teal
-        Color.FromArgb(63, 185, 80),    // green
-        Color.FromArgb(227, 179, 65),   // amber
-        Color.FromArgb(255, 157, 92),   // orange
-        Color.FromArgb(255, 105, 97),   // red    - hottest
-    };
-
-    private static readonly Color[] HeatLight =
-    {
-        Color.FromArgb(37, 99, 235),    // blue   - coolest
-        Color.FromArgb(14, 116, 144),   // teal
-        Color.FromArgb(21, 128, 61),    // green
-        Color.FromArgb(180, 83, 9),     // amber
-        Color.FromArgb(194, 65, 12),    // orange
-        Color.FromArgb(220, 38, 38),    // red    - hottest
-    };
-
-    private const int DueHeatMaxDays = 14; // due >= this many days out reads as coolest
-
-    // Logical (100%) px, since ShellLayout.TwoColumnMinWidth is built from it; scale before use.
+    // Logical (100%) px, since ShellLayout's column widths are built from it; scale before use.
     internal const int CardW = 560;
 
     // One height for every button and input; widths vary by role (the primary button is
@@ -81,12 +54,10 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     // longer lists scroll internally.
     private const int WillLogHostHLogical = 20 + 3 * 26 + 8;
     private static readonly int WillLogHostH = UiScale.S(WillLogHostHLogical);
-    private static readonly int SuggestionRowPitch = UiScale.S(31); // suggestion row height (zero margin)
 
     // Built card heights in logical px, like the rest of the ShellLayout bookkeeping.
     private const int NewEntryCardH = 96 + 30 + 16;
     private const int WillLogCardH = 44 + WillLogHostHLogical + 12;
-    private const int MyTicketsCardH = 44 + 204 + 16;
 
     private readonly LoggingService? _service;
 
@@ -95,12 +66,11 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     private readonly List<Panel> _dividers = new();
 
     private readonly RoundedDatePicker _date = new();
-    private readonly ToolTip _tips = new();
+    private readonly ThemedToolTip _tips = new();
     private readonly TextBox _tickets = new();
-    private readonly TextBox _ticketSearch = new();
     private readonly MacButton _queueBtn = MacButton.Primary("");
     private readonly MacButton _logNowBtn = MacButton.Secondary("");
-    private readonly MacButton _moreBtn = MacButton.Secondary("⋯");
+    private readonly MacButton _moreBtn = MacButton.Secondary("");
 
     // Rarely used actions live in dropdowns so "Add to queue" stays the one obvious button.
     private readonly ContextMenuStrip _logNowMenu = ThemedMenuRenderer.CreateMenu();
@@ -111,11 +81,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     private readonly ToolStripMenuItem _logOffItem = new();
     private readonly ToolStripMenuItem _checkItem = new();
     private readonly ToolStripMenuItem _reauthItem = new();
-    private readonly MacButton _refreshBtn = MacButton.Secondary("");
-    private readonly MacButton _jqlBtn = MacButton.Secondary("");
     private readonly MacButton _clearBtn = MacButton.Secondary("");
-    private readonly FlowLayoutPanel _suggestions = new();
-    private readonly Label _suggestionStatus = new();
     private readonly FlowLayoutPanel _willLogList = new();
     private readonly System.Windows.Forms.Timer _verifyTimer = new() { Interval = 500 };
     private readonly Dictionary<string, (VState State, string? Title)> _verify = new();
@@ -127,12 +93,8 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     // split (see TimeSlots.EvenSplit); reset whenever the ticket text changes.
     private List<int>? _typedMinutes;
 
-    private IReadOnlyList<JiraSuggestion> _lastSuggestions = Array.Empty<JiraSuggestion>();
     private bool _busy;
-    private bool _loadingSuggestions;
-
-    // The text behind the suggestion-list status line, re-read on a language switch.
-    private Func<string>? _suggestionStatusText;
+    private IDisposable? _busyWork; // the running action, in the header spinner
 
     // Section labels with both texts, so ApplyLanguage can re-label them.
     private readonly List<(Label Label, string English, string Vietnamese)> _sectionLabelTexts = new();
@@ -153,6 +115,9 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     // Raised with each action's result so the tray shows it as a popup (ok = success).
     internal event Action<string, NoticeKind>? StatusRaised;
 
+    // Raised with the typed tickets on every edit of the ticket box, so the board marks them "In entry".
+    internal event Action<IReadOnlyList<string>>? EntryTicketsChanged;
+
     internal LogPage(LoggingService? service, string? configError)
     {
         _service = service;
@@ -162,7 +127,6 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         Lang.Changed += ApplyLanguage;
         RefreshQueuedView(); // also renders the Will log (falls back to the queue)
         if (configError != null) AppendLog($"[config] {configError}");
-        LoadMyTicketsAsync();
         ReflowRowsOnResize();
     }
 
@@ -172,6 +136,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         {
             Theme.Changed -= ApplyTheme;
             Lang.Changed -= ApplyLanguage;
+            _busyWork?.Dispose();
             _verifyTimer.Stop(); // OnHidden's Clear() can arm it right before the shell is disposed
             _verifyTimer.Dispose();
             _tips.Dispose();
@@ -181,66 +146,31 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         base.Dispose(disposing);
     }
 
-    private const int WmLButtonDown = 0x0201;
-
-    // How far below the built height (week card aside) the page may shrink, in logical px:
-    // two columns shrink My tickets, one column scrolls.
-    private const int MinHeightSlack = 100;
-
     // Placed by LayoutCards on every resize; the heights are the built ones, in logical px.
     private Card? _newEntryCard;
     private Card? _willLogCard;
     private WeekCard? _weekCard;
-    private Card? _myTicketsCard;
     private int _newEntryH;
     private int _willLogH;
     private int _weekH;
-    private int _myTicketsMinH;
+    private int _cardLeft = 20;
 
-    private bool _suggestionsRenderPosted;
-    private int _suggestionsShownCount;
-    private int _suggestionsRenderedWidth;
-    private bool _suggestionsRenderedOverflow;
     // A Queue rebuild deferred while an hours box has focus, so a half-typed value survives.
     private bool _willLogReflowPending;
-
-    protected override void OnHandleCreated(EventArgs e)
-    {
-        base.OnHandleCreated(e);
-        Application.AddMessageFilter(this);
-    }
-
-    protected override void OnHandleDestroyed(EventArgs e)
-    {
-        Application.RemoveMessageFilter(this);
-        base.OnHandleDestroyed(e);
-    }
-
-    // Drop focus from the search box on a click anywhere else. Labels and rows do not take
-    // focus themselves, so without this the caret would stay in the search box.
-    public bool PreFilterMessage(ref Message m)
-    {
-        if (m.Msg == WmLButtonDown && _ticketSearch.Focused && m.HWnd != _ticketSearch.Handle)
-        {
-            var form = FindForm();
-            if (form != null) form.ActiveControl = null;
-        }
-        return false; // never swallow the click
-    }
 
     private void BuildLayout()
     {
         BackColor = Theme.WindowBg;
         _body.Dock = DockStyle.Fill;
         _body.BackColor = Theme.WindowBg;
-        _body.AutoScroll = true; // one column with the week card can run past the bottom: it scrolls
+        _body.AutoScroll = true; // a column shorter than the built cards scrolls
         _body.AutoScrollMargin = UiScale.S(new Size(0, 14)); // the top margin, kept under the last card too
 
         // Summed in logical px and scaled once, exactly as LayoutCards scales ShellLayout's bounds.
         const int left = 20;
         var y = 14;
 
-        // Input + primary action first (where focus lands), the queue next, the picker last.
+        // Input + primary action first (where focus lands), the queue next, the week last.
         var newEntry = BuildNewEntryCard();
         newEntry.Location = UiScale.S(new Point(left, y));
         _body.Controls.Add(newEntry);
@@ -261,21 +191,14 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _body.Controls.Add(week);
         _weekCard = week;
         _weekH = WeekCard.BuiltHeight;
-        y += WeekCard.BuiltHeight + 12;
-
-        var myTickets = BuildMyTicketsCard();
-        myTickets.Location = UiScale.S(new Point(left, y));
-        _body.Controls.Add(myTickets);
-        _myTicketsCard = myTickets;
-        _myTicketsMinH = MyTicketsCardH - MinHeightSlack;
-        var builtH = y + MyTicketsCardH + 20;
+        var builtH = y + WeekCard.BuiltHeight + 20;
 
         // Cards and heights are stored above so the OnSizeChanged this Size triggers reproduces the built
         // bounds (LayoutCards takes the overflow off again); anchoring (below) must come after it.
+        // No MinimumSize: the Work page sizes the column, and a short one scrolls.
         Size = new Size(UiScale.S(600) + ScrollBarOverflow, UiScale.S(builtH));
-        // One column scrolls, so the week card does not raise the window's minimum height.
-        MinimumSize = UiScale.S(new Size(600, builtH - MinHeightSlack - WeekCard.BuiltHeight - 12));
         Controls.Add(_body);
+        ThemedScrollBar.Attach(_body);
 
         AnchorForResize();
     }
@@ -293,32 +216,44 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     private static Rectangle Scrolled(Rectangle bounds, Point scroll) =>
         new(bounds.X + scroll.X, bounds.Y + scroll.Y, bounds.Width, bounds.Height);
 
-    // One column stacks the cards and scrolls; a wide page puts Week + My tickets in a right column.
-    // Only Bounds change, so nothing is rebuilt and typed text stays.
+    // The built height of the column in logical px: the Work page gives it this much when it stacks it over the board.
+    internal static int NaturalHeight => ShellLayout.LogNaturalHeight(NewEntryCardH, WillLogCardH, WeekCard.BuiltHeight);
+
+    // Beside the board, its right margin is the gap and a short column scrolls itself. Stacked over it, the column
+    // has its natural height and a 20px left margin, and the page scrolls instead.
+    internal void SetStacked(bool stacked)
+    {
+        var cardLeft = stacked ? 20 : 0;
+        if (_cardLeft == cardLeft && _body.AutoScroll != stacked) return;
+        _cardLeft = cardLeft;
+        if (stacked) _body.AutoScrollPosition = Point.Empty;
+        _body.AutoScroll = !stacked;
+        LayoutCards();
+    }
+
+    // The cards stack in one column; the Queue takes any extra height. Only Bounds change, so nothing is rebuilt and
+    // typed text stays.
     private void LayoutCards()
     {
-        if (_newEntryCard == null || _willLogCard == null || _weekCard == null || _myTicketsCard == null
-            || _newEntryH == 0 || _willLogH == 0 || _weekH == 0 || _myTicketsMinH == 0) return;
+        if (_newEntryCard == null || _willLogCard == null || _weekCard == null
+            || _newEntryH == 0 || _willLogH == 0 || _weekH == 0) return;
 
         // ShellLayout works in logical px: convert the page size in, scale the bounds back out.
-        // One column may scroll, so its cards stay clear of the scroll bar.
-        var width = UiScale.Logical(ClientSize.Width);
-        if (ShellLayout.LogColumns(width) == 1) width = UiScale.Logical(ClientSize.Width - ScrollBarOverflow);
-        var (newEntry, queue, week, myTickets) = ShellLayout.LogCardBounds(width,
-            UiScale.Logical(ClientSize.Height), _newEntryH, _willLogH, _weekH, MyTicketsCardH, _myTicketsMinH);
+        // The column may scroll, so its cards stay clear of the scroll bar.
+        var (newEntry, queue, week) = ShellLayout.LogCardBounds(UiScale.Logical(ClientSize.Width - ScrollBarOverflow),
+            UiScale.Logical(ClientSize.Height), _cardLeft, _newEntryH, _willLogH, _weekH);
         var scroll = _body.AutoScrollPosition;
         _body.SuspendLayout();
         _newEntryCard.Bounds = Scrolled(UiScale.S(newEntry), scroll);
         _willLogCard.Bounds = Scrolled(UiScale.S(queue), scroll);
         _weekCard.Bounds = Scrolled(UiScale.S(week), scroll);
-        _myTicketsCard.Bounds = Scrolled(UiScale.S(myTickets), scroll);
         _body.ResumeLayout();
     }
 
     // Set after _body is docked at its final size: WinForms records each anchor's edge
     // distances when Anchor is assigned, so the built layout is what a resize preserves.
     // Cards are placed by LayoutCards; inside them inputs stretch with the width,
-    // right-hand buttons stay right, and the Queue and My tickets lists take extra height.
+    // right-hand buttons stay right, and the Queue list takes extra height.
     private void AnchorForResize()
     {
         const AnchorStyles stretch = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
@@ -335,35 +270,14 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _clearQueueBtn.Anchor = right;
         _logAllBtn.Anchor = right;
         _willLogList.Parent!.Anchor = stretch | AnchorStyles.Bottom;
-
-        _ticketSearch.Parent!.Anchor = stretch;
-        _ticketSearch.Anchor = stretch;
-        _jqlBtn.Anchor = right;
-        _refreshBtn.Anchor = right;
-        _suggestions.Parent!.Anchor = stretch | AnchorStyles.Bottom;
     }
 
-    // Rows are built at the list's width, so a width change rebuilds them (suggestions also
-    // when a height change flips the scrollbar allowance). Hooked after
+    // Rows are built at the list's width, so a width change rebuilds them. Hooked after
     // the first render so construction-time layout passes don't re-render early.
     // The rebuild is posted: run inside the window's layout pass, the list keeps the old
     // wider scroll extent after a shrink and shows a stray horizontal scrollbar.
     private void ReflowRowsOnResize()
     {
-        _suggestions.Resize += (_, _) =>
-        {
-            // No rows on screen (status line only): nothing depends on the size.
-            if (!IsHandleCreated || _suggestionsRenderPosted || _suggestionsShownCount == 0) return;
-            var overflow = _suggestionsShownCount * SuggestionRowPitch > _suggestions.ClientSize.Height;
-            if (_suggestions.Width == _suggestionsRenderedWidth && overflow == _suggestionsRenderedOverflow) return;
-            _suggestionsRenderPosted = true; // one queued rebuild per drag burst, not one per pixel
-            BeginInvoke(() =>
-            {
-                _suggestionsRenderPosted = false;
-                if (!_loadingSuggestions) RenderSuggestions(_lastSuggestions); // keep "Loading..." visible
-            });
-        };
-
         var willLogWidth = _willLogList.Width;
         _willLogList.Resize += (_, _) =>
         {
@@ -381,62 +295,6 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
             _willLogReflowPending = false;
             UpdateWillLog();
         };
-    }
-
-    private Card BuildMyTicketsCard()
-    {
-        var card = new Card { Size = UiScale.S(new Size(CardW, MyTicketsCardH)) };
-        card.Controls.Add(SectionLabel("MY TICKETS", "TICKET CỦA TÔI", 16, 14));
-
-        // Quick filter over the loaded list, between the section label and the buttons; it
-        // starts after the wider of the two label texts so a language switch never overlaps.
-        var labelWidth = Math.Max(TextRenderer.MeasureText("MY TICKETS", SectionFont).Width,
-            TextRenderer.MeasureText("TICKET CỦA TÔI", SectionFont).Width);
-        var searchX = CardPad + labelWidth + UiScale.S(8);
-        var searchHost = new RoundedHost { Location = new Point(searchX, ToolbarY), Size = new Size(CardPad + InnerW - 2 * (ToolbarBtnW + BtnGap) - searchX, BtnH) };
-        _ticketSearch.BorderStyle = BorderStyle.None;
-        _ticketSearch.Font = SearchFont;
-        _ticketSearch.BackColor = Theme.InputBg;
-        _ticketSearch.ForeColor = Theme.TextPrimary;
-        _ticketSearch.TextChanged += (_, _) =>
-        {
-            if (!_loadingSuggestions) RenderSuggestions(_lastSuggestions); // keep "Loading..." visible
-        };
-        var searchH = _ticketSearch.PreferredHeight;
-        _ticketSearch.SetBounds(UiScale.S(8), (searchHost.Height - searchH) / 2, searchHost.Width - UiScale.S(16), searchH);
-        searchHost.Controls.Add(_ticketSearch);
-        card.Controls.Add(searchHost);
-
-        _jqlBtn.Size = new Size(ToolbarBtnW, BtnH);
-        _jqlBtn.Location = new Point(CardPad + InnerW - 2 * ToolbarBtnW - BtnGap, ToolbarY);
-        _jqlBtn.Click += (_, _) => EditJql();
-        card.Controls.Add(_jqlBtn);
-
-        _refreshBtn.Size = new Size(ToolbarBtnW, BtnH);
-        _refreshBtn.Location = new Point(CardPad + InnerW - ToolbarBtnW, ToolbarY);
-        _refreshBtn.Click += (_, _) => LoadMyTicketsAsync();
-        card.Controls.Add(_refreshBtn);
-
-        var sugHost = new RoundedHost { Location = new Point(CardPad, CardBodyY), Size = new Size(InnerW, UiScale.S(204)) };
-        _suggestions.Dock = DockStyle.Fill;
-        _suggestions.FlowDirection = FlowDirection.TopDown;
-        _suggestions.WrapContents = false;
-        _suggestions.AutoScroll = true; // fixed height; scroll through the full list
-        _suggestions.BorderStyle = BorderStyle.None;
-        _suggestions.BackColor = Theme.InputBg;
-        sugHost.Controls.Add(_suggestions);
-
-        _suggestionStatus.Text = "";
-        _suggestionStatus.AutoSize = true;
-        _suggestionStatus.Location = UiScale.S(new Point(8, 8));
-        _suggestionStatus.ForeColor = Theme.TextSecondary;
-        _suggestionStatus.BackColor = Theme.InputBg;
-        _suggestionStatus.Font = SummaryFont;
-        sugHost.Controls.Add(_suggestionStatus);
-        _suggestionStatus.BringToFront();
-
-        card.Controls.Add(sugHost);
-        return card;
     }
 
     private Card BuildWillLogCard()
@@ -483,6 +341,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _willLogList.BackColor = Theme.InputBg;
         _willLogList.Padding = UiScale.S(new Padding(6, 4, 6, 4));
         host.Controls.Add(_willLogList);
+        ThemedScrollBar.Attach(_willLogList);
 
         _verifyTimer.Tick += (_, _) => { _verifyTimer.Stop(); VerifyTicketsAsync(); };
 
@@ -508,7 +367,15 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _tickets.Font = TicketsFont;
         _tickets.BackColor = Theme.InputBg;
         _tickets.ForeColor = Theme.TextPrimary;
-        _tickets.TextChanged += (_, _) => { _typedMinutes = null; UpdateWillLog(); UpdateActionState(); _verifyTimer.Stop(); _verifyTimer.Start(); };
+        _tickets.TextChanged += (_, _) =>
+        {
+            _typedMinutes = null;
+            UpdateWillLog();
+            UpdateActionState();
+            _verifyTimer.Stop();
+            _verifyTimer.Start();
+            EntryTicketsChanged?.Invoke(TicketParser.Parse(_tickets.Text).Tickets);
+        };
         _tickets.Leave += (_, _) => { _verifyTimer.Stop(); VerifyTicketsAsync(); };
         // Enter queues only from the ticket box, and only when Add to queue is enabled.
         _tickets.KeyDown += (_, e) =>
@@ -541,10 +408,14 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _queueBtn.Click += OnQueue;
 
         _logNowBtn.Size = new Size(logNowW, BtnH);
+        _logNowBtn.Glyph = Icons.ChevronDown;
+        _logNowBtn.GlyphAfterText = true;
         _logNowBtn.Location = new Point(CardPad + queueW + BtnGap, actionY);
         _logNowBtn.Click += (_, _) => ThemedMenuRenderer.ShowBelow(_logNowMenu, _logNowBtn);
 
         _moreBtn.Size = new Size(moreW, BtnH);
+        _moreBtn.Glyph = Icons.More;
+        _moreBtn.GlyphFont = Icons.Medium;
         _moreBtn.Location = new Point(CardPad + InnerW - moreW, actionY);
         _moreBtn.Click += (_, _) => ThemedMenuRenderer.ShowBelow(_moreMenu, _moreBtn);
 
@@ -591,8 +462,6 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _logNowBtn.Text = _busy ? BusyText : LogNowText;
         _logNowBtn.AccessibleName = Lang.T("Log now menu", "Menu log ngay");
         _moreBtn.AccessibleName = Lang.T("More actions", "Thao tác khác");
-        _refreshBtn.Text = Lang.T("Refresh", "Làm mới");
-        _jqlBtn.Text = Lang.T("Edit JQL", "Sửa JQL");
         _clearBtn.Text = Lang.T("Clear", "Xóa");
         _clearQueueBtn.Text = Lang.T("Clear queue", "Xóa hàng đợi");
         _logAllBtn.Text = Lang.T("Log queue now", "Log cả hàng đợi");
@@ -607,8 +476,6 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _reauthItem.Text = Lang.T("Re-authenticate TSC", "Đăng nhập lại TSC");
 
         _tickets.PlaceholderText = Lang.T("e.g. 1234, 5678  (MDP- optional)", "vd. 1234, 5678  (không cần MDP-)");
-        _ticketSearch.PlaceholderText = Lang.T("Search, then click a row to add", "Tìm, rồi bấm một dòng để thêm");
-        _ticketSearch.AccessibleName = Lang.T("Search my tickets", "Tìm ticket của tôi");
 
         _tips.SetToolTip(_date, Lang.T(
             "Dates and the daily auto-log use Vietnam time (Asia/Ho_Chi_Minh, UTC+7).",
@@ -618,23 +485,14 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
             "Log ngay các ticket đã nhập thay vì chờ tới giờ tự log."));
         _tips.SetToolTip(_moreBtn, Lang.T("More actions: Log OFF, TSC session", "Thao tác khác: đánh dấu nghỉ, phiên TSC"));
 
-        if (_suggestionStatusText != null && _suggestionStatus.Text.Length != 0)
-            _suggestionStatus.Text = _suggestionStatusText();
-        else if (!_loadingSuggestions)
-            RenderSuggestions(_lastSuggestions);
         UpdateWillLog();
         FitToolbarButtons();
     }
 
     // One fixed width for every toolbar button (sized for the longest label, both languages, at the
-    // current DPI), keeping the toolbar's right edge; the search box gives up the space.
+    // current DPI), keeping the toolbar's right edge.
     private void FitToolbarButtons()
     {
-        FitButtonLeftOf(_refreshBtn, _refreshBtn.Right);
-        FitButtonLeftOf(_jqlBtn, _refreshBtn.Left - BtnGap);
-        var searchHost = _ticketSearch.Parent!;
-        searchHost.Width = _jqlBtn.Left - BtnGap - searchHost.Left;
-
         FitButtonLeftOf(_clearQueueBtn, _clearQueueBtn.Right);
         FitButtonLeftOf(_logAllBtn, _clearQueueBtn.Left - BtnGap);
     }
@@ -645,11 +503,11 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         button.SetBounds(right - width, button.Top, width, button.Height);
     }
 
-    private static string LogNowText => Lang.T("Log now  ▾", "Log ngay  ▾");
+    private static string LogNowText => Lang.T("Log now", "Log ngay");
     private static string BusyText => Lang.T("Working...", "Đang chạy...");
 
     // Re-apply theme colors to the native controls (custom controls repaint
-    // themselves via Theme.Changed) and re-render the suggestion rows.
+    // themselves via Theme.Changed) and re-render the Queue rows.
     private void ApplyTheme()
     {
         BackColor = Theme.WindowBg;
@@ -660,14 +518,8 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
 
         _tickets.BackColor = Theme.InputBg;
         _tickets.ForeColor = Theme.TextPrimary;
-        _ticketSearch.BackColor = Theme.InputBg;
-        _ticketSearch.ForeColor = Theme.TextPrimary;
-        _suggestions.BackColor = Theme.InputBg;
-        _suggestionStatus.BackColor = Theme.InputBg;
-        _suggestionStatus.ForeColor = Theme.TextSecondary;
         _willLogList.BackColor = Theme.InputBg;
 
-        if (!_loadingSuggestions && _suggestionsShownCount != 0) RenderSuggestions(_lastSuggestions);
         UpdateWillLog();
         Invalidate(true);
     }
@@ -681,106 +533,6 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     {
         AppLogger.Write(ok ? "INFO" : "ERROR", message);
         StatusRaised?.Invoke(message, ok ? NoticeKind.Success : NoticeKind.Error);
-    }
-
-    // Open the JQL editor for the "My tickets" query; on save, apply it to the live
-    // service, persist it, and re-fetch the list with the new query.
-    private void EditJql()
-    {
-        if (_service is null)
-        {
-            SetSuggestionStatus(() => Lang.T("Config not loaded; cannot edit query.", "Chưa có cấu hình; không sửa được truy vấn."));
-            return;
-        }
-
-        using var dlg = new JqlForm(_service.MyTicketsJql, JiraClient.DefaultMyTicketsJql,
-            _service.ValidateMyTicketsJqlAsync);
-        if (dlg.ShowDialog(FindForm()) != DialogResult.OK) return;
-
-        _service.SetMyTicketsJql(dlg.Jql);
-        AppConfig.SaveUserConfig(new Dictionary<string, string> { [AppConfig.MyTicketsJqlKey] = dlg.Jql });
-        LoadMyTicketsAsync();
-    }
-
-    // Load the user's open Jira tickets into the suggestions panel (click to add).
-    private async void LoadMyTicketsAsync()
-    {
-        if (_service is null)
-        {
-            SetSuggestionStatus(() => Lang.T("Config not loaded; cannot fetch tickets.", "Chưa có cấu hình; không tải được ticket."));
-            return;
-        }
-
-        _verify.Clear(); // Refresh forces a fresh Jira check for every shown ticket
-        _refreshBtn.Enabled = false;
-        _loadingSuggestions = true;
-        SetSuggestionStatus(() => Lang.T("Loading your tickets...", "Đang tải ticket của bạn..."));
-        try
-        {
-            var tickets = await _service.GetMyTicketsAsync();
-            _loadingSuggestions = false;
-            RenderSuggestions(tickets);
-        }
-        catch (Exception ex)
-        {
-            SetSuggestionStatus(() => Lang.T($"Could not load tickets: {ex.Message}", $"Không tải được ticket: {ex.Message}"));
-            AppendLog($"[jira] my-tickets error: {ex.Message}");
-        }
-        finally
-        {
-            _loadingSuggestions = false;
-            UpdateActionState();
-            UpdateWillLog();
-            VerifyTicketsAsync(); // re-verify typed/queued tickets after the cache clear
-        }
-    }
-
-    private void RenderSuggestions(IReadOnlyList<JiraSuggestion> tickets)
-    {
-        _lastSuggestions = tickets;
-        foreach (var s in tickets) _verify[s.Key] = (VState.Valid, s.Summary);
-        ClearRows(_suggestions);
-        _suggestionsShownCount = 0;
-        _suggestionsRenderedWidth = _suggestions.Width;
-        _suggestionsRenderedOverflow = false;
-        if (tickets.Count == 0)
-        {
-            SetSuggestionStatus(() => Lang.T("No open tickets found.", "Không có ticket nào đang mở."));
-            return;
-        }
-
-        var shown = FilterSuggestions(tickets, _ticketSearch.Text);
-        if (shown.Count == 0)
-        {
-            SetSuggestionStatus(() => Lang.T("No tickets match the search.", "Không có ticket nào khớp."));
-            return;
-        }
-
-        _suggestionStatus.Text = "";
-        var rowWidth = _suggestions.ClientSize.Width - UiScale.S(8);
-        if (rowWidth < UiScale.S(100)) rowWidth = _suggestions.Width - UiScale.S(12);
-        // Leave room for the vertical scrollbar once the rows overflow the list height.
-        var overflow = shown.Count * SuggestionRowPitch > _suggestions.ClientSize.Height;
-        if (overflow) rowWidth -= SystemInformation.VerticalScrollBarWidth;
-        _suggestionsShownCount = shown.Count;
-        _suggestionsRenderedWidth = _suggestions.Width;
-        _suggestionsRenderedOverflow = overflow;
-
-        _suggestions.SuspendLayout();
-        foreach (var t in shown)
-            _suggestions.Controls.Add(CreateSuggestionRow(t, rowWidth));
-        _suggestions.ResumeLayout();
-    }
-
-    // Case-insensitive match on key or summary; a blank query keeps every ticket.
-    internal static IReadOnlyList<JiraSuggestion> FilterSuggestions(IReadOnlyList<JiraSuggestion> tickets, string query)
-    {
-        var q = query.Trim();
-        if (q.Length == 0) return tickets;
-        return tickets
-            .Where(t => t.Key.Contains(q, StringComparison.OrdinalIgnoreCase)
-                || t.Summary.Contains(q, StringComparison.OrdinalIgnoreCase))
-            .ToList();
     }
 
     // Remove and dispose a container's child rows (Controls.Clear alone would leak
@@ -800,156 +552,11 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         return Theme.Dark ? TicketDark[idx] : TicketLight[idx];
     }
 
-    // Temperature colour for a ticket's due date: hot when due today/overdue, cool when
-    // far out or unset. Because the My-tickets list is sorted by due date, this reads as
-    // a hot-at-top, cool-at-bottom gradient.
-    private static Color DueColor(string? dueDate)
-        => SampleRamp(Theme.Dark ? HeatDark : HeatLight, DueHeat(dueDate));
-
-    // 0 = coolest (far out / no due date), 1 = hottest (due today or overdue).
-    private static double DueHeat(string? dueDate)
+    // The board's "+ Log": the ticket joins the typed ones, and focus goes to the ticket box so Enter queues right away.
+    // Its summary marks it verified, as Jira would.
+    internal void AddTicketToInput(string key, string summary)
     {
-        if (string.IsNullOrWhiteSpace(dueDate)
-            || !DateTime.TryParse(dueDate, CultureInfo.InvariantCulture, DateTimeStyles.None, out var due))
-            return 0;
-
-        var days = (due.Date - DateTime.Today).TotalDays;
-        if (days <= 0) return 1;
-        if (days >= DueHeatMaxDays) return 0;
-        return 1 - days / DueHeatMaxDays;
-    }
-
-    // Linear RGB interpolation across an ordered colour ramp at t in [0,1].
-    private static Color SampleRamp(Color[] ramp, double t)
-    {
-        if (t <= 0) return ramp[0];
-        if (t >= 1) return ramp[^1];
-
-        var scaled = t * (ramp.Length - 1);
-        var i = (int)Math.Floor(scaled);
-        var f = scaled - i;
-        var a = ramp[i];
-        var b = ramp[i + 1];
-        return Color.FromArgb(
-            (int)Math.Round(a.R + (b.R - a.R) * f),
-            (int)Math.Round(a.G + (b.G - a.G) * f),
-            (int)Math.Round(a.B + (b.B - a.B) * f));
-    }
-
-    // A clickable row: a per-ticket colour bar + coloured key, then the summary right
-    // after it (measured, so name and description sit close), with a bottom separator.
-    private Control CreateSuggestionRow(JiraSuggestion ticket, int width)
-    {
-        var color = DueColor(ticket.DueDate);
-        var dueLabel = FormatDue(ticket.DueDate);
-        var accessibleName = dueLabel.Length != 0
-            ? $"{ticket.Key}, {ticket.Summary}, {Lang.T("due", "hạn")} {dueLabel}"
-            : $"{ticket.Key}, {ticket.Summary}";
-
-        var row = new ClickableRow
-        {
-            Width = width,
-            Height = SuggestionRowPitch,
-            Margin = new Padding(0),
-            BackColor = Theme.InputBg,
-            Cursor = Cursors.Hand,
-            AccessibleName = accessibleName,
-        };
-
-        var labelH = SuggestionRowPitch - 1; // the 1px separator takes the rest
-        var bar = new Panel { Location = new Point(0, 0), Size = new Size(UiScale.S(4), labelH), BackColor = color };
-
-        var keyWidth = Math.Max(RowColumns.KeyWidth(KeyFont), TextRenderer.MeasureText(ticket.Key, KeyFont).Width);
-        var key = new Label
-        {
-            Text = ticket.Key,
-            AutoSize = false,
-            Location = new Point(UiScale.S(12), 0),
-            Size = new Size(keyWidth, labelH),
-            TextAlign = ContentAlignment.MiddleLeft,
-            Font = KeyFont,
-            ForeColor = color,
-            BackColor = Color.Transparent,
-            Cursor = Cursors.Hand,
-        };
-
-        // Due date sits right-aligned at the row's end; the summary shrinks to leave room.
-        var dueText = dueLabel;
-        var gap = UiScale.S(8);
-        var dueWidth = dueText.Length == 0 ? 0 : TextRenderer.MeasureText(dueText, SummaryFont).Width + gap;
-
-        var summaryX = UiScale.S(12) + keyWidth + gap;
-        var summary = new Label
-        {
-            Text = ticket.Summary,
-            AutoSize = false,
-            Location = new Point(summaryX, 0),
-            Size = new Size(Math.Max(UiScale.S(20), width - summaryX - dueWidth - gap), labelH),
-            TextAlign = ContentAlignment.MiddleLeft,
-            AutoEllipsis = true,
-            Font = SummaryFont,
-            ForeColor = Theme.TextSecondary,
-            BackColor = Color.Transparent,
-            Cursor = Cursors.Hand,
-        };
-
-        Label? due = null;
-        if (dueWidth != 0)
-        {
-            due = new Label
-            {
-                Text = dueText,
-                AutoSize = false,
-                Location = new Point(width - dueWidth - gap, 0),
-                Size = new Size(dueWidth, labelH),
-                TextAlign = ContentAlignment.MiddleRight,
-                Font = SummaryFont,
-                ForeColor = Theme.TextSecondary,
-                BackColor = Color.Transparent,
-                Cursor = Cursors.Hand,
-            };
-        }
-
-        var separator = new Panel { Dock = DockStyle.Bottom, Height = 1, BackColor = Theme.Divider };
-
-        void Add(object? s, EventArgs e) => AddTicketToInput(ticket.Key);
-        void Enter(object? s, EventArgs e) => row.BackColor = Theme.Hover;
-        void Leave(object? s, EventArgs e)
-        {
-            if (!row.ClientRectangle.Contains(row.PointToClient(Cursor.Position)))
-                row.BackColor = Theme.InputBg;
-        }
-
-        var controls = due is null
-            ? new Control[] { row, bar, key, summary }
-            : new Control[] { row, bar, key, summary, due };
-        foreach (var c in controls)
-        {
-            c.Click += Add;
-            c.MouseEnter += Enter;
-            c.MouseLeave += Leave;
-        }
-
-        row.Controls.Add(bar);
-        row.Controls.Add(key);
-        row.Controls.Add(summary);
-        if (due is not null) row.Controls.Add(due);
-        row.Controls.Add(separator);
-        return row;
-    }
-
-    // Format a Jira ISO due date ("yyyy-MM-dd") as a short label ("Oct 1" / "01/10"); empty when unset.
-    private static string FormatDue(string? due)
-    {
-        if (string.IsNullOrWhiteSpace(due)) return "";
-        return DateTime.TryParse(due, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt)
-            ? Lang.ShortDate(dt)
-            : due;
-    }
-
-    // Picking a suggestion hands focus back to the ticket box, so Enter queues right away.
-    private void AddTicketToInput(string key)
-    {
+        _verify[key] = (VState.Valid, summary);
         var (existing, _) = TicketParser.Parse(_tickets.Text);
         if (!existing.Contains(key)) _tickets.Text = string.Join(", ", existing.Append(key));
         FocusTicketInput();
@@ -961,14 +568,6 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _body.AutoScrollPosition = Point.Empty;
         _tickets.Focus();
         _tickets.SelectionStart = _tickets.TextLength;
-    }
-
-    private void SetSuggestionStatus(Func<string> message)
-    {
-        ClearRows(_suggestions);
-        _suggestionsShownCount = 0;
-        _suggestionStatusText = message;
-        _suggestionStatus.Text = message();
     }
 
     // The distinct tickets currently shown in "Will log" (for Jira verification):
@@ -1052,7 +651,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     {
         var mins = minutes ?? TimeSlots.EvenSplit(tickets.Count);
         for (var i = 0; i < tickets.Count; i++)
-            _willLogList.Controls.Add(CreateWillLogRow(date, tickets[i], TimeSlots.Get(mins, i), rowWidth));
+            _willLogList.Controls.Add(CreateWillLogRow(date, tickets[i], TimeSlots.Get(mins, i), rowWidth, striped: i % 2 == 1));
     }
 
     // Show the running total / validation state in the header while composing. The total is
@@ -1150,9 +749,9 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         UseMnemonic = false,
     };
 
-    private Control CreateWillLogRow(string date, string key, IReadOnlyList<TimeSlot> slots, int width)
+    private Control CreateWillLogRow(string date, string key, IReadOnlyList<TimeSlot> slots, int width, bool striped)
     {
-        var row = new WillLogRow
+        var row = new WillLogRow(striped)
         {
             Width = width,
             Key = key,
@@ -1186,7 +785,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     private static string SlotText(IReadOnlyList<TimeSlot> slots)
         => string.Join("  /  ", slots.Select(s => $"{s.Start}-{s.End}"));
 
-    // The Jira title from verification (or a My tickets row); empty while unverified.
+    // The Jira title from verification (or the board's "+ Log"); empty while unverified.
     private string SummaryFor(string key)
         => _verify.TryGetValue(key, out var v) && v.Title != null ? v.Title : "";
 
@@ -1207,7 +806,7 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
 
     // Verify each previewed ticket against Jira (debounced), showing valid+title or
     // not-found in the "Will log" list. Covers the queued fallback too, so reopening
-    // the window shows real status dots. Known suggestions are pre-marked valid.
+    // the window shows real status dots. Tickets added from the board are pre-marked valid.
     private async void VerifyTicketsAsync()
     {
         if (_service is null) return;
@@ -1283,6 +882,13 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
 
     private void OnClearQueue(object? sender, EventArgs e)
     {
+        var queuedDates = TicketQueue.Read().Count;
+        if (queuedDates == 0) return;
+        var clear = ConfirmDialog.Ask(FindForm(), Lang.T("Clear the queue?", "Xóa hàng đợi?"),
+            Lang.T($"Every queued ticket ({queuedDates} {(queuedDates == 1 ? "day" : "days")}) is removed and will not be logged.",
+                $"Mọi ticket đang chờ ({queuedDates} ngày) sẽ bị xóa và không được log."),
+            Lang.T("Clear queue", "Xóa hàng đợi"), destructive: true);
+        if (!clear) return;
         TicketQueue.Write(Array.Empty<QueueEntry>());
         RefreshQueuedView();
         ShowStatus(Lang.T("Queue cleared.", "Đã xóa hàng đợi."), true);
@@ -1348,12 +954,6 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     }
 
     internal void ReloadWeekIfLoaded() => _weekCard?.ReloadIfLoaded();
-
-    // Tray "Weekly check...": posted after OnPageShown's focus, which scrolls to the ticket box.
-    internal void RevealWeek()
-    {
-        if (IsHandleCreated) BeginInvoke(() => { if (_weekCard != null) _body.ScrollControlIntoView(_weekCard); });
-    }
 
     private async void OnLogNow(object? sender, EventArgs e)
     {
@@ -1443,13 +1043,13 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         if (_service is null) { ShowStatus(Lang.T("Config not loaded; cannot log.", "Chưa có cấu hình; không log được."), false); return; }
 
         var date = DateOnly.FromDateTime(_date.Value.Date);
-        var answer = MessageBox.Show(FindForm(),
-            Lang.T($"Write \"{TscCells.OffMarker}\" to TSC for {Lang.LongDate(_date.Value.Date)}?\n\n"
-                    + "Anything already in that day's cells will be replaced, and any queued tickets for it dropped.",
-                $"Ghi \"{TscCells.OffMarker}\" vào TSC cho {Lang.LongDate(_date.Value.Date)}?\n\n"
-                    + "Mọi nội dung đang có trong ô của ngày đó sẽ bị thay thế, và các ticket đang chờ của ngày đó sẽ bị bỏ."),
-            Lang.T("Mark the day off", "Đánh dấu ngày nghỉ"), MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-        if (answer != DialogResult.Yes) return;
+        var markOff = ConfirmDialog.Ask(FindForm(),
+            Lang.T($"Write \"{TscCells.OffMarker}\" to TSC for {Lang.LongDate(_date.Value.Date)}?",
+                $"Ghi \"{TscCells.OffMarker}\" vào TSC cho {Lang.LongDate(_date.Value.Date)}?"),
+            Lang.T("Anything already in that day's cells will be replaced, and any queued tickets for it dropped.",
+                "Mọi nội dung đang có trong ô của ngày đó sẽ bị thay thế, và các ticket đang chờ của ngày đó sẽ bị bỏ."),
+            Lang.T("Mark the day off", "Đánh dấu ngày nghỉ"), confirmByDefault: true, destructive: true);
+        if (!markOff) return;
 
         SetBusy(true, Lang.T("Marking the day OFF in TSC...", "Đang đánh dấu nghỉ (OFF) trong TSC..."));
         try
@@ -1540,6 +1140,8 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
     private void SetBusy(bool busy, string? busyNotice = null)
     {
         _busy = busy;
+        _busyWork?.Dispose();
+        _busyWork = busy ? BusyWork.Shared.Begin(busyNotice ?? BusyText) : null;
         UseWaitCursor = busy;
         _logNowBtn.Text = busy ? BusyText : LogNowText;
         if (busy && busyNotice != null) BusyChanged?.Invoke(busyNotice);
@@ -1578,7 +1180,6 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _logHrmItem.Enabled = !_busy && hasTickets && hoursOk;
         _moreBtn.Enabled = !_busy; // Log OFF needs no ticket, and a future leave day is fair game
         _logAllBtn.Enabled = !_busy; // batch drain must not fight an in-flight browser/log op
-        _refreshBtn.Enabled = !_busy;
     }
 
     // Re-read the persisted queue each time the window is focused (e.g. reopened from
@@ -1603,21 +1204,5 @@ internal sealed class LogPage : UserControl, IMessageFilter, IShellPage
         _date.ForgetManualPick();
         _tickets.Clear();
         _weekCard?.Reset();
-    }
-
-    // Enter in the search box picks the top match; Esc is handled by the shell.
-    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
-    {
-        if (keyData == Keys.Enter && _ticketSearch.Focused)
-        {
-            var matches = FilterSuggestions(_lastSuggestions, _ticketSearch.Text);
-            if (_ticketSearch.Text.Trim().Length != 0 && matches.Count != 0)
-            {
-                _ticketSearch.Text = string.Empty;
-                AddTicketToInput(matches[0].Key);
-            }
-            return true;
-        }
-        return base.ProcessCmdKey(ref msg, keyData);
     }
 }

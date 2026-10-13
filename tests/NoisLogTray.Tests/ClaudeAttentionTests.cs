@@ -10,6 +10,7 @@ public class ClaudeAttentionTests
         const string json = """
             {
               "session_id": "abc",
+              "transcript_path": "C:\\Users\\me\\.claude\\projects\\C--repo\\abc.jsonl",
               "cwd": "C:\\repo",
               "hook_event_name": "Stop",
               "last_assistant_message": "Done.",
@@ -21,7 +22,8 @@ public class ClaudeAttentionTests
 
         var hookEvent = ClaudeAttention.Parse(json);
 
-        Assert.Equal(new ClaudeHookEvent("Stop", "Bash", "idle_prompt", "agent-1", "abc"), hookEvent);
+        Assert.Equal(new ClaudeHookEvent("Stop", "Bash", "idle_prompt", "agent-1", "abc",
+            TranscriptPath: @"C:\Users\me\.claude\projects\C--repo\abc.jsonl"), hookEvent);
     }
 
     [Theory]
@@ -55,6 +57,9 @@ public class ClaudeAttentionTests
     [InlineData("Permission", "Stop", null, null, "Finished")]
     [InlineData("Finished", "UserPromptSubmit", null, null, null)]
     [InlineData("Finished", "SubagentStop", null, null, "Finished")]
+    [InlineData("Finished", "SessionEnd", null, null, null)]
+    [InlineData("Permission", "SessionEnd", null, null, null)]
+    [InlineData("Question", "SessionEnd", null, null, null)]
     public void Next_MapsEachEvent_ToTheExpectedWait(string? current, string eventName, string? toolName, string? notificationType, string? expected)
     {
         var hookEvent = new ClaudeHookEvent(eventName, toolName, notificationType, null);
@@ -70,6 +75,33 @@ public class ClaudeAttentionTests
     public void Next_KeepsCurrent_WhenASubagentUsesATool(string eventName, string current)
     {
         var hookEvent = new ClaudeHookEvent(eventName, "Bash", null, "agent-1");
+
+        Assert.Equal(ParseWaitReason(current), ClaudeAttention.Next(ParseWaitReason(current), hookEvent));
+    }
+
+    // Stop's background_tasks, as claude 2.1.284 sends it; a background shell or Monitor is "shell".
+    [Theory]
+    [InlineData("""[{"id":"a1","type":"subagent","status":"running","agent_type":"general-purpose"}]""", true)]
+    [InlineData("""[{"id":"b1","type":"shell","status":"running"},{"id":"a1","type":"subagent","status":"running"}]""", true)]
+    [InlineData("""[{"id":"b1","type":"shell","status":"running","command":"sleep 15"}]""", false)]
+    [InlineData("""[{"id":"a1","type":"subagent","status":"completed"}]""", false)]
+    [InlineData("[]", false)]
+    [InlineData("null", false)]
+    public void Parse_ReadsWhetherABackgroundSubagentStillRuns(string backgroundTasks, bool expected)
+    {
+        var hookEvent = ClaudeAttention.Parse($$"""{"hook_event_name":"Stop","background_tasks":{{backgroundTasks}}}""");
+
+        Assert.Equal(expected, hookEvent!.SubagentsRunning);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("Permission")]
+    [InlineData("Question")]
+    public void Next_KeepsCurrent_OnAStopWhileSubagentsRun(string? current)
+    {
+        // The turn ended to wait for background agents; claude starts another turn once they finish.
+        var hookEvent = new ClaudeHookEvent("Stop", null, null, null, SubagentsRunning: true);
 
         Assert.Equal(ParseWaitReason(current), ClaudeAttention.Next(ParseWaitReason(current), hookEvent));
     }

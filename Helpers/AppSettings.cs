@@ -18,7 +18,6 @@ internal sealed class AppSettings
     public int? WindowHeight { get; set; }
     public bool? WindowMaximized { get; set; } // null = never saved -> open maximized
     public bool SidebarCollapsed { get; set; }
-    public int UiZoomPercent { get; set; } = UiScale.DefaultZoomPercent; // read once at startup
     public Dictionary<string, string> Config { get; set; } = new();
     public List<string> OpenTicketTabs { get; set; } = new(); // ticket keys, in tab order
     public string? ClaudeDirectory { get; set; } // the Claude page's folder; null = the dev repo
@@ -29,6 +28,8 @@ internal sealed class AppSettings
     public double? DiffListWidthEm { get; set; } // the Changes file list width in the diff page's em; null = default
     public bool DiffListHidden { get; set; }
     public bool DiffInline { get; set; } // the Changes diff in one column instead of two
+    public double? FilesListWidthEm { get; set; } // the Files list width in the files page's em; null = default
+    public bool FilesListHidden { get; set; }
 
     private static readonly JsonSerializerOptions Options = new()
     {

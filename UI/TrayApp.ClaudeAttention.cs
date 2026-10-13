@@ -15,7 +15,8 @@ internal sealed partial class TrayApp
 
     private Func<string?> HookSettingsFor(string sessionName) => () => _hookServer?.WriteSettingsFile(sessionName);
 
-    // A (re)starting session, even one whose Start then fails, or an ended one waits for nobody.
+    // A (re)starting terminal, even one whose Start then fails, or an ended one waits for nobody. A claude that exits
+    // inside a running terminal clears through its SessionEnd hook.
     private void TrackClaudeSession(string sessionName, ClaudeSessionHost host)
     {
         host.Starting += () => ClearClaudeWait(sessionName);
@@ -26,7 +27,7 @@ internal sealed partial class TrayApp
     {
         var host = sessionName == ClaudeAttention.GeneralSessionName ? _claudeHost : _ticketSessions.GetValueOrDefault(sessionName);
         if (host == null || !host.IsRunning) return; // a closed tab's or an ended session's late hook
-        if (sessionName == ClaudeAttention.GeneralSessionName) RememberClaudeSessionId(hookEvent.SessionId);
+        if (sessionName == ClaudeAttention.GeneralSessionName) RememberClaudeSessionId(hookEvent);
         ClaudeWaitReason? current = _claudeWaits.TryGetValue(sessionName, out var reason) ? reason : null;
         var next = ClaudeAttention.Next(current, hookEvent);
         // A turn that finishes while the user looks at that session needs no dot.
@@ -38,8 +39,10 @@ internal sealed partial class TrayApp
         RefreshClaudeAttention();
         if (next != null && !IsWatching(sessionName))
         {
-            var label = sessionName == ClaudeAttention.GeneralSessionName ? Lang.T("Claude page", "Trang Claude") : sessionName;
-            Notify(ClaudeAttention.NoticeText(label, next.Value), ToolTipIcon.Info);
+            var isGeneral = sessionName == ClaudeAttention.GeneralSessionName;
+            var label = isGeneral ? "Terminal" : sessionName;
+            Notify(ClaudeAttention.NoticeText(label, next.Value), ToolTipIcon.Info,
+                open: isGeneral ? () => ShowShell(ShellPage.Claude) : () => ShowTicketTab(sessionName));
         }
     }
 
@@ -76,7 +79,8 @@ internal sealed partial class TrayApp
     {
         if (_shell == null || _shell.IsDisposed) return;
         var waitingTickets = _claudeWaits.Keys.Where(sn => sn != ClaudeAttention.GeneralSessionName).ToList();
-        _shell.SetBadge(ShellPage.Claude, _claudeWaits.ContainsKey(ClaudeAttention.GeneralSessionName) ? 1 : 0);
+        var generalWaiting = _claudeWaits.ContainsKey(ClaudeAttention.GeneralSessionName);
+        _shell.SetBadge(ShellPage.Claude, generalWaiting ? 1 : 0);
         _shell.SetBadge(ShellPage.Ticket, waitingTickets.Count);
         _ticketPage?.SetWaiting(waitingTickets);
     }

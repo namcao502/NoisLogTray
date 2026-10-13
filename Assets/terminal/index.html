@@ -6,16 +6,40 @@
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #1e1e1e; }
   #terminal { position: absolute; inset: 6px 4px 4px 8px; }
+  /* The app's one scrollbar look (UI/ThemedScrollBar.cs): a pill 8px thick, 11px under the mouse or while dragged,
+     3px in from the edge, shown whenever there is something to scroll; the colors come with the theme message. */
+  .xterm .xterm-scrollable-element > .invisible.fade { opacity: 1; pointer-events: auto; z-index: 11; }
+  .xterm .xterm-scrollable-element > .scrollbar > .slider { border-radius: 6px; }
+  .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider { width: 8px !important; left: auto !important; right: 3px; }
+  .xterm .xterm-scrollable-element > .scrollbar.vertical:hover > .slider,
+  .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider.active { width: 11px !important; }
+  /* Back to the newest output (claude's input line); only while scrolled up. Colors come with the theme message. */
+  @font-face { font-family: "FluentIcons"; src: url("../icons/FluentSystemIcons-Regular.ttf"); }
+  #jump {
+    position: absolute; left: 50%; transform: translateX(-50%); bottom: 20px; z-index: 20; width: 52px; height: 52px; padding: 0;
+    border-radius: 50%; border: 1px solid var(--jump-border, #3e3e42); background: var(--jump-background, #2c2c30);
+    color: var(--jump-foreground, #ececf0); font-family: "FluentIcons"; font-size: 26px; line-height: 1;
+    cursor: pointer; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35); transition: opacity 0.12s;
+  }
+  #jump:hover { background: var(--jump-hover, #3c3c42); }
+  #jump.hidden { opacity: 0; pointer-events: none; }
 </style>
 </head>
 <body>
 <div id="terminal"></div>
+<button id="jump" class="hidden" tabindex="-1" aria-label="Jump to the bottom" title="Jump to the bottom">&#xF148;</button>
 <script src="xterm.js"></script>
 <script src="addon-fit.js"></script>
 <script>
   // Bridge to the host (WebView2): output arrives base64-encoded so multi-byte UTF-8 split across
   // reads stays intact; keystrokes and size changes go back as JSON messages.
   const params = new URLSearchParams(location.search);
+  // The theme also rides the URL, so the terminal never paints in the default colors before the theme message.
+  const startTheme = JSON.parse(params.get("theme") || "null");
+  const applyChrome = (theme, jump) => {
+    document.body.style.background = theme.background;
+    for (const [name, value] of Object.entries(jump)) document.documentElement.style.setProperty(`--jump-${name}`, value);
+  };
   const term = new Terminal({
     fontFamily: "'Cascadia Mono', Consolas, monospace",
     fontSize: Number(params.get("fontSize") || 14),
@@ -24,10 +48,17 @@
     // claude picks its text colors for a dark background; this lifts any too faint for the theme (mostly light).
     minimumContrastRatio: 4.5,
     allowProposedApi: true,
-    theme: { background: "#1e1e1e" },
+    theme: startTheme ? startTheme.theme : { background: "#1e1e1e" },
+    // OSC 8 hyperlinks a program prints: Ctrl+click opens them in the browser, like the plain-text URLs below.
+    linkHandler: {
+      activate: (event, url) => {
+        if (event.ctrlKey) post({ type: "openUrl", url });
+      },
+    },
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
+  if (startTheme) applyChrome(startTheme.theme, startTheme.jump);
   term.open(document.getElementById("terminal"));
 
   const post = (message) => window.chrome.webview.postMessage(JSON.stringify(message));
@@ -36,11 +67,25 @@
     post({ type: "resize", cols: term.cols, rows: term.rows });
   };
 
-  // Ctrl+1..5 switch app pages (the host never sees keys typed in here).
+  // Ctrl+1..4 switch app pages (the host never sees keys typed in here).
   // Ctrl+C copies when text is selected; with no selection it still sends ^C to the CLI.
   term.attachCustomKeyEventHandler((event) => {
-    if (event.ctrlKey && !event.shiftKey && !event.altKey && /^(Digit|Numpad)[1-5]$/.test(event.code)) {
+    if (event.ctrlKey && !event.shiftKey && !event.altKey && /^(Digit|Numpad)[1-4]$/.test(event.code)) {
       if (event.type === "keydown") post({ type: "page", index: Number(event.code.slice(-1)) });
+      return false;
+    }
+    // xterm.js sends \r for Shift+Enter, same as Enter, so it would submit; send Ctrl+J, claude's newline.
+    if (event.key === "Enter" && event.shiftKey && !event.ctrlKey && !event.altKey) {
+      if (event.type === "keydown") post({ type: "input", data: "\n" });
+      return false;
+    }
+    // Ctrl+V asks the host, which pastes text or, for an image, sends claude its image-paste key. preventDefault
+    // stops the browser's own paste, which would paste the text a second time and drops images.
+    if (event.ctrlKey && !event.shiftKey && !event.altKey && event.code === "KeyV") {
+      if (event.type === "keydown") {
+        event.preventDefault();
+        post({ type: "pasteRequest" });
+      }
       return false;
     }
     if (event.type === "keydown" && event.ctrlKey && !event.shiftKey && event.key === "c" && term.hasSelection()) {
@@ -61,7 +106,66 @@
     post({ type: "pasteRequest" });
   });
 
+  // Ctrl+click on a web URL opens the browser. Ctrl+click on a file path ("UI/a.cs:42", "C:\x\plan.md") asks the host,
+  // which opens it only if the file exists: in the ticket's Files view, else VS Code. A name with no folder needs a 2+
+  // letter extension, so "e.g." is no link.
+  const urlPattern = /https?:\/\/\S+/g;
+  const pathPattern = /[A-Za-z]:[\\/][^\s"'`<>|*?()[\]{}]+|(?:\.{1,2}[\\/])?(?:[\w.@-]+[\\/])*[\w@-][\w.@-]*\.[A-Za-z]\w{1,9}(?::\d+){0,2}/g;
+  term.registerLinkProvider({
+    provideLinks(lineNumber, callback) {
+      const line = term.buffer.active.getLine(lineNumber - 1);
+      if (!line) return callback(undefined);
+      // The text with each UTF-16 unit's cell column, since a wide character takes two cells.
+      let text = "";
+      const columns = [];
+      for (let x = 0; x < line.length; x++) {
+        const cell = line.getCell(x);
+        if (!cell || cell.getWidth() === 0) continue;
+        const chars = cell.getChars() || " ";
+        for (let unit = 0; unit < chars.length; unit++) columns.push(x);
+        text += chars;
+      }
+      const links = [];
+      const addLink = (start, value, message) => links.push({
+        range: { start: { x: columns[start] + 1, y: lineNumber }, end: { x: columns[start + value.length - 1] + 1, y: lineNumber } },
+        text: value,
+        activate: (event) => {
+          if (event.ctrlKey) post(message);
+        },
+      });
+      const urls = [];
+      for (const match of text.matchAll(urlPattern)) {
+        // Sentence punctuation or a closing bracket after the URL is not part of it.
+        const url = match[0].replace(/[.,;:!?'"`)\]}>]+$/, "");
+        urls.push([match.index, match.index + match[0].length]);
+        addLink(match.index, url, { type: "openUrl", url });
+      }
+      for (const match of text.matchAll(pathPattern)) {
+        const start = match.index;
+        const value = match[0].replace(/[.,;:]+$/, "");
+        if (urls.some(([from, to]) => start < to && start + value.length > from)) continue;
+        addLink(start, value, { type: "openPath", text: value });
+      }
+      callback(links.length ? links : undefined);
+    },
+  });
+
   term.onData((data) => post({ type: "input", data }));
+
+  // Shown while the view is above the newest line; any scroll or redraw (new output, a resize) re-checks it.
+  const jump = document.getElementById("jump");
+  const updateJump = () => {
+    const buffer = term.buffer.active;
+    jump.classList.toggle("hidden", buffer.viewportY >= buffer.baseY);
+  };
+  term.onScroll(updateJump);
+  term.onRender(updateJump);
+  // No mousedown focus: the click hands focus straight back to the terminal, ready to type.
+  jump.addEventListener("mousedown", (event) => event.preventDefault());
+  jump.addEventListener("click", () => {
+    term.scrollToBottom();
+    term.focus();
+  });
   window.addEventListener("resize", sendSize);
 
   window.chrome.webview.addEventListener("message", (event) => {
@@ -71,7 +175,10 @@
       term.write(bytes);
     } else if (message.type === "theme") {
       term.options.theme = message.theme;
-      document.body.style.background = message.theme.background;
+      applyChrome(message.theme, message.jump);
+    } else if (message.type === "labels") {
+      jump.title = message.jumpToBottom;
+      jump.setAttribute("aria-label", message.jumpToBottom);
     } else if (message.type === "reset") {
       term.reset();
     } else if (message.type === "paste") {

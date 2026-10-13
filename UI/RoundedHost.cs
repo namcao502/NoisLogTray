@@ -9,6 +9,7 @@ namespace NoisLogTray;
 internal sealed class RoundedHost : Panel
 {
     internal int Radius = UiScale.S(8);
+    internal bool OnWindow; // true = sits on the window body, as in the shell header (corners blend to WindowBg)
 
     internal RoundedHost()
     {
@@ -34,7 +35,7 @@ internal sealed class RoundedHost : Panel
     protected override void OnPaint(PaintEventArgs e)
     {
         var g = e.Graphics;
-        g.Clear(Theme.CardSurface); // corners blend with the card behind
+        g.Clear(OnWindow ? Theme.WindowBg : Theme.CardSurface); // corners blend with the surface behind
         g.SmoothingMode = SmoothingMode.AntiAlias;
         var rect = new Rectangle(0, 0, Width - 1, Height - 1);
         var d = Radius * 2;

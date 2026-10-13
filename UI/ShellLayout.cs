@@ -8,38 +8,49 @@ internal static class ShellLayout
     // Two 560px cards (LogPage CardW) with 20px outer margins and a 20px gap.
     internal const int TwoColumnMinWidth = 2 * (LogPage.CardW + 20) + 20;
 
-    internal static int LogColumns(int pageWidth) => pageWidth >= TwoColumnMinWidth ? 2 : 1;
+    internal static int DashboardColumns(int pageWidth) => pageWidth >= TwoColumnMinWidth ? 2 : 1;
 
-    // Card bounds for the Log page; heights are the built ones. One column stacks New entry, Queue, Week and My tickets
-    // (at least its built height; the page scrolls past the bottom). Two columns: New entry + Queue left, Week + My tickets right.
-    internal static (Rectangle NewEntry, Rectangle Queue, Rectangle Week, Rectangle MyTickets) LogCardBounds(
-        int width, int height, int newEntryH, int queueH, int weekH, int myTicketsH, int myTicketsMinH)
+    // The Work page's log column: one LogPage card plus the 20px right margin its scroll bar sits in.
+    internal const int LogColumnWidth = LogPage.CardW + 20;
+
+    internal const int WorkSideBySideMinWidth = TasksPage.DesignWidth + LogColumnWidth;
+
+    internal static bool WorkSideBySide(int pageWidth) => pageWidth >= WorkSideBySideMinWidth;
+
+    // Side by side: the board left, the log column right, both full height. Narrower: the log column first at its
+    // natural height, then the board at least tasksMinHeight tall; the page scrolls.
+    internal static (Rectangle Tasks, Rectangle Log) WorkBounds(int width, int height, int logNaturalHeight, int tasksMinHeight)
     {
-        const int margin = 20;
-        const int top = 14;
-        const int gap = 12;
-
-        if (LogColumns(width) == 1)
+        if (WorkSideBySide(width))
         {
-            var colW = width - 2 * margin;
-            var newEntry = new Rectangle(margin, top, colW, newEntryH);
-            var queue = new Rectangle(margin, newEntry.Bottom + gap, colW, queueH);
-            var week = new Rectangle(margin, queue.Bottom + gap, colW, weekH);
-            var ticketsY = week.Bottom + gap;
-            return (newEntry, queue, week, new Rectangle(margin, ticketsY, colW, Math.Max(height - ticketsY - margin, myTicketsH)));
+            var tasksWidth = width - LogColumnWidth;
+            return (new Rectangle(0, 0, tasksWidth, height), new Rectangle(tasksWidth, 0, LogColumnWidth, height));
         }
-
-        var halfW = (width - 3 * margin) / 2;
-        var rightX = 2 * margin + halfW;
-        var left = new Rectangle(margin, top, halfW, newEntryH);
-        var queueY = left.Bottom + gap;
-        var rightWeek = new Rectangle(rightX, top, halfW, weekH);
-        var rightTicketsY = rightWeek.Bottom + gap;
-        return (left,
-            new Rectangle(margin, queueY, halfW, Math.Max(height - queueY - margin, queueH)),
-            rightWeek,
-            new Rectangle(rightX, rightTicketsY, halfW, Math.Max(height - rightTicketsY - margin, myTicketsMinH)));
+        return (new Rectangle(0, logNaturalHeight, width, Math.Max(height - logNaturalHeight, tasksMinHeight)),
+            new Rectangle(0, 0, width, logNaturalHeight));
     }
+
+    // The log column stacks New entry, Queue and the week card; the Queue takes any extra height, so the week card
+    // ends at the bottom margin. Heights are the built ones; a shorter column keeps them and scrolls.
+    internal static (Rectangle NewEntry, Rectangle Queue, Rectangle Week) LogCardBounds(
+        int width, int height, int left, int newEntryH, int queueH, int weekH)
+    {
+        const int right = 20;
+        const int bottom = 20;
+
+        var cardW = width - left - right;
+        var newEntry = new Rectangle(left, LogTop, cardW, newEntryH);
+        var queueY = newEntry.Bottom + LogGap;
+        var queue = new Rectangle(left, queueY, cardW, Math.Max(queueH, height - bottom - weekH - LogGap - queueY));
+        return (newEntry, queue, new Rectangle(left, queue.Bottom + LogGap, cardW, weekH));
+    }
+
+    // The column's built height, its bottom margin included as the gap above the board when stacked.
+    internal static int LogNaturalHeight(int newEntryH, int queueH, int weekH) =>
+        LogTop + newEntryH + LogGap + queueH + LogGap + weekH + LogTop;
+
+    private const int LogTop = 14;
+    private const int LogGap = 12;
 
     internal const int DashboardTodayHeight = 168;   // header 44 + 3 lines x 28 + 40 padding
     internal const int DashboardCardMinHeight = 96;
@@ -53,7 +64,7 @@ internal static class ShellLayout
         const int top = 14;
         const int gap = 12;
 
-        if (LogColumns(width) == 1)
+        if (DashboardColumns(width) == 1)
         {
             var colW = width - 2 * margin;
             var today = new Rectangle(margin, top, colW, DashboardTodayHeight);
@@ -77,46 +88,6 @@ internal static class ShellLayout
             new Rectangle(margin, leftInProgressY, halfW, Math.Max(height - leftInProgressY - margin, DashboardCardMinHeight)),
             rightAttention,
             new Rectangle(rightX, rightNewY, halfW, Math.Max(height - rightNewY - margin, DashboardCardMinHeight)));
-    }
-
-    internal const int TaskColumnMinWidth = 400;
-    internal const int TaskColumnGap = 12;
-    internal const int TaskBoardMinWidth = 3 * TaskColumnMinWidth + 2 * TaskColumnGap;
-
-    internal static bool UseTaskBoard(int listWidth) => listWidth >= TaskBoardMinWidth;
-
-    internal const int TaskColumnCollapsedWidth = 180;
-
-    // An empty column shrinks to TaskColumnCollapsedWidth (just its header) and the others share the rest,
-    // the last non-empty one taking the rounding remainder. When the non-empty columns would drop below
-    // TaskColumnMinWidth they keep that width instead and the board runs past `width` (the page scrolls).
-    internal static (Rectangle New, Rectangle InProgress, Rectangle Done) TaskBoardColumnBounds(
-        int width, int height, bool newEmpty = false, bool inProgressEmpty = false, bool doneEmpty = false)
-    {
-        var empty = new[] { newEmpty, inProgressEmpty, doneEmpty };
-        // Nothing anywhere: keep three equal columns rather than three thin strips.
-        if (newEmpty && inProgressEmpty && doneEmpty) empty = new[] { false, false, false };
-        var filledCount = empty.Count(isEmpty => !isEmpty);
-        var collapsedTotal = (3 - filledCount) * TaskColumnCollapsedWidth;
-        var filledWidth = Math.Max(TaskColumnMinWidth, (width - 2 * TaskColumnGap - collapsedTotal) / filledCount);
-        var lastFilled = Array.LastIndexOf(empty, false);
-
-        var columns = new Rectangle[3];
-        var x = 0;
-        for (var columnIndex = 0; columnIndex < 3; columnIndex++)
-        {
-            var columnWidth = empty[columnIndex] ? TaskColumnCollapsedWidth : filledWidth;
-            columns[columnIndex] = new Rectangle(x, 0, columnWidth, height);
-            x += columnWidth + TaskColumnGap;
-        }
-        var overflow = width - columns[2].Right;
-        if (overflow > 0)
-        {
-            // Rounding left a few pixels: give them to the last non-empty column and shift what follows.
-            columns[lastFilled].Width += overflow;
-            for (var columnIndex = lastFilled + 1; columnIndex < 3; columnIndex++) columns[columnIndex].X += overflow;
-        }
-        return (columns[0], columns[1], columns[2]);
     }
 
     internal static bool StartMaximized(AppSettings settings) => settings.WindowMaximized ?? true;

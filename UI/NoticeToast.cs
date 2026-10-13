@@ -5,7 +5,7 @@ namespace NoisLogTray;
 
 // A small rounded notice shown under the header bell, then hidden after a few seconds
 // (longer for errors). A sticky notice stays until replaced or hidden - used while an
-// action runs. Click to dismiss early.
+// action runs. A click hides it and opens the notice's target, if it has one.
 internal sealed class NoticeToast : Control
 {
     private static readonly int Radius = UiScale.S(8);
@@ -20,6 +20,7 @@ internal sealed class NoticeToast : Control
 
     private readonly System.Windows.Forms.Timer _timer = new();
     private NoticeKind _kind;
+    private Action? _open;
 
     internal bool IsSticky { get; private set; }
 
@@ -52,9 +53,10 @@ internal sealed class NoticeToast : Control
         _ => Theme.Accent,
     };
 
-    internal void ShowNotice(string message, NoticeKind kind, bool sticky = false)
+    internal void ShowNotice(string message, NoticeKind kind, bool sticky = false, Action? open = null)
     {
         _kind = kind;
+        _open = open;
         IsSticky = sticky;
         Text = message;
         AccessibleName = message;
@@ -83,13 +85,21 @@ internal sealed class NoticeToast : Control
     {
         _timer.Stop();
         IsSticky = false;
+        _open = null;
         Visible = false;
     }
 
     protected override void OnClick(EventArgs e)
     {
         base.OnClick(e);
+        OpenTarget();
+    }
+
+    internal void OpenTarget()
+    {
+        var open = _open;
         HideNotice();
+        open?.Invoke();
     }
 
     protected override void OnPaint(PaintEventArgs e)

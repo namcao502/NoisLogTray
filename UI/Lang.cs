@@ -24,7 +24,9 @@ internal static class Lang
         : date.ToString("dddd, MMMM d, yyyy", EnglishCulture);
 
     // "Oct 1" / "01/10".
-    internal static string ShortDate(DateTime date) => Vietnamese
+    internal static string ShortDate(DateTime date) => ShortDate(date, Vietnamese);
+
+    internal static string ShortDate(DateTime date, bool vietnamese) => vietnamese
         ? date.ToString("dd/MM", VietnameseCulture)
         : date.ToString("MMM d", EnglishCulture);
 
