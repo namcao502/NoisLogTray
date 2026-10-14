@@ -38,8 +38,9 @@ internal sealed class LogPage : UserControl, IShellPage
         Color.FromArgb(180, 83, 9),     // amber
     };
 
-    // Logical (100%) px, since ShellLayout's column widths are built from it; scale before use.
-    internal const int CardW = 560;
+    // Logical (100%) px, since ShellLayout's column widths are built from it; scale before use. As narrow as the week card's
+    // header and the New entry row allow, so the board beside it gets the rest.
+    internal const int CardW = 460;
 
     // One height for every button and input; widths vary by role (the primary button is
     // widest, card-header toolbar buttons share ToolbarBtnW). Neighbours sit 8px apart.
@@ -49,7 +50,7 @@ internal sealed class LogPage : UserControl, IShellPage
     private static readonly int ToolbarY = UiScale.S(7);   // card-header toolbar, centred on the section title
     private static readonly int CardBodyY = UiScale.S(44); // first content row under a card header
     private static readonly int CardPad = UiScale.S(16);   // a card's inner left/right padding
-    private static readonly int InnerW = UiScale.S(528); // CardW - 2*16
+    private static readonly int InnerW = UiScale.S(CardW - 32);
     // Fixed height: a date header + 3 (editable, tallest) ticket rows + list padding;
     // longer lists scroll internally.
     private const int WillLogHostHLogical = 20 + 3 * 26 + 8;
@@ -196,7 +197,7 @@ internal sealed class LogPage : UserControl, IShellPage
         // Cards and heights are stored above so the OnSizeChanged this Size triggers reproduces the built
         // bounds (LayoutCards takes the overflow off again); anchoring (below) must come after it.
         // No MinimumSize: the Work page sizes the column, and a short one scrolls.
-        Size = new Size(UiScale.S(600) + ScrollBarOverflow, UiScale.S(builtH));
+        Size = new Size(UiScale.S(CardW + 40) + ScrollBarOverflow, UiScale.S(builtH));
         Controls.Add(_body);
         ThemedScrollBar.Attach(_body);
 
@@ -355,14 +356,14 @@ internal sealed class LogPage : UserControl, IShellPage
         card.Controls.Add(SectionLabel("NEW ENTRY", "NHẬP MỚI", 16, 14));
 
         card.Controls.Add(SectionLabel("DATE", "NGÀY", 16, 40));
-        card.Controls.Add(SectionLabel("TICKET", "TICKET", 214, 40));
+        card.Controls.Add(SectionLabel("TICKET", "TICKET", 164, 40));
 
         var fieldY = UiScale.S(58);
         _date.Location = new Point(CardPad, fieldY);
-        _date.Size = new Size(UiScale.S(190), BtnH);
+        _date.Size = new Size(UiScale.S(140), BtnH);
         _date.ValueChanged += (_, _) => { UpdateWillLog(); VerifyTicketsAsync(); };
 
-        var ticketHost = new RoundedHost { Location = new Point(UiScale.S(214), fieldY), Size = new Size(UiScale.S(262), BtnH) };
+        var ticketHost = new RoundedHost { Location = new Point(UiScale.S(164), fieldY), Size = new Size(UiScale.S(212), BtnH) };
         _tickets.BorderStyle = BorderStyle.None;
         _tickets.Font = TicketsFont;
         _tickets.BackColor = Theme.InputBg;
@@ -388,7 +389,7 @@ internal sealed class LogPage : UserControl, IShellPage
         _tickets.SetBounds(UiScale.S(10), (ticketHost.Height - ticketH) / 2, ticketHost.Width - UiScale.S(20), ticketH);
         ticketHost.Controls.Add(_tickets);
 
-        var clearX = ticketHost.Right + BtnGap; // 476 + 8 at 100%
+        var clearX = ticketHost.Right + BtnGap; // 376 + 8 at 100%
         _clearBtn.Size = new Size(CardPad + InnerW - clearX, BtnH); // fills to the card edge
         _clearBtn.Location = new Point(clearX, fieldY);
         _clearBtn.Click += (_, _) => _tickets.Text = string.Empty;

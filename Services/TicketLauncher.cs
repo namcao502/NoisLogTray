@@ -39,10 +39,11 @@ internal static class TicketLauncher
         return string.Equals(transcriptDirectory, GetClaudeProjectDirectoryName(folderPath), StringComparison.OrdinalIgnoreCase);
     }
 
-    // Claude Code stores sessions under ~/.claude/projects/<path with non-alphanumerics replaced by '-'>.
+    // Claude Code stores sessions under ~/.claude/projects/<path with non-alphanumerics replaced by '-'>. Its working
+    // directory has no trailing separator, so a typed DEV_REPO_PATH ending in '\' must not add a '-'.
     internal static string GetClaudeProjectDirectoryName(string folderPath)
     {
-        return Regex.Replace(folderPath, "[^a-zA-Z0-9]", "-");
+        return Regex.Replace(Path.TrimEndingDirectorySeparator(folderPath), "[^a-zA-Z0-9]", "-");
     }
 
     // Stripped from what we launch (VS Code, the embedded claude): inherited from a Claude Code session, they make a

@@ -54,7 +54,7 @@ public class TasksPageTests
     }
 
     [Fact]
-    public void AttentionCount_CountsReadyToTestAndJiraDone()
+    public void AttentionKeys_NameEachTicketAndWhyItWaits()
     {
         var inProgress = new[]
         {
@@ -69,7 +69,20 @@ public class TasksPageTests
         };
         var devPrMergedKeys = new HashSet<string> { "MDP-1", "MDP-4" };
 
-        Assert.Equal(3, TasksPage.AttentionCount(inProgress, done, devPrMergedKeys));
+        Assert.Equal(new[] { "MDP-1|ready-to-test", "MDP-2|done-in-jira", "MDP-4|ready-to-test" },
+            TasksPage.AttentionKeys(inProgress, done, devPrMergedKeys));
+    }
+
+    [Fact]
+    public void AttentionKeys_ChangeWhenATicketWaitsForAnotherReason()
+    {
+        var doneInJira = new JiraTicket("MDP-1", "Summary", null, null, Status: "QA Confirmed", StatusCategory: "done");
+        var readyToTest = new JiraTicket("MDP-1", "Summary", null, null, Status: "Deployed to Dev");
+
+        var before = TasksPage.AttentionKeys(new[] { doneInJira }, Array.Empty<JiraTicket>(), new HashSet<string>());
+        var after = TasksPage.AttentionKeys(Array.Empty<JiraTicket>(), new[] { readyToTest }, new HashSet<string> { "MDP-1" });
+
+        Assert.NotEqual(before, after);
     }
 
     private static JiraTicket Ticket(string status) => new("MDP-1", "Summary", null, null, Status: status);

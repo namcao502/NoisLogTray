@@ -14,8 +14,6 @@ internal static class Icons
     internal const string Settings = "\uF6A9";
     internal const string Navigation = "\uF560";
     internal const string Alert = "\uF114";
-    internal const string Sunny = "\uF8A1";
-    internal const string Moon = "\uF87D";
     internal const string Minimize = "\uEBD0";
     internal const string Maximize = "\uE7EB";
     internal const string Restore = "\uEB96";
@@ -34,6 +32,11 @@ internal static class Icons
     internal const string Add = "\uF109";
     internal const string Checkmark = "\uF294";
     internal const string WindowConsole = "\uEE6F";
+    internal const string Comment = "\uF2FF";
+    internal const string Clock = "\uF2DD";
+    internal const string CalendarLtr = "\uE24E";
+    internal const string Broom = "\uF201";
+    internal const string Beaker = "\uF1D7";
 
     internal const string BoardFilled = "\uE167";
     internal const string TaskListFilled = "\uEC97";

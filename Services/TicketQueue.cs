@@ -12,7 +12,8 @@ internal static class TicketQueue
     private static readonly Regex TicketPattern = new(@"^MDP-\d+$", RegexOptions.Compiled);
     private static readonly Regex DatePattern = new(@"^\d{4}-\d{2}-\d{2}$", RegexOptions.Compiled);
     private static readonly object Gate = new();
-    private static readonly TimeOnly HrmTodayOpensAt = new(18, 0);
+    // HRM rejects a stop time in the future, so today's hours log only from here on.
+    internal static readonly TimeOnly HrmTodayOpensAt = new(18, 0);
 
     internal static IReadOnlyList<QueueEntry> Read(string? path = null)
     {
@@ -88,17 +89,27 @@ internal static class TicketQueue
         return new QueueEntry(existing.Date, mergedTickets, mergedMinutes);
     }
 
+    // Sanitize drops non-MDP keys on read, so they would silently vanish from the queue.
+    internal static bool CanQueue(string ticket) => TicketPattern.IsMatch(ticket);
+
+    // Why today takes no new ticket whatever the queue holds (Weekend, TooLate), or null while it still does.
+    internal static QueueAddResult? TodayRefusal(DateTimeOffset nowHcm, TimeOnly logTime)
+    {
+        // An even-split weekend entry would log a full HRM day at the next drain.
+        if (nowHcm.DayOfWeek == DayOfWeek.Saturday || nowHcm.DayOfWeek == DayOfWeek.Sunday) return QueueAddResult.Weekend;
+        // Today can be drained from min(18:00, LOG_TIME); a ticket merged mid-drain would survive alone and overwrite the cell.
+        if (TimeOnly.FromDateTime(nowHcm.DateTime) >= (logTime < HrmTodayOpensAt ? logTime : HrmTodayOpensAt)) return QueueAddResult.TooLate;
+        return null;
+    }
+
     // Queue a just-Started ticket for today under the lock. Refuses whenever the drain could
     // overwrite the TSC cell with a partial list (see the per-rule comments).
     internal static QueueAddResult AddStartedTicket(string ticket, DateTimeOffset nowHcm, TimeOnly logTime,
         bool isTodayWritten, string? path = null)
     {
-        // Sanitize drops non-MDP keys on read, so they would silently vanish from the queue.
-        if (!TicketPattern.IsMatch(ticket)) return QueueAddResult.Unsupported;
-        // An even-split weekend entry would log a full HRM day at the next drain.
-        if (nowHcm.DayOfWeek == DayOfWeek.Saturday || nowHcm.DayOfWeek == DayOfWeek.Sunday) return QueueAddResult.Weekend;
-        // Today can be drained from min(18:00, LOG_TIME); a ticket merged mid-drain would survive alone and overwrite the cell.
-        if (TimeOnly.FromDateTime(nowHcm.DateTime) >= (logTime < HrmTodayOpensAt ? logTime : HrmTodayOpensAt)) return QueueAddResult.TooLate;
+        if (!CanQueue(ticket)) return QueueAddResult.Unsupported;
+        var refusal = TodayRefusal(nowHcm, logTime);
+        if (refusal != null) return refusal.Value;
         var date = Hcm.ApiDate(DateOnly.FromDateTime(nowHcm.DateTime));
         var queuePath = path ?? AppPaths.QueuePath;
         lock (Gate)

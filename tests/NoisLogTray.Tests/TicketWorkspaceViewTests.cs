@@ -13,6 +13,22 @@ public class TicketWorkspaceViewTests
         tickets.ToDictionary(ticket => ticket.Key);
 
     [Fact]
+    public void FactCells_GivesFiveTitledCells_WithTheTableColors()
+    {
+        var overdue = new JiraTicket("MDP-1", "S", "2020-01-01", null, 1, "QA Confirmed", StatusCategory: "done");
+
+        var facts = TicketWorkspaceView.FactCells(overdue, TicketSection.InProgress);
+
+        Assert.Equal(new[] { TaskTableColumn.Status, TaskTableColumn.Due, TaskTableColumn.Eta, TaskTableColumn.Priority, TaskTableColumn.Logged },
+            facts.Select(fc => fc.Cell.Column));
+        Assert.All(facts, fc => Assert.False(string.IsNullOrEmpty(fc.Title)));
+        Assert.Equal(TaskRow.Orange, facts[0].Cell.Color);
+        Assert.NotNull(facts[0].Cell.ToolTip); // Done in Jira, still In progress here
+        Assert.Equal(TaskRow.EmptyCell, facts[2].Cell.Text);
+        Assert.Equal(TaskRow.Red, facts[3].Cell.Color);
+    }
+
+    [Fact]
     public void KeyRow_PutsTheFactsRightAfterAShortSummary()
     {
         Assert.Equal((300, true), TicketWorkspaceView.KeyRow(available: 900, summaryTextWidth: 300, factsWidth: 350, minSummaryWidth: 120, gap: 8));

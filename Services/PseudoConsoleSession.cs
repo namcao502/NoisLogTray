@@ -21,6 +21,8 @@ internal sealed class PseudoConsoleSession : IDisposable
         && File.Exists(Path.Combine(AppContext.BaseDirectory, "conpty.dll"))
         && File.Exists(Path.Combine(AppContext.BaseDirectory, "x64", "OpenConsole.exe"));
 
+    // Guards _pseudoConsole once started: the child's exit closes it on a pool thread while the UI may be resizing it.
+    private readonly object _consoleLock = new();
     private IntPtr _pseudoConsole;
     private IntPtr _attributeList;
     private SafeFileHandle? _inputWrite;
@@ -102,10 +104,14 @@ internal sealed class PseudoConsoleSession : IDisposable
     // Once, from whichever comes first: the child's exit or Dispose.
     private void CloseConsole()
     {
-        var pseudoConsole = Interlocked.Exchange(ref _pseudoConsole, IntPtr.Zero);
-        if (pseudoConsole == IntPtr.Zero) return;
-        if (UsesBundledConpty) ConptyClosePseudoConsole(pseudoConsole);
-        else ClosePseudoConsole(pseudoConsole);
+        lock (_consoleLock)
+        {
+            var pseudoConsole = _pseudoConsole;
+            if (pseudoConsole == IntPtr.Zero) return;
+            _pseudoConsole = IntPtr.Zero;
+            if (UsesBundledConpty) ConptyClosePseudoConsole(pseudoConsole);
+            else ClosePseudoConsole(pseudoConsole);
+        }
     }
 
     // The tray's environment minus the variables that would make claude think it runs inside another Claude Code
@@ -139,10 +145,14 @@ internal sealed class PseudoConsoleSession : IDisposable
 
     internal void Resize(short columns, short rows)
     {
-        var pseudoConsole = _pseudoConsole;
-        if (_disposed || pseudoConsole == IntPtr.Zero || columns <= 0 || rows <= 0) return;
-        if (UsesBundledConpty) ConptyResizePseudoConsole(pseudoConsole, new Coord(columns, rows));
-        else ResizePseudoConsole(pseudoConsole, new Coord(columns, rows));
+        if (_disposed || columns <= 0 || rows <= 0) return;
+        // Held across the call: a close cannot free the handle in between (output is drained on its own thread).
+        lock (_consoleLock)
+        {
+            if (_pseudoConsole == IntPtr.Zero) return;
+            if (UsesBundledConpty) ConptyResizePseudoConsole(_pseudoConsole, new Coord(columns, rows));
+            else ResizePseudoConsole(_pseudoConsole, new Coord(columns, rows));
+        }
     }
 
     private void ReadLoop()

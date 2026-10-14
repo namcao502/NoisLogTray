@@ -12,6 +12,8 @@ internal static class AppPaths
 
     internal static string TscWrittenPath => Path.Combine(DataDirectory, "tsc-written.json");
 
+    internal static string JobRunsPath => Path.Combine(DataDirectory, "job-runs.json");
+
     internal static string SettingsPath => Path.Combine(DataDirectory, "settings.json");
 
     // Legacy per-user config file. Config now lives in settings.json; on load,

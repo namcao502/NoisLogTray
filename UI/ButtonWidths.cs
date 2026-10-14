@@ -14,12 +14,14 @@ internal static class ButtonWidths
         // "→ In entry" for the "+ Log" button and its checkmark.
         "Queue", "Queued", "Đã queue", "Open", "Mở", "Start", "Bắt đầu", "Done", "Xong", "→ Done", "→ Xong",
         "Restore", "Khôi phục", "Seen", "Đã xem", "→ Log", "→ In entry", "→ Đã thêm",
+        "View PR", "Xem PR", "Clean up", "Dọn dẹp", "Log",
     };
 
     private static readonly string[] ToolbarLabels =
     {
         "Log queue now", "Log queue ngay", "Log cả hàng đợi", "Clear queue", "Xóa hàng đợi",
         "Refresh", "Làm mới", "Check", "Check now", "Kiểm tra", "Add", "Thêm",
+        "Re-check", "Kiểm tra lại", "All tickets", "Tất cả ticket",
     };
 
     private static int _actionWidth;
@@ -38,7 +40,7 @@ internal static class ButtonWidths
         return _readyToTestWidth;
     }
 
-    // Card-header toolbar buttons (Log queue now, Refresh, Check, Add, ...).
+    // Card-header toolbar buttons (Log queue now, Refresh, Check, Add, All tickets, the Dashboard's Re-check, ...).
     internal static int ToolbarWidth(Font font)
     {
         if (_toolbarWidth == 0) _toolbarWidth = ToolbarLabels.Max(label => TextRenderer.MeasureText(label, font).Width) + UiScale.S(24);

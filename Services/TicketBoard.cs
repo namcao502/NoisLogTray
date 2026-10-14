@@ -69,6 +69,47 @@ internal sealed class TicketBoard
 
     // Moved to Dismissed rather than dropped so a mis-click can be undone; the key
     // stays in seen, so a poll never re-adds it.
+    // Done -> In progress, for a ticket that needs more work; Open then recreates its worktree if it was removed.
+    internal void Reopen(string ticketKey)
+    {
+        var done = _ticketStore.LoadDone();
+        if (!done.Remove(ticketKey, out var ticket))
+        {
+            return;
+        }
+
+        _ticketStore.SaveDone(done);
+
+        var started = _ticketStore.LoadStarted();
+        started[ticketKey] = ticket;
+        _ticketStore.SaveStarted(started);
+    }
+
+    // Done tickets Jira sent back for more work (JiraStatusFlow.IsSentBack) return to In progress with their live details.
+    // Runs before UpdateTicketDetails, which would overwrite the stored status the comparison needs.
+    internal List<JiraTicket> ReopenSentBack(Dictionary<string, JiraTicket> jiraTickets)
+    {
+        var done = _ticketStore.LoadDone();
+        var sentBackTickets = done
+            .Where(kv => jiraTickets.TryGetValue(kv.Key, out var jt) && JiraStatusFlow.IsSentBack(kv.Value.Status, jt.Status))
+            .Select(kv => jiraTickets[kv.Key])
+            .ToList();
+        if (sentBackTickets.Count == 0)
+        {
+            return sentBackTickets;
+        }
+
+        var started = _ticketStore.LoadStarted();
+        foreach (var sentBackTicket in sentBackTickets)
+        {
+            done.Remove(sentBackTicket.Key);
+            started[sentBackTicket.Key] = sentBackTicket;
+        }
+        _ticketStore.SaveDone(done);
+        _ticketStore.SaveStarted(started);
+        return sentBackTickets;
+    }
+
     internal void Dismiss(string ticketKey)
     {
         var dismissed = _ticketStore.LoadDismissed();

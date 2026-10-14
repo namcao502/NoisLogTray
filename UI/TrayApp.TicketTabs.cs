@@ -35,61 +35,100 @@ internal sealed partial class TrayApp
         }
         else
         {
-            SetLaunchStage(ticketKey, StartStage.Fetching);
-            using var busyWork = BusyWork.Shared.Begin(Lang.T($"Creating the {ticketKey} worktree...", $"Đang tạo worktree {ticketKey}..."));
-            // Created on the UI thread so reports come back here; a report after the finally is ignored.
-            var progress = new Progress<StartStage>(stage =>
+            ready = await CreateWorktreeAsync(ticketKey);
+            if (ready)
             {
-                if (_launchStages.ContainsKey(ticketKey)) SetLaunchStage(ticketKey, stage);
-            });
-            try
-            {
-                ready = await Task.Run(() => WorktreeService.TryCreate(ticketKey, repoPath, worktreePath, progress));
-                if (ready)
-                    _shipPending.Add(ticketKey);
-                else
-                    Notify(Lang.T($"{ticketKey}: worktree failed (see log).", $"{ticketKey}: tạo worktree lỗi (xem log)."), ToolTipIcon.Warning);
-            }
-            catch (Exception e)
-            {
-                AppLogger.Error($"[tasks] Start {ticketKey} failed: {e}");
-                Notify(Lang.T($"{ticketKey}: start failed (see log).", $"{ticketKey}: Start lỗi (xem log)."), ToolTipIcon.Warning);
-            }
-            finally
-            {
-                SetLaunchStage(ticketKey, null);
+                _shipPending.Add(ticketKey);
             }
         }
 
         _ticketBoard.Start(ticketKey);
         RefreshTicketViews();
         if (ready) OpenTicketTab(ticketKey);
-        QueueTicketForToday(ticketKey);
+        QueueTicketsForToday(new[] { ticketKey });
+    }
+
+    // True when the worktree is ready (a main that would not merge still counts). The first SetLaunchStage runs before
+    // any await, so callers that checked _launchStages stay single-flight.
+    private async Task<bool> CreateWorktreeAsync(string ticketKey)
+    {
+        var repoPath = DevRepoPath;
+        var worktreePath = TicketWorktrees.BackendPath(repoPath, ticketKey);
+        SetLaunchStage(ticketKey, StartStage.Fetching);
+        using var busyWork = BusyWork.Shared.Begin(Lang.T($"Creating the {ticketKey} worktree...", $"Đang tạo worktree {ticketKey}..."));
+        // Created on the UI thread so reports come back here; a report after the finally is ignored.
+        var progress = new Progress<StartStage>(stage =>
+        {
+            if (_launchStages.ContainsKey(ticketKey))
+            {
+                SetLaunchStage(ticketKey, stage);
+            }
+        });
+        try
+        {
+            var createResult = await Task.Run(() => WorktreeService.Create(ticketKey, repoPath, worktreePath, progress));
+            if (createResult == WorktreeCreateResult.Failed)
+            {
+                Notify(Lang.T($"{ticketKey}: worktree failed (see log).", $"{ticketKey}: tạo worktree lỗi (xem log)."), ToolTipIcon.Warning);
+                return false;
+            }
+            if (createResult == WorktreeCreateResult.MainNotMerged)
+            {
+                Notify(Lang.T($"{ticketKey}: could not merge main (see log); the worktree is on its old branch.",
+                    $"{ticketKey}: chưa merge được main (xem log), worktree đang ở nhánh cũ."), ToolTipIcon.Warning);
+            }
+            return true;
+        }
+        catch (Exception exception)
+        {
+            // Start and Open both create worktrees here.
+            AppLogger.Error($"[tasks] creating the {ticketKey} worktree failed: {exception}");
+            Notify(Lang.T($"{ticketKey}: worktree failed (see log).", $"{ticketKey}: tạo worktree lỗi (xem log)."), ToolTipIcon.Warning);
+            return false;
+        }
+        finally
+        {
+            SetLaunchStage(ticketKey, null);
+        }
     }
 
     // Open: the ticket's workspace tab (Claude session and changes); no board or queue change.
-    // Not async, but keeps the event's Task type.
-    private Task OpenTicketAsync(string ticketKey)
+    // A missing worktree is recreated after a confirm; it is not added to _shipPending, so the tab resumes the old transcript.
+    private async Task OpenTicketAsync(string ticketKey)
     {
         // Start may still be creating the worktree: opening the tab now would start Claude too early.
-        if (_launchStages.ContainsKey(ticketKey)) return Task.CompletedTask;
+        if (_launchStages.ContainsKey(ticketKey))
+        {
+            return;
+        }
         if (!Directory.Exists(DevRepoPath))
         {
             NotifyRepoNotFound(DevRepoPath);
-            return Task.CompletedTask;
+            return;
         }
         if (!Directory.Exists(BackendWorktreePath(ticketKey)))
         {
-            NotifyNoWorktree(ticketKey);
-            return Task.CompletedTask;
+            var recreateConfirmed = ConfirmDialog.Ask(_shell, Lang.T($"Recreate the {ticketKey} worktree?", $"Tạo lại worktree {ticketKey}?"),
+                Lang.T($"{ticketKey} has no worktree at {BackendWorktreePath(ticketKey)}. Check its branch out again and merge origin/main into it?",
+                    $"{ticketKey} chưa có worktree tại {BackendWorktreePath(ticketKey)}. Checkout lại nhánh của nó và merge origin/main vào?"),
+                Lang.T("Recreate", "Tạo lại"));
+            // The dialog pumps messages, so a Start click may have begun (or even finished) creating it meanwhile.
+            if (!recreateConfirmed || _launchStages.ContainsKey(ticketKey))
+            {
+                return;
+            }
+            if (!Directory.Exists(BackendWorktreePath(ticketKey)) && !await CreateWorktreeAsync(ticketKey))
+            {
+                return;
+            }
         }
 
         OpenTicketTab(ticketKey);
         ClearPrCommentAlert(ticketKey);
-        return Task.CompletedTask;
     }
 
-    // `ship` is dropped only once a session really started, so a failed start keeps it for the next try.
+    // `ship` is dropped only once claude really runs (its first hook, OnClaudeHook), so a claude that fails inside the
+    // PowerShell keeps it for the next try. Without hooks the terminal's start is the best sign there is.
     private ClaudeSessionHost SessionFor(string ticketKey)
     {
         if (_ticketSessions.TryGetValue(ticketKey, out var host)) return host;
@@ -97,7 +136,10 @@ internal sealed partial class TrayApp
             () => _shipPending.Contains(ticketKey) ? $"ship {ticketKey}"
                 : TicketLauncher.GetIdlePrompt(BackendWorktreePath(ticketKey), TicketLauncher.ClaudeProjectsRoot),
             fallBackToProfile: false, settingsFile: HookSettingsFor(ticketKey));
-        host.Started += () => _shipPending.Remove(ticketKey);
+        host.Started += () =>
+        {
+            if (!host.HasHooks) _shipPending.Remove(ticketKey);
+        };
         TrackClaudeSession(ticketKey, host);
         _ticketSessions[ticketKey] = host;
         return host;

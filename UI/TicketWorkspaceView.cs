@@ -19,6 +19,10 @@ internal sealed class TicketWorkspaceView : UserControl
     private static readonly Font SummaryFont = UiScale.Font("Segoe UI", 10F);
     private static readonly Font PrFont = UiScale.Font("Segoe UI", 8.5F);
     private static readonly Font PrRepoFont = UiScale.Font("Segoe UI Semibold", 8.5F, FontStyle.Bold);
+    private static readonly Font FactValueFont = UiScale.Font("Segoe UI", 9F);
+    private static readonly int FactHeight = FactValueFont.Height + UiScale.S(6);
+
+    private static readonly ThemedToolTip FactTip = new();
 
     private readonly string _jiraBaseUrl;
     private readonly Func<IReadOnlyList<TicketWorktree>> _worktrees;
@@ -246,6 +250,37 @@ internal sealed class TicketWorkspaceView : UserControl
         return (Math.Max(0, Math.Min(summaryTextWidth, available)), false);
     }
 
+    // The header's facts: Status, Due, ETA, P and Logged, each with its column title and its table cell.
+    internal static IReadOnlyList<(string Title, TableCell Cell)> FactCells(JiraTicket ticket, TicketSection section)
+    {
+        var facts = new List<(string Title, TableCell Cell)>();
+        foreach (var column in new[] { TaskTableColumn.Status, TaskTableColumn.Due, TaskTableColumn.Eta, TaskTableColumn.Priority, TaskTableColumn.Logged })
+        {
+            var (text, color) = TaskRow.Cell(ticket, section, column);
+            var isDoneInJira = column == TaskTableColumn.Status && section == TicketSection.InProgress && ticket.IsStatusDone;
+            facts.Add((TaskTableHeader.Title(column),
+                new TableCell(column, text, color, isDoneInJira ? Lang.T("Done in Jira - move to Done", "Jira đã Done - chuyển sang Xong") : null)));
+        }
+        return facts;
+    }
+
+    private static Label FactLabel(string text, Font font, Color color, int rightMargin)
+    {
+        var label = new Label
+        {
+            Text = text,
+            Font = font,
+            ForeColor = color,
+            BackColor = Color.Transparent,
+            UseMnemonic = false,
+            AutoSize = false,
+            TextAlign = ContentAlignment.MiddleLeft,
+            Margin = new Padding(0, 0, rightMargin, 0),
+        };
+        label.Size = new Size(label.PreferredWidth, FactHeight);
+        return label;
+    }
+
     // One PR row per repo, in the PRs' own order (BE first, see DashboardDataBuilder.LatestPrs).
     internal static IReadOnlyList<(string RepoName, IReadOnlyList<TicketPr> Prs)> PrGroups(IReadOnlyList<TicketPr> prs) =>
         prs.GroupBy(tp => tp.RepoName).Select(g => (g.Key, (IReadOnlyList<TicketPr>)g.ToList())).ToList();
@@ -264,11 +299,17 @@ internal sealed class TicketWorkspaceView : UserControl
         _summary.Text = _found == null ? Lang.T("(not on the board)", "(không có trên board)") : _found.Value.Ticket.Summary;
         _summary.ForeColor = _found == null ? Theme.TextSecondary : Theme.TextPrimary;
 
+        // Each fact as its title then its value, colored like the board's cells; one height so the pairs line up.
         var facts = new List<Control>();
         if (_found != null)
         {
-            foreach (var (text, color) in TaskRow.Facts(_found.Value.Ticket, _found.Value.Section))
-                facts.Add(TaskRow.Fact(text, color));
+            foreach (var (title, cell) in FactCells(_found.Value.Ticket, _found.Value.Section))
+            {
+                facts.Add(FactLabel(title, TaskTableHeader.TitleFont, Theme.TextSecondary, UiScale.S(4)));
+                var valueLabel = FactLabel(cell.Text, FactValueFont, cell.Color, UiScale.S(14));
+                if (cell.ToolTip != null) FactTip.SetUntilDisposed(valueLabel, cell.ToolTip);
+                facts.Add(valueLabel);
+            }
         }
         ReplaceItems(_facts, facts);
         BuildPrRows();

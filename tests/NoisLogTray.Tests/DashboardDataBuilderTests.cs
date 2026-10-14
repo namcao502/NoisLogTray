@@ -47,8 +47,8 @@ public class DashboardDataBuilderTests
             done: Map(Ticket("MDP-2", status: "Deployed to Dev", category: "done")),
             prs: prs);
 
-        var ready = data.Attention.Where(item => item.Kind == AttentionKind.ReadyToTest).ToList();
-        Assert.Equal(new[] { "MDP-1", "MDP-2" }, ready.Select(item => item.Ticket.Key));
+        var ready = data.TicketTodos.Where(item => item.Kind == TodoKind.ReadyToTest).ToList();
+        Assert.Equal(new[] { "MDP-1", "MDP-2" }, ready.Select(item => item.Ticket!.Key));
         Assert.All(ready, item => Assert.Equal("→ Ready to Test", item.ActionLabel));
     }
 
@@ -59,8 +59,8 @@ public class DashboardDataBuilderTests
             started: Map(Ticket("MDP-1", category: "done")),
             done: Map(Ticket("MDP-2", category: "done")));
 
-        var item = Assert.Single(data.Attention, attention => attention.Kind == AttentionKind.JiraDone);
-        Assert.Equal("MDP-1", item.Ticket.Key);
+        var item = Assert.Single(data.TicketTodos, todo => todo.Kind == TodoKind.JiraDone);
+        Assert.Equal("MDP-1", item.Ticket!.Key);
     }
 
     [Fact]
@@ -70,7 +70,7 @@ public class DashboardDataBuilderTests
             pending: Map(Ticket("MDP-1", "2026-10-01")),
             started: Map(Ticket("MDP-2", "2026-10-01"), Ticket("MDP-3", "2026-10-01", category: "done")));
 
-        var overdue = data.Attention.Where(item => item.Kind == AttentionKind.Overdue).Select(item => item.Ticket.Key);
+        var overdue = data.TicketTodos.Where(item => item.Kind == TodoKind.Overdue).Select(item => item.Ticket!.Key);
         Assert.Equal(new[] { "MDP-2", "MDP-1" }, overdue);
     }
 
@@ -84,10 +84,46 @@ public class DashboardDataBuilderTests
         };
         var data = Build(started: Map(Ticket("MDP-1")), alerts: alerts);
 
-        var item = Assert.Single(data.Attention, attention => attention.Kind == AttentionKind.PrComments);
-        Assert.Equal("MDP-1", item.Ticket.Key);
+        var item = Assert.Single(data.TicketTodos, todo => todo.Kind == TodoKind.PrComments);
+        Assert.Equal("MDP-1", item.Ticket!.Key);
         Assert.Equal(3, item.CommentCount);
         Assert.Equal("http://pr/1", item.PrUrl);
+    }
+
+    [Fact]
+    public void Build_TicketTodos_CarryTheAttentionKinds_AndOverduesSection()
+    {
+        var prs = new Dictionary<string, TrackedPr> { ["MDP-1|dev|5"] = new("completed", 0) };
+        var alerts = new Dictionary<string, PrCommentAlert> { ["MDP-2"] = new("MDP-2", 3, "http://pr/2", Now) };
+        var data = Build(
+            pending: Map(Ticket("MDP-4", "2026-10-01")),
+            started: Map(Ticket("MDP-1", status: "Deployed to Dev"), Ticket("MDP-2"), Ticket("MDP-3", category: "done")),
+            prs: prs, alerts: alerts);
+
+        Assert.Equal(new[] { TodoKind.ReadyToTest, TodoKind.JiraDone, TodoKind.Overdue, TodoKind.PrComments }, data.TicketTodos.Select(ti => ti.Kind));
+        Assert.Equal("→ Ready to Test", data.TicketTodos[0].ActionLabel);
+        Assert.Equal(("MDP-4", TicketSection.New), (data.TicketTodos[2].Ticket!.Key, data.TicketTodos[2].Section));
+        Assert.Equal((3, "http://pr/2"), (data.TicketTodos[3].CommentCount, data.TicketTodos[3].PrUrl));
+    }
+
+    [Fact]
+    public void ShippedKeys_NeedEveryLiveMainPrMerged()
+    {
+        var prs = new Dictionary<string, TrackedPr>
+        {
+            ["MDP-1|main|1"] = new("completed", 0),
+            ["MDP-2|main|2"] = new("completed", 0),
+            ["MDP-2|main|3"] = new("active", 0, "Portal-Angular"),
+            ["MDP-3|main|4"] = new("completed", 0),
+            ["MDP-3|main|5"] = new("abandoned", 0, "Portal-Angular"),
+            ["MDP-4|dev|6"] = new("completed", 0),
+            ["MDP-5|main|7"] = new("abandoned", 0),
+            ["MDP-6|main|8"] = new("completed", 0),
+        };
+        var done = Map(Ticket("MDP-1"), Ticket("MDP-2"), Ticket("MDP-3"), Ticket("MDP-4"), Ticket("MDP-5"));
+
+        // MDP-6 merged too, but is not Done on the board.
+        Assert.Equal(new[] { "MDP-1", "MDP-3" }, DashboardDataBuilder.ShippedKeys(done, prs));
     }
 
     [Fact]
@@ -115,19 +151,20 @@ public class DashboardDataBuilderTests
     }
 
     [Fact]
-    public void PrSummary_OrdersMainFirst()
+    public void Build_GivesEachInProgressTicketItsLatestPrs()
     {
         var prs = new Dictionary<string, TrackedPr>
         {
             ["MDP-1|dev|2"] = new("active", 0),
             ["MDP-1|main|1"] = new("completed", 0),
         };
+        var data = Build(started: Map(Ticket("MDP-1")), prs: prs);
 
-        Assert.Equal("BE main ✓ · dev ●", DashboardDataBuilder.PrSummary("MDP-1", prs));
+        Assert.Equal(DashboardDataBuilder.LatestPrs("MDP-1", prs), data.InProgress.Single().Prs);
     }
 
     [Fact]
-    public void PrSummary_UsesLatestPrPerBranch()
+    public void LatestPrs_UsesLatestPrPerBranch()
     {
         var prs = new Dictionary<string, TrackedPr>
         {
@@ -135,36 +172,23 @@ public class DashboardDataBuilderTests
             ["MDP-1|dev|9"] = new("abandoned", 0),
         };
 
-        Assert.Equal("BE dev ●", DashboardDataBuilder.PrSummary("MDP-1", prs));
+        Assert.Equal(new[] { new TicketPr("Backend-DotNet", "dev", 10, "active", 0) }, DashboardDataBuilder.LatestPrs("MDP-1", prs));
     }
 
     [Fact]
-    public void PrSummary_GroupsBackendThenFrontend()
-    {
-        var prs = new Dictionary<string, TrackedPr>
-        {
-            ["MDP-1|dev|5"] = new("completed", 0, "Portal-Angular"),
-            ["MDP-1|main|1"] = new("completed", 0),
-            ["MDP-1|dev|2"] = new("active", 0, "Backend-DotNet"),
-        };
-
-        Assert.Equal("BE main ✓ · dev ● | FE Portal dev ✓", DashboardDataBuilder.PrSummary("MDP-1", prs));
-    }
-
-    [Fact]
-    public void PrSummary_SkipsLegacyKeys()
+    public void LatestPrs_SkipsLegacyKeys()
     {
         var prs = new Dictionary<string, TrackedPr> { ["MDP-1|dev"] = new("active", 0) };
 
-        Assert.Equal(string.Empty, DashboardDataBuilder.PrSummary("MDP-1", prs));
+        Assert.Empty(DashboardDataBuilder.LatestPrs("MDP-1", prs));
     }
 
     [Fact]
-    public void PrSummary_IgnoresKeyPrefixCollision()
+    public void LatestPrs_IgnoresKeyPrefixCollision()
     {
         var prs = new Dictionary<string, TrackedPr> { ["MDP-12|dev|3"] = new("active", 0) };
 
-        Assert.Equal(string.Empty, DashboardDataBuilder.PrSummary("MDP-1", prs));
+        Assert.Empty(DashboardDataBuilder.LatestPrs("MDP-1", prs));
     }
 
     [Fact]
@@ -192,19 +216,6 @@ public class DashboardDataBuilderTests
                 new TicketPr("Portal-Angular", "dev", 9, "active", 4),
             },
             latest);
-    }
-
-    [Fact]
-    public void PrSummary_NamesEachFrontendApp_WhenTwoShareABranch()
-    {
-        var prs = new Dictionary<string, TrackedPr>
-        {
-            ["MDP-1|dev|5"] = new("completed", 0, "Portal-Angular"),
-            ["MDP-1|dev|8"] = new("active", 0, "ExternalPortal-Angular"),
-            ["MDP-1|main|7"] = new("active", 0, "ExternalPortal-Angular"),
-        };
-
-        Assert.Equal("FE External main ● · dev ● | FE Portal dev ✓", DashboardDataBuilder.PrSummary("MDP-1", prs));
     }
 
     [Theory]

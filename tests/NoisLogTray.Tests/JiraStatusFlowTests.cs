@@ -39,4 +39,17 @@ public class JiraStatusFlowTests
 
         Assert.Equal("→ Deployed to Dev → Ready to Test", label);
     }
+
+    [Theory]
+    [InlineData("Ready to Test", "QA Failed", true)]
+    [InlineData("PR & Code Review", "In Progress", true)]
+    [InlineData("Deployed to Production", "Reopened", true)]
+    [InlineData("In Progress", "In Progress", false)]
+    [InlineData("Selected for Development", "In Progress", false)]
+    [InlineData("PR & Code Review", "Ready to Test", false)]
+    [InlineData(null, "QA Failed", false)]
+    public void IsSentBack_OnlyForAMoveFromReviewOrLaterIntoRework(string? storedStatus, string? liveStatus, bool expected)
+    {
+        Assert.Equal(expected, JiraStatusFlow.IsSentBack(storedStatus, liveStatus));
+    }
 }

@@ -15,7 +15,7 @@ internal sealed record JiraTicket(
     // Statuses before any work is expected to be logged. Anything else
     // (PR & Code Review onward, QA Failed) means work happened. Hold is a
     // parked ticket, not necessarily a worked one.
-    private static readonly string[] PreWorkStatuses = { "Backlog", "Selected for Development", "In Progress", "Hold" };
+    internal static readonly string[] PreWorkStatuses = { "Backlog", "Selected for Development", "In Progress", "Hold" };
 
     // Due today or within this many days counts as due soon.
     private const int DueSoonDays = 2;

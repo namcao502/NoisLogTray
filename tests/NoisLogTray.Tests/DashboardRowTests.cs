@@ -7,46 +7,63 @@ namespace NoisLogTray.Tests;
 [Collection("TicketRowControls")]
 public class DashboardRowTests
 {
-    [Fact]
-    public void Buttons_KeepTheirTint()
-    {
-        using var row = new DashboardRow("MDP-1", "https://x", "S", new[] { ("Due -", Color.Gray) }, "",
-            new (string, Color?, bool, Action, string?)[] { ("Queue", null, true, () => { }, null), ("Open", Theme.Accent, true, () => { }, null) }, 700);
+    private static readonly TaskTableColumn[] Columns =
+        { TaskTableColumn.Key, TaskTableColumn.Summary, TaskTableColumn.Status, TaskTableColumn.Due };
 
-        Assert.Equal(new Color?[] { null, Theme.Accent }, row.Controls.OfType<MacButton>().Select(mb => mb.Tint));
+    private static readonly TableCell[] Cells =
+        { new(TaskTableColumn.Status, "In Progress", Theme.ActionReadyToTest), new(TaskTableColumn.Due, "Oct 1", TaskRow.Red) };
+
+    private static DashboardRow NewRow(IReadOnlyList<(string, Color?, bool, Action, string?)> buttons, bool striped = false) =>
+        new("MDP-1", "https://x", "S", Columns, Cells, buttons, 700, striped);
+
+    private static List<MacButton> MacButtons(DashboardRow row) =>
+        row.Controls[TicketTableRow.ActionsName]!.Controls.OfType<MacButton>().ToList();
+
+    [Fact]
+    public void Buttons_KeepTheirTint_InsideTheHiddenActions()
+    {
+        using var row = NewRow(new (string, Color?, bool, Action, string?)[] { ("Queue", null, true, () => { }, null), ("Open", Theme.Accent, true, () => { }, null) });
+
+        Assert.False(row.ActionsVisible);
+        // Left to right, the order Tab walks them: Open, then Queue at the right edge.
+        Assert.Equal(new Color?[] { Theme.Accent, null }, MacButtons(row).Select(mb => mb.Tint));
+    }
+
+    [Fact]
+    public void Buttons_KeepTheirOwnEnabledState()
+    {
+        using var row = NewRow(new (string, Color?, bool, Action, string?)[] { ("Queued", null, false, () => { }, null), ("Open", Theme.Accent, true, () => { }, null) });
+
+        Assert.Equal(new[] { true, false }, MacButtons(row).Select(mb => mb.Enabled));
     }
 
     [Fact]
     public void Row_Striped_FillsItsBackground_AndItsButtonsBlendIntoIt()
     {
-        using var row = new DashboardRow("MDP-1", "https://x", "S", new[] { ("Due -", Color.Gray) }, "",
-            new (string, Color?, bool, Action, string?)[] { ("Open", Theme.Accent, true, () => { }, null) }, 700, striped: true);
+        using var row = NewRow(new (string, Color?, bool, Action, string?)[] { ("Open", Theme.Accent, true, () => { }, null) }, striped: true);
 
         Assert.Equal(Theme.RowStripe(Theme.CardSurface), row.BackColor);
-        Assert.Equal(row.BackColor, row.Controls.OfType<MacButton>().Single().Surface!());
+        Assert.Equal(row.BackColor, MacButtons(row).Single().Surface!());
     }
 
     [Fact]
-    public void Row_PutsThePrsOnTheirOwnLine()
+    public void Row_IsOneLineHigh_AndDrawsOnlyItsColumns()
     {
-        using var row = new DashboardRow("MDP-1", "https://x", "S", new[] { ("Due -", Color.Gray) }, "BE main ✓",
-            new (string, Color?, bool, Action, string?)[] { ("Open", Theme.Accent, true, () => { }, null) }, 700);
-        var facts = row.Controls.OfType<FlowLayoutPanel>().Single(flp => flp.Name == TaskRow.FactsName);
+        using var temp = new TempDirectory();
+        using var row = NewRow(Array.Empty<(string, Color?, bool, Action, string?)>());
+        using var boardRow = new TaskRow(new JiraTicket("MDP-2", "S", null, null), TicketSection.New, false, "https://x",
+            new TicketBoard(new TicketStore(temp.Path)), (_, _) => { }, _ => { }, _ => { }, false, _ => { }, null, 700);
 
-        Assert.True(row.Controls.OfType<FlowLayoutPanel>().Single(flp => flp.Name == TaskRow.PrTagsName).Top >= facts.Bottom);
+        Assert.Equal(boardRow.Height, row.Height);
+        Assert.DoesNotContain(TaskTableColumn.Eta, TicketTableRow.LayoutFor(700, Columns).Columns.Keys);
+        Assert.Contains("In Progress", row.Controls.OfType<LinkLabel>().Single().AccessibleDescription);
     }
 
     [Fact]
-    public void Row_CentersTheButtonsOnItsHeight_RightOfTheLines()
+    public void Row_ThrowsOnMoreThanTwoButtons()
     {
-        using var row = new DashboardRow("MDP-1", "https://x", "S", new[] { ("Due -", Color.Gray) }, "BE main ✓",
-            new (string, Color?, bool, Action, string?)[] { ("Queue", null, true, () => { }, null), ("Open", Theme.Accent, true, () => { }, null) }, 700);
-        var lines = row.Controls.OfType<FlowLayoutPanel>().ToList();
+        var buttons = Enumerable.Range(0, 3).Select(index => ($"B{index}", (Color?)null, true, (Action)(() => { }), (string?)null)).ToList();
 
-        Assert.All(row.Controls.OfType<MacButton>(), mb =>
-        {
-            Assert.InRange(mb.Top + mb.Height / 2, row.Height / 2 - 1, row.Height / 2 + 1);
-            Assert.All(lines, flp => Assert.True(mb.Left >= flp.Right));
-        });
+        Assert.Throws<ArgumentException>(() => NewRow(buttons));
     }
 }

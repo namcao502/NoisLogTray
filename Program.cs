@@ -3,7 +3,7 @@ namespace NoisLogTray;
 internal static class Program
 {
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
 
@@ -13,12 +13,15 @@ internal static class Program
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
             AppLogger.Error($"Unhandled exception (terminating={e.IsTerminating}): {e.ExceptionObject}");
 
+        AppRebuild.WaitForPreviousInstance(args);
         using var mutex = new Mutex(true, "Global\\NoisLogTray_SingleInstance", out var createdNew);
         if (!createdNew) return;
 
         AppLogger.Info("NoisLogTray started.");
         Theme.Load();
         Lang.Load();
+        TicketCheckInterval.Load();
+        Application.AddMessageFilter(new FocusReleaseFilter());
         Application.Run(new TrayApp());
     }
 }

@@ -16,6 +16,17 @@ public class FilesViewTests
     }
 
     [Fact]
+    public void ListedPath_FindsAClickedPath_InTheListsCasing()
+    {
+        var files = new HashSet<(string Group, string Path)> { ("BE", "UI/FilesView.cs") };
+
+        Assert.Equal("UI/FilesView.cs", FilesView.ListedPath(files, "BE", "UI/FilesView.cs"));
+        Assert.Equal("UI/FilesView.cs", FilesView.ListedPath(files, "BE", "ui/filesview.cs"));
+        Assert.Null(FilesView.ListedPath(files, "FE", "UI/FilesView.cs"));
+        Assert.Null(FilesView.ListedPath(files, "BE", "UI/Other.cs"));
+    }
+
+    [Fact]
     public void RootsFor_PutsTheDocsFolderAndEachWorktreeCopyOfIt_BeforeTheWorktrees()
     {
         var worktrees = new[]

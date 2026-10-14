@@ -27,7 +27,6 @@ internal sealed partial class TrayApp : ApplicationContext
     private TasksPage? _tasksPage; // the Work page's board; null when Tasks is disabled this session
     private WorkPage? _workPage;
     private ClaudePage? _claudePage;
-    private ClaudeSessionHost? _claudeHost;
     private TicketWorkspacePage? _ticketPage;
     private SettingsPage? _settingsPage;
     // All three stay null when the TaskWatcher state import failed: Tasks is disabled this session.
@@ -120,15 +119,27 @@ internal sealed partial class TrayApp : ApplicationContext
             _ticketBoard = null;
             _ticketPoller = null;
         }
-        _tasksTimer = new System.Windows.Forms.Timer { Interval = (int)TimeSpan.FromMinutes(5).TotalMilliseconds };
-        _tasksTimer.Tick += (_, _) => _ = CheckTicketsAsync();
+        _tasksTimer = new System.Windows.Forms.Timer { Interval = (int)TimeSpan.FromMinutes(TicketCheckInterval.Minutes).TotalMilliseconds };
+        _tasksTimer.Tick += (_, _) =>
+        {
+            _ticketTimerArmedAt = DateTime.Now; // a WinForms timer counts down again from each tick
+            _ = CheckTicketsAsync();
+        };
         if (_ticketPoller != null) _tasksTimer.Start();
+        // Settings' pills change it on the UI thread; a new Interval also restarts the countdown.
+        TicketCheckInterval.Changed += () =>
+        {
+            _tasksTimer.Interval = (int)TimeSpan.FromMinutes(TicketCheckInterval.Minutes).TotalMilliseconds;
+            _ticketTimerArmedAt = DateTime.Now;
+            Log($"[tickets] checking Jira and PRs every {TicketCheckInterval.Minutes} min");
+        };
 
         _scheduler = new SixPmScheduler(config?.LogTime ?? AppConfig.DefaultLogTime, OnScheduledFireAsync, Log);
         _scheduler.Start();
         _ = CheckTicketsAsync();
         CatchUpIfDue();
         _ = CheckForUpdateAsync(); // fire-and-forget; silent on any failure
+        StartKnowledgeScanWatch();
 
         // TSC logging needs the system Chrome; warn once up front rather than at 6 PM.
         if (_service != null && !TscTokenSniffer.ChromeInstalled())
@@ -201,28 +212,6 @@ internal sealed partial class TrayApp : ApplicationContext
         return (teams, string.IsNullOrEmpty(pat) ? null : new AzureDevOpsClient(pat));
     }
 
-    // If the app was not running at 18:00 (asleep, off, or launched later), a queue
-    // that is already due would otherwise wait until the next 18:00. Drain once on
-    // startup when something is loggable now: a past-dated entry (loggable anytime),
-    // or a today entry once it is 18:00 or later (HRM rejects future stop times).
-    private void CatchUpIfDue()
-    {
-        if (_service == null) return;
-
-        var now = Hcm.Now();
-        var today = DateOnly.FromDateTime(now.DateTime);
-        var due = false;
-        foreach (var entry in TicketQueue.Read())
-        {
-            if (!DateOnly.TryParseExact(entry.Date, "yyyy-MM-dd", out var date)) continue;
-            if (date < today || (date == today && now.Hour >= 18)) { due = true; break; }
-        }
-
-        if (!due) return;
-        Log("[scheduler] Catch-up: queue has due entries; draining now.");
-        _ = DrainAsync(fromUser: false);
-    }
-
     private void ShowShell(ShellPage page)
     {
         if (_shell == null || _shell.IsDisposed)
@@ -231,23 +220,36 @@ internal sealed partial class TrayApp : ApplicationContext
             _shell = new ShellForm();
             // Bound to this shell: an action still running after a Settings rebuild must not touch the new one.
             var shell = _shell;
-            _dashboardPage = new DashboardPage(_service, _ticketStore, _service?.JiraBaseUrl ?? AppConfig.DefaultJiraBaseUrl);
+            _dashboardPage = new DashboardPage(_service, _ticketStore, _service?.JiraBaseUrl ?? AppConfig.DefaultJiraBaseUrl,
+                () => DevRepoPath, () => _openTickets);
             _shell.AddPage(ShellPage.Dashboard, _dashboardPage);
             _dashboardPage.LogQueueRequested += () => _ = DrainAsync(fromUser: true);
             _dashboardPage.CheckRequested += () => _ = CheckTicketsAsync();
             _dashboardPage.StartRequested += StartTicketAsync;
             _dashboardPage.OpenRequested += OpenTicketAsync;
             _dashboardPage.ReadyToTestRequested += MoveToReadyToTestAsync;
-            _dashboardPage.QueueTicketRequested += QueueTicketForToday;
+            _dashboardPage.QueueTicketsRequested += QueueTicketsForToday;
             _dashboardPage.MarkDoneRequested += MarkTicketDone;
             _dashboardPage.CommentsSeen += ClearPrCommentAlert;
             _dashboardPage.PageRequested += ShowShell;
+            _dashboardPage.LogDayRequested += date =>
+            {
+                ShowShell(ShellPage.Work);
+                _logPage?.PrepareForDate(date);
+            };
+            _dashboardPage.ClaudeSessionRequested += sessionName =>
+            {
+                if (TerminalTabs.IsTerminalSession(sessionName)) ShowTerminalTab(sessionName);
+                else ShowTicketTab(sessionName);
+            };
+            _dashboardPage.CleanupRequested += OpenWorktreeCleanup;
             _dashboardPage.SetChecking(_checkingTickets, _lastTicketCheck);
             _dashboardPage.SetDraining(Volatile.Read(ref _draining) != 0); // a Settings rebuild can land mid-drain
             foreach (var (ticketKey, stage) in _launchStages) _dashboardPage.SetTicketBusy(ticketKey, stage);
             _dashboardPage.Reload();
             _logPage = new LogPage(_service, _configError);
             _shell.PageViewed += AcknowledgeSeenWaits;
+            _shell.PageViewed += AcknowledgeWorkAttention;
             if (_ticketStore != null && _ticketBoard != null)
             {
                 _tasksPage = new TasksPage(_ticketStore, _ticketBoard, () => _service);
@@ -261,7 +263,7 @@ internal sealed partial class TrayApp : ApplicationContext
                     _dashboardPage?.Reload();
                     _ticketPage?.Reload();
                 };
-                _tasksPage.AttentionChanged += count => shell.SetBadge(ShellPage.Work, count);
+                _tasksPage.AttentionChanged += OnWorkAttentionChanged;
                 _tasksPage.StatusRaised += (message, kind) =>
                     Notify(message, kind == NoticeKind.Error ? ToolTipIcon.Warning : ToolTipIcon.Info, kind);
             }
@@ -283,20 +285,24 @@ internal sealed partial class TrayApp : ApplicationContext
             _ticketPage.SelectionChanged += ticketKey => { _selectedTicket = ticketKey; AcknowledgeSeenWaits(); };
             _ticketPage.PageRequested += ShowShell;
             _ticketPage.SetTabs(_openTickets, _selectedTicket); // before the page is shown, so HasOpenTabs is right for Esc
-            // The session lives in TrayApp so a rebuilt window (Settings save) reattaches instead of killing it.
-            if (_claudeHost == null)
-            {
-                _claudeHost = CreateClaudeHost();
-                TrackClaudeSession(ClaudeAttention.GeneralSessionName, _claudeHost);
-            }
-            _claudePage = new ClaudePage(_claudeHost, ClaudeFolderChoices);
+            // The sessions live in TrayApp so a rebuilt window (Settings save) reattaches instead of killing them.
+            _claudePage = new ClaudePage(TerminalHostFor, ClaudeFolderChoices);
             _shell.AddPage(ShellPage.Claude, _claudePage, _claudePage.HeaderControl);
             _claudePage.PageRequested += ShowShell;
-            _claudePage.FolderChosen += OnClaudeFolderChosen;
+            _claudePage.AddRequested += AddTerminal;
+            // Deferred: the x button is on the Click stack and SetTabs disposes it.
+            _claudePage.CloseRequested += name => shell.BeginInvoke(() => CloseTerminal(name));
+            _claudePage.FolderChosen += OnTerminalFolderChosen;
+            _claudePage.SelectionChanged += OnTerminalSelectionChanged;
+            ShowTerminalTabs(); // before the page is shown, so HasOpenTabs is right for Esc
             RefreshClaudeAttention();
             _settingsPage = new SettingsPage();
             _shell.AddPage(ShellPage.Settings, _settingsPage);
             _settingsPage.SaveRequested += OnSettingsSaved;
+            _settingsPage.CleanupWorktreesRequested += OpenWorktreeCleanup;
+            _settingsPage.RebuildRequested += RebuildAndRestart;
+            _settingsPage.SchedulesRequested += OpenSchedules;
+            ShowSchedulesBadge(); // after the Settings page exists: its button carries the dot
             _logPage.QueueChanged += UpdateTooltip;
             _logPage.QueueChanged += () => _dashboardPage?.Reload(); // its queue counts; cheap while hidden
             _logPage.ReauthSucceeded += CatchUpIfDue; // retry due entries once TSC is signed in
@@ -327,45 +333,56 @@ internal sealed partial class TrayApp : ApplicationContext
     // Every log, queue and new-ticket notice. With Tasks off, the page says so in the board's place.
     private void ShowWorkPage() => ShowShell(ShellPage.Work);
 
-    // Start and the Dashboard's queue button; a refusal becomes a notice.
-    private void QueueTicketForToday(string ticketKey)
+    // Start and the Dashboard's queue buttons; the refusals become one notice, grouped by reason.
+    private void QueueTicketsForToday(IReadOnlyList<string> ticketKeys)
     {
         try
         {
-            var now = Hcm.Now();
-            QueueAddResult queueResult;
-            try
+            var refusals = new List<(string TicketKey, string Reason)>();
+            foreach (var ticketKey in ticketKeys)
             {
-                // A running drain read its snapshot already; a ticket merged now would survive alone and overwrite the cell.
-                queueResult = Volatile.Read(ref _draining) != 0 ? QueueAddResult.Draining : TicketQueue.AddStartedTicket(ticketKey, now, _service?.LogTime ?? AppConfig.DefaultLogTime,
-                    TscWrittenDates.Contains(DateOnly.FromDateTime(now.DateTime)));
-                // A drain that began between the check and the write may hold a snapshot without this ticket; take it back out.
-                if (queueResult == QueueAddResult.Added && Volatile.Read(ref _draining) != 0)
+                var now = Hcm.Now();
+                QueueAddResult queueResult;
+                try
                 {
-                    TicketQueue.RemoveTicket(Hcm.ApiDate(DateOnly.FromDateTime(now.DateTime)), ticketKey);
-                    queueResult = QueueAddResult.Draining;
+                    // A running drain read its snapshot already; a ticket merged now would survive alone and overwrite the cell.
+                    queueResult = Volatile.Read(ref _draining) != 0 ? QueueAddResult.Draining : TicketQueue.AddStartedTicket(ticketKey, now, _service?.LogTime ?? AppConfig.DefaultLogTime,
+                        TscWrittenDates.Contains(DateOnly.FromDateTime(now.DateTime)));
+                    // A drain that began between the check and the write may hold a snapshot without this ticket; take it back out.
+                    if (queueResult == QueueAddResult.Added && Volatile.Read(ref _draining) != 0)
+                    {
+                        TicketQueue.RemoveTicket(Hcm.ApiDate(DateOnly.FromDateTime(now.DateTime)), ticketKey);
+                        queueResult = QueueAddResult.Draining;
+                    }
                 }
+                catch (Exception e)
+                {
+                    AppLogger.Error($"[tasks] Queueing {ticketKey} failed: {e}");
+                    Notify(Lang.T($"{ticketKey} not queued: the queue could not be saved (see log).",
+                        $"Chưa thêm {ticketKey} vào queue: không lưu được queue (xem log)."), ToolTipIcon.Warning, open: ShowWorkPage);
+                    return;
+                }
+                var reason = queueResult switch
+                {
+                    QueueAddResult.CustomHours => Lang.T("today has custom hours", "hôm nay đang chia giờ tuỳ chỉnh"),
+                    QueueAddResult.TooLate => Lang.T("today's log time has passed", "đã qua giờ log hôm nay"),
+                    QueueAddResult.AlreadyLogged => Lang.T("today's TSC cell was already written or attempted", "ô TSC hôm nay đã ghi hoặc đã thử ghi"),
+                    QueueAddResult.Unsupported => Lang.T("only MDP tickets can be queued", "chỉ queue được ticket MDP"),
+                    QueueAddResult.Weekend => Lang.T("it is the weekend", "hôm nay là cuối tuần"),
+                    QueueAddResult.Draining => Lang.T("a log run is in progress", "đang có lượt log chạy"),
+                    _ => null,
+                };
+                if (reason != null) refusals.Add((ticketKey, reason));
             }
-            catch (Exception e)
+            if (refusals.Count != 0)
             {
-                AppLogger.Error($"[tasks] Queueing {ticketKey} failed: {e}");
-                Notify(Lang.T($"{ticketKey} not queued: the queue could not be saved (see log).",
-                    $"Chưa thêm {ticketKey} vào queue: không lưu được queue (xem log)."), ToolTipIcon.Warning, open: ShowWorkPage);
-                return;
+                var refusedKeys = refusals.GroupBy(refusal => refusal.Reason)
+                    .Select(group => (Keys: string.Join(", ", group.Select(refusal => refusal.TicketKey)), Reason: group.Key))
+                    .ToList();
+                Notify(string.Join(" ", refusedKeys.Select(refused => Lang.T($"{refused.Keys} not queued: {refused.Reason} - log it in the window.",
+                        $"Chưa thêm {refused.Keys} vào queue: {refused.Reason} - hãy log trong cửa sổ."))),
+                    ToolTipIcon.Info, open: ShowWorkPage);
             }
-            var reason = queueResult switch
-            {
-                QueueAddResult.CustomHours => Lang.T("today has custom hours", "hôm nay đang chia giờ tuỳ chỉnh"),
-                QueueAddResult.TooLate => Lang.T("today's log time has passed", "đã qua giờ log hôm nay"),
-                QueueAddResult.AlreadyLogged => Lang.T("today's TSC cell was already written or attempted", "ô TSC hôm nay đã ghi hoặc đã thử ghi"),
-                QueueAddResult.Unsupported => Lang.T("only MDP tickets can be queued", "chỉ queue được ticket MDP"),
-                QueueAddResult.Weekend => Lang.T("it is the weekend", "hôm nay là cuối tuần"),
-                QueueAddResult.Draining => Lang.T("a log run is in progress", "đang có lượt log chạy"),
-                _ => null,
-            };
-            if (reason != null)
-                Notify(Lang.T($"{ticketKey} not queued: {reason} - log it in the window.",
-                    $"Chưa thêm {ticketKey} vào queue: {reason} - hãy log trong cửa sổ."), ToolTipIcon.Info, open: ShowWorkPage);
             UpdateTooltip();
             if (_logPage != null && !_logPage.IsDisposed) _logPage.RefreshQueuedView();
         }
@@ -484,134 +501,6 @@ internal sealed partial class TrayApp : ApplicationContext
         _dashboardPage?.SetTicketBusy(ticketKey, stage);
     }
 
-    // Poll Jira for newly assigned / finished tickets. Started on the UI thread, so the
-    // continuations (store access, form updates) stay there.
-    private async Task CheckTicketsAsync()
-    {
-        if (_checkingTickets || _service == null || _ticketPoller == null) return;
-        _checkingTickets = true;
-        _tasksPage?.SetChecking(true, _lastTicketCheck);
-        _dashboardPage?.SetChecking(true, _lastTicketCheck);
-        using var busyWork = BusyWork.Shared.Begin(Lang.T("Checking Jira and PRs...", "Đang kiểm tra Jira và PR..."));
-        try
-        {
-            try
-            {
-                var result = await _ticketPoller.PollAsync(_service.Jira);
-                if (result == null)
-                {
-                    // Once per failure streak, so a long offline day does not nag every 15 minutes.
-                    if (++_ticketPollFailures == 3)
-                        Notify(Lang.T($"Jira ticket check failed {_ticketPollFailures} times in a row.",
-                            $"Kiểm tra ticket Jira lỗi {_ticketPollFailures} lần liên tiếp."), ToolTipIcon.Warning);
-                }
-                else
-                {
-                    _ticketPollFailures = 0;
-                    _lastTicketCheck = DateTime.Now;
-                    if (result.NewTickets.Count != 0)
-                        Notify(Lang.T("New ticket(s): ", "Ticket mới: ") + string.Join(", ", result.NewTickets.Select(jt => jt.Key)), ToolTipIcon.Info, open: ShowWorkPage);
-                    if (result.FinishedTickets.Count != 0)
-                        Notify(Lang.T("Done in Jira (move them to Done in Tasks): ", "Đã Done trên Jira (chuyển sang Done trong Tasks): ")
-                            + string.Join(", ", result.FinishedTickets.Select(jt => jt.Key)), ToolTipIcon.Info, open: ShowWorkPage);
-                    foreach (var ticket in result.NewTickets) await _teams.PostNewTicketAsync(ticket);
-                }
-            }
-            catch (Exception e)
-            {
-                AppLogger.Error($"[tickets] Check failed: {e}");
-            }
-
-            // Azure DevOps does not depend on Jira, so PRs are checked even after a failed poll.
-            try
-            {
-                await CheckPrsAsync();
-            }
-            catch (Exception e)
-            {
-                AppLogger.Error($"[ado] PR check failed: {e}");
-            }
-        }
-        finally
-        {
-            _checkingTickets = false;
-            try
-            {
-                _tasksPage?.SetChecking(false, _lastTicketCheck);
-                _dashboardPage?.SetChecking(false, _lastTicketCheck);
-                RefreshTicketViews();
-            }
-            catch (Exception e)
-            {
-                AppLogger.Error($"[tickets] Refreshing the Tasks page failed: {e}");
-            }
-        }
-    }
-
-    private async Task CheckPrsAsync()
-    {
-        // Captured: a Settings save may swap them mid-check.
-        var ado = _ado;
-        var teams = _teams;
-        if (ado == null || _ticketStore == null) return;
-        // The first check only records current PR state, so pre-existing PRs do not flood notices.
-        var baselineOnly = !_ticketStore.IsPrBaselineDone();
-        var prs = await PrUpdateChecker.CheckAsync(ado, _ticketStore, baselineOnly);
-        // Only a complete pass is a usable baseline; otherwise the next pass would announce everything it missed.
-        if (baselineOnly && prs.IsComplete) _ticketStore.MarkPrBaselineDone();
-
-        var commentAlertsToAdd = new List<(string TicketKey, int NewCommentCount, string PrUrl)>();
-        foreach (var (ticketKey, notification) in prs.Notifications)
-        {
-            var branch = $"{DashboardDataBuilder.RepoName(notification.Pr.Repository)} {notification.Pr.Branch}"; // e.g. "FE Portal dev"
-            var url = notification.Pr.Url;
-            if (notification.IsMerged)
-            {
-                Notify(Lang.T($"{ticketKey}: PR ({branch}) merged.", $"{ticketKey}: PR ({branch}) đã merge."), ToolTipIcon.Info,
-                    open: () => ShowShell(ShellPage.Dashboard));
-                await teams.PostPrMergedAsync(ticketKey, branch, url);
-            }
-            if (notification.NewCommentCount != 0)
-            {
-                var newCommentCount = notification.NewCommentCount;
-                commentAlertsToAdd.Add((ticketKey, newCommentCount, url));
-                Notify(Lang.T($"{ticketKey}: {newCommentCount} new PR comment(s) ({branch}).", $"{ticketKey}: {newCommentCount} comment PR mới ({branch})."), ToolTipIcon.Info,
-                    open: () => TaskRow.OpenUrl(url));
-                await teams.PostNewPrCommentAsync(ticketKey, branch, url, newCommentCount);
-            }
-        }
-        MergePrCommentAlerts(commentAlertsToAdd);
-        foreach (var ticketKey in prs.DevMergedNeedingReadyToTest)
-            Notify(Lang.T($"{ticketKey} merged into development - move it to Ready to Test once CI deployed.",
-                $"{ticketKey} đã merge vào development - chuyển sang Ready to Test khi CI deploy xong."), ToolTipIcon.Info,
-                open: () => ShowShell(ShellPage.Dashboard));
-    }
-
-    // Synchronous on purpose (no await): a "seen"/Open handled during the Teams awaits above is not overwritten.
-    private void MergePrCommentAlerts(List<(string TicketKey, int NewCommentCount, string PrUrl)> commentAlertsToAdd)
-    {
-        var ticketStore = _ticketStore;
-        if (ticketStore == null) return;
-        try
-        {
-            var loadedAlerts = ticketStore.LoadPrCommentAlerts();
-            var alerts = loadedAlerts;
-            var atHcm = Hcm.Now();
-            foreach (var (ticketKey, newCommentCount, prUrl) in commentAlertsToAdd)
-                alerts = PrCommentAlerts.Add(alerts, ticketKey, newCommentCount, prUrl, atHcm);
-            var boardKeys = ticketStore.LoadPending().Keys
-                .Concat(ticketStore.LoadStarted().Keys)
-                .Concat(ticketStore.LoadDone().Keys)
-                .ToHashSet();
-            alerts = PrCommentAlerts.KeepOnly(alerts, boardKeys);
-            if (!PrCommentAlerts.AreSame(loadedAlerts, alerts)) ticketStore.SavePrCommentAlerts(alerts);
-        }
-        catch (Exception e)
-        {
-            AppLogger.Error($"[ado] Saving PR comment alerts failed: {e.Message}");
-        }
-    }
-
     // Check GitHub Releases once at startup. On a newer release, reveal the "Download
     // update" menu item and show a one-time balloon. Silent on any failure/offline.
     private async Task CheckForUpdateAsync()
@@ -650,130 +539,6 @@ internal sealed partial class TrayApp : ApplicationContext
         var count = TicketQueue.Read().Count;
         _tray.Text = count > 0 ? Lang.T($"NOIS Workday ({count} queued)", $"NOIS Workday ({count} đang chờ)") : "NOIS Workday";
     });
-
-    // The daily scheduled fire (at the configured time). If something is queued, drain
-    // it as usual. If nothing is queued and it's a weekday, open the window as a
-    // reminder to log manually; on weekends stay silent.
-    private async Task OnScheduledFireAsync()
-    {
-        if (_service == null) return;
-
-        if (TicketQueue.Read().Count != 0)
-        {
-            await DrainAsync(fromUser: false);
-            return;
-        }
-
-        if (!IsWeekday(Hcm.Now()))
-        {
-            Log("[scheduler] Nothing queued (weekend); no reminder.");
-            return;
-        }
-
-        // Read-only HRM lookup, no TSC write. GetOffDatesAsync never throws - a failed
-        // call returns empty and the reminder still opens, since nagging is the safe
-        // direction when a day off cannot be told from a missed working day.
-        var today = Hcm.Today();
-        var offDates = await _service.GetOffDatesAsync(today, today, Log);
-        if (offDates.Contains(today))
-        {
-            Log("[scheduler] Today is an approved day off; no reminder.");
-            return;
-        }
-
-        Log("[scheduler] Nothing queued on a weekday; opening the window as a reminder.");
-        RunOnUi(() =>
-        {
-            ShowShell(ShellPage.Work);
-            Notify(Lang.T("Reminder: nothing is queued for today - log your work before you leave.",
-                "Nhắc nhở: hôm nay chưa có gì trong hàng đợi - hãy log công việc trước khi về."), ToolTipIcon.Info, open: ShowWorkPage);
-        });
-    }
-
-    private static bool IsWeekday(DateTimeOffset t) =>
-        t.DayOfWeek != DayOfWeek.Saturday && t.DayOfWeek != DayOfWeek.Sunday;
-
-    private async Task DrainAsync(bool fromUser)
-    {
-        if (_service == null)
-        {
-            if (fromUser) Notify(Lang.T("Config not loaded; cannot log.", "Chưa có cấu hình; không log được."), ToolTipIcon.Warning, open: EditCredentials);
-            return;
-        }
-        if (Interlocked.CompareExchange(ref _draining, 1, 0) != 0)
-        {
-            // A drain is already running; its snapshot may predate work just requested,
-            // so flag one more pass to run after it finishes.
-            Interlocked.Exchange(ref _redrainPending, 1);
-            if (fromUser) Notify(Lang.T("A logging run is already in progress.", "Đang có một lượt log chạy."), ToolTipIcon.Info, open: ShowWorkPage);
-            return;
-        }
-        RunOnUi(() => { if (_dashboardPage != null && !_dashboardPage.IsDisposed) _dashboardPage.SetDraining(true); });
-
-        var hadToday = false;
-        var busyWork = BusyWork.Shared.Begin(Lang.T("Logging the queue...", "Đang log hàng đợi..."));
-        try
-        {
-            var todayApiDate = Hcm.ApiDate(Hcm.Today());
-            hadToday = TicketQueue.Read().Count(qe => qe.Date == todayApiDate) != 0;
-            using var cts = new CancellationTokenSource(DrainTimeout);
-            var r = await _service.DrainQueueAsync(Log, cts.Token);
-            UpdateTooltip();
-            RunOnUi(() => RefreshAfterDrain(hadToday));
-
-            if (r.Total == 0)
-            {
-                if (fromUser) Notify(Lang.T("Queue is empty.", "Hàng đợi trống."), ToolTipIcon.Info, open: ShowWorkPage);
-            }
-            else if (r.Kept > 0)
-            {
-                Notify(Lang.T($"Auto-log: {r.Logged} logged, {r.Kept} kept. Check TSC sign-in (Re-authenticate) - it retries automatically.",
-                    $"Tự log: đã log {r.Logged}, giữ lại {r.Kept}. Kiểm tra đăng nhập TSC (Đăng nhập lại) - app sẽ tự thử lại."),
-                    ToolTipIcon.Warning, open: ShowWorkPage);
-            }
-            else
-            {
-                Notify(Lang.T($"Auto-log: {r.Logged} logged.", $"Tự log: đã log {r.Logged}."), ToolTipIcon.Info, open: ShowWorkPage);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-            UpdateTooltip();
-            RunOnUi(() => RefreshAfterDrain(hadToday));
-            Log($"[drain] Timed out after {DrainTimeout.TotalMinutes:0} min; kept unlogged entries for retry.");
-            Notify(Lang.T("Auto-log timed out; kept entries for retry. Check TSC sign-in if this repeats.",
-                "Tự log quá thời gian; đã giữ lại để thử lại. Nếu lặp lại, hãy kiểm tra đăng nhập TSC."),
-                ToolTipIcon.Warning, open: ShowWorkPage);
-        }
-        catch (Exception e)
-        {
-            // The drain may have removed some entries before failing.
-            UpdateTooltip();
-            RunOnUi(() => RefreshAfterDrain(hadToday));
-            Log($"[drain] Error: {e.Message}");
-            Notify(Lang.T($"Auto-log error: {e.Message}", $"Tự log lỗi: {e.Message}"), ToolTipIcon.Error, open: ShowWorkPage);
-        }
-        finally
-        {
-            busyWork.Dispose();
-            Interlocked.Exchange(ref _draining, 0);
-            RunOnUi(() => { if (_dashboardPage != null && !_dashboardPage.IsDisposed) _dashboardPage.SetDraining(false); });
-        }
-
-        // If work was requested while the drain above was running, run one more pass to
-        // pick up entries that arrived after that drain read its snapshot.
-        if (Interlocked.Exchange(ref _redrainPending, 0) == 1)
-            await DrainAsync(fromUser: false);
-    }
-
-    // UI thread only. Coverage re-reads without a sniff: the drain's Graph token is still cached.
-    private void RefreshAfterDrain(bool hadToday)
-    {
-        if (_logPage != null && !_logPage.IsDisposed) { _logPage.RefreshQueuedView(); _logPage.ReloadWeekIfLoaded(); }
-        if (_dashboardPage == null || _dashboardPage.IsDisposed) return;
-        _dashboardPage.Reload();
-        if (hadToday && _dashboardPage.CoverageLoaded) _dashboardPage.ReloadCoverage(allowSniff: false);
-    }
 
     // Show the credentials dialog; on save, write the per-user config into settings.json.
     // Returns true if saved. Used both at first run (config missing) and from the menu.
@@ -852,10 +617,17 @@ internal sealed partial class TrayApp : ApplicationContext
                 Lang.T("Quit", "Thoát"), destructive: true);
             if (!quit) return;
         }
+        ShutDown();
+    }
+
+    private void ShutDown()
+    {
         _scheduler.Dispose();
         _tasksTimer.Dispose();
+        _knowledgeScanTimer.Dispose();
+        _schedulesDialog?.Close();
         _shell?.Dispose();
-        _claudeHost?.Dispose();
+        foreach (var host in _terminalHosts.Values) host.Dispose();
         foreach (var host in _ticketSessions.Values) host.Dispose();
         _hookServer?.Dispose();
         ExitThread();
@@ -910,11 +682,13 @@ internal sealed partial class TrayApp : ApplicationContext
         {
             _scheduler.Dispose();
             _tasksTimer.Dispose();
+            _knowledgeScanTimer.Dispose();
             Lang.Changed -= ApplyLanguage;
             _tray.Visible = false;
             _tray.Dispose();
+            _schedulesDialog?.Close();
             _shell?.Dispose();
-            _claudeHost?.Dispose();
+            foreach (var host in _terminalHosts.Values) host.Dispose();
             foreach (var host in _ticketSessions.Values) host.Dispose();
             _hookServer?.Dispose();
             _marshal.Dispose();

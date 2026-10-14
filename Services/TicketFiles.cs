@@ -27,7 +27,7 @@ internal static class TicketFiles
         try
         {
             return Directory.EnumerateFiles(docsPath, "*", SearchOption.AllDirectories)
-                .Select(path => Path.GetRelativePath(docsPath, path).Replace('\\', '/'))
+                .Select(p => Path.GetRelativePath(docsPath, p).Replace('\\', '/'))
                 .Order(StringComparer.OrdinalIgnoreCase).ToList();
         }
         catch (Exception e) when (e is IOException || e is UnauthorizedAccessException)
@@ -50,7 +50,7 @@ internal static class TicketFiles
         }
         var deletedPaths = deleted.Output.Split('\0', StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.Ordinal);
         return listed.Output.Split('\0', StringSplitOptions.RemoveEmptyEntries)
-            .Where(path => !path.EndsWith('/') && !deletedPaths.Contains(path)).Distinct(StringComparer.Ordinal)
+            .Where(p => !p.EndsWith('/') && !deletedPaths.Contains(p)).Distinct(StringComparer.Ordinal)
             .Order(StringComparer.OrdinalIgnoreCase).ToList();
     }
 

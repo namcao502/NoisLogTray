@@ -134,4 +134,26 @@ public class AppSettingsTests : IDisposable
 
         Assert.Equal(postedAt, AppSettings.Load(_path).TeamsPostedAt["MDP-1"]);
     }
+
+    [Fact]
+    public void TerminalTabs_KeepNullApartFromEmpty()
+    {
+        AppSettings.Save(new AppSettings(), _path);
+        Assert.Null(AppSettings.Load(_path).TerminalTabs);
+
+        AppSettings.Save(new AppSettings { TerminalTabs = new List<TerminalTabSetting>() }, _path);
+        Assert.NotNull(AppSettings.Load(_path).TerminalTabs);
+        Assert.Empty(AppSettings.Load(_path).TerminalTabs!);
+
+        AppSettings.Save(new AppSettings
+        {
+            TerminalTabs = new List<TerminalTabSetting> { new() { Name = "claude2", Directory = @"C:\a" } },
+            SelectedTerminal = "claude2",
+        }, _path);
+        var read = AppSettings.Load(_path);
+        Assert.Equal("claude2", read.TerminalTabs!.Single().Name);
+        Assert.Equal(@"C:\a", read.TerminalTabs!.Single().Directory);
+        Assert.Equal("claude2", read.SelectedTerminal);
+    }
 }
+

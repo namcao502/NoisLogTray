@@ -2,19 +2,22 @@ using System.Drawing;
 
 namespace NoisLogTray;
 
-// The shell's Settings page: the shared SettingsPanel on a card that spans the page (up to MaxWidth).
+// The shell's Settings page: the shared SettingsPanel on a card that spans the whole page width.
 // Values are re-read each time the page is shown, so leaving the page (or hiding the window) drops
 // unsaved edits. A width change rebuilds the panel at the new width, keeping what is typed.
 internal sealed class SettingsPage : UserControl, IShellPage
 {
     private static readonly int PageMargin = UiScale.S(20);
-    private static readonly int MaxWidth = UiScale.S(1100); // past this the fields get too long to scan
 
     private readonly Card _card = new();
     private SettingsPanel _panel;
+    private bool _schedulesAttention; // kept here, since a width change builds a new panel
     private bool _rebuildPosted;
 
     internal event Action<IReadOnlyDictionary<string, string>>? SaveRequested;
+    internal event Action? CleanupWorktreesRequested;
+    internal event Action? RebuildRequested;
+    internal event Action? SchedulesRequested;
 
     internal SettingsPage()
     {
@@ -81,12 +84,23 @@ internal sealed class SettingsPage : UserControl, IShellPage
     private int PanelWidth()
     {
         var available = ClientSize.Width - 2 * PageMargin - _card.Radius;
-        return Math.Clamp(available, SettingsPanel.ClientW, MaxWidth);
+        return Math.Max(available, SettingsPanel.ClientW);
+    }
+
+    // The dot on "Schedules...": a bad knowledge-scan run nobody has looked at yet.
+    internal void SetSchedulesAttention(bool hasUnseenBadRun)
+    {
+        _schedulesAttention = hasUnseenBadRun;
+        _panel.ShowSchedulesDot(hasUnseenBadRun);
     }
 
     private SettingsPanel CreatePanel(IReadOnlyDictionary<string, string> values, int width)
     {
-        var panel = new SettingsPanel(values, width);
+        // Rebuild only where this copy can be rebuilt: it runs from its source repo's publish folder.
+        var onRebuild = AppRebuild.FindSourceRepo(AppContext.BaseDirectory) != null ? () => RebuildRequested?.Invoke() : (Action?)null;
+        var panel = new SettingsPanel(values, width, onCleanupWorktrees: () => CleanupWorktreesRequested?.Invoke(), onRebuild: onRebuild,
+            onSchedules: () => SchedulesRequested?.Invoke());
+        panel.ShowSchedulesDot(_schedulesAttention);
         // Inset by half the radius, with the card one radius larger, so the panel leaves the rounded corners visible.
         _card.Size = new Size(panel.Width + _card.Radius, panel.Height + _card.Radius);
         panel.Location = new Point(_card.Radius / 2, _card.Radius / 2);

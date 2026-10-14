@@ -12,6 +12,15 @@ public class TicketLauncherTests
         Assert.Equal("C--Project-Backend-DotNet--claude-worktrees-MDP-8961", name);
     }
 
+    [Fact]
+    public void GetClaudeProjectDirectoryName_IgnoresATrailingSeparator_LikeClaudesWorkingDirectory()
+    {
+        Assert.Equal("C--Project-Backend-DotNet", TicketLauncher.GetClaudeProjectDirectoryName(@"C:\Project\Backend-DotNet\"));
+        Assert.Equal("C--", TicketLauncher.GetClaudeProjectDirectoryName(@"C:\"));
+        Assert.True(TicketLauncher.IsTranscriptOfFolder(@"C:\Users\me\.claude\projects\C--Project-Backend-DotNet\0b5f2b8e.jsonl",
+            @"C:\Project\Backend-DotNet\"));
+    }
+
     [Theory]
     [InlineData(@"C:\Users\me\.claude\projects\C--Project-Backend-DotNet\0b5f2b8e.jsonl", true)]
     [InlineData(@"C:\Users\me\.claude\projects\c--project-backend-dotnet\0b5f2b8e.jsonl", true)]

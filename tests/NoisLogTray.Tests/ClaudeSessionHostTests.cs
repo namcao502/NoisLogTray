@@ -88,6 +88,22 @@ public class ClaudeSessionHostTests
         Assert.True(host.IsRunning);
     }
 
+    [Fact]
+    public void Start_ReportsWhetherThisStartHasHookSettings()
+    {
+        var folder = Environment.CurrentDirectory;
+        var standInExecutable = Path.Combine(Environment.SystemDirectory, "hostname.exe");
+        string? settingsFile = null;
+        using var host = new ClaudeSessionHost(() => folder, settingsFile: () => settingsFile, claudeExecutable: standInExecutable);
+
+        host.Start(80, 24);
+        Assert.False(host.HasHooks);
+
+        settingsFile = Path.Combine(folder, "hooks.json");
+        host.Start(80, 24);
+        Assert.True(host.HasHooks);
+    }
+
     private static string OutputText(StringBuilder output)
     {
         lock (output) return output.ToString();

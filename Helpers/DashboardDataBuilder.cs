@@ -37,21 +37,23 @@ internal static class DashboardDataBuilder
         TimeSpan? untilLogTimeOrNull = untilLogTime > TimeSpan.Zero ? untilLogTime : null;
 
         var inProgress = startedSorted
-            .Select(ticket => (ticket, PrSummary(ticket.Key, prTracking)))
+            .Select(ticket => (ticket, (IReadOnlyList<TicketPr>)LatestPrs(ticket.Key, prTracking)))
             .ToList();
 
-        var attention = new List<AttentionItem>();
-        AddReadyToTest(attention, startedSorted, TicketSection.InProgress, prTracking);
-        AddReadyToTest(attention, doneSorted, TicketSection.Done, prTracking);
+        var ticketTodos = new List<TodoItem>();
+        AddReadyToTest(ticketTodos, startedSorted, TicketSection.InProgress, prTracking);
+        AddReadyToTest(ticketTodos, doneSorted, TicketSection.Done, prTracking);
         foreach (var ticket in startedSorted.Where(ticket => ticket.IsStatusDone))
-            attention.Add(new AttentionItem(AttentionKind.JiraDone, ticket, null, 0, null));
-        foreach (var ticket in startedSorted.Concat(pendingSorted).Where(ticket => ticket.GetDueUrgency(today) == DueUrgency.Overdue))
-            attention.Add(new AttentionItem(AttentionKind.Overdue, ticket, null, 0, null));
+            ticketTodos.Add(new TodoItem(TodoKind.JiraDone, ticket));
+        foreach (var ticket in startedSorted.Where(ticket => ticket.GetDueUrgency(today) == DueUrgency.Overdue))
+            ticketTodos.Add(new TodoItem(TodoKind.Overdue, ticket));
+        foreach (var ticket in pendingSorted.Where(ticket => ticket.GetDueUrgency(today) == DueUrgency.Overdue))
+            ticketTodos.Add(new TodoItem(TodoKind.Overdue, ticket, TicketSection.New));
         foreach (var alert in commentAlerts.Values.OrderByDescending(alert => alert.LastAtHcm))
         {
             var ticket = FindTicket(alert.TicketKey, pending, started, done);
             if (ticket != null)
-                attention.Add(new AttentionItem(AttentionKind.PrComments, ticket, null, alert.NewCommentCount, alert.PrUrl));
+                ticketTodos.Add(new TodoItem(TodoKind.PrComments, ticket, CommentCount: alert.NewCommentCount, PrUrl: alert.PrUrl));
         }
 
         return new DashboardData(
@@ -60,16 +62,22 @@ internal static class DashboardDataBuilder
             todayKeys,
             untilLogTimeOrNull,
             inProgress,
-            attention,
-            pendingSorted);
+            pendingSorted,
+            ticketTodos,
+            ShippedKeys(done, prTracking));
     }
 
-    // "BE main ✓ · dev ● | FE Portal dev ✓": per repo (BE first), the latest PR of each branch (completed ✓,
-    // active ●, abandoned ✕; anything else "?"), main first.
-    internal static string PrSummary(string ticketKey, IReadOnlyDictionary<string, TrackedPr> prTracking) =>
-        string.Join(" | ", LatestPrs(ticketKey, prTracking)
-            .GroupBy(pr => pr.RepoName)
-            .Select(group => group.Key + " " + string.Join(" · ", group.Select(pr => $"{pr.Branch} {StatusGlyph(pr.Status)}"))));
+    // Done tickets whose main PRs all merged: the latest per repo, abandoned ones left out, at least one left.
+    internal static List<string> ShippedKeys(IReadOnlyDictionary<string, JiraTicket> done, IReadOnlyDictionary<string, TrackedPr> prTracking)
+    {
+        var shippedKeys = new List<string>();
+        foreach (var ticketKey in done.Keys.Order(StringComparer.Ordinal))
+        {
+            var mainPrs = LatestPrs(ticketKey, prTracking).Where(tp => tp.Branch == MainBranchLabel && tp.Status != "abandoned").ToList();
+            if (mainPrs.Count != 0 && mainPrs.All(tp => tp.Status == "completed")) shippedKeys.Add(ticketKey);
+        }
+        return shippedKeys;
+    }
 
     // The latest PR per repo + branch; BE first, then repo name, main before other branches.
     internal static List<TicketPr> LatestPrs(string ticketKey, IReadOnlyDictionary<string, TrackedPr> prTracking)
@@ -115,7 +123,7 @@ internal static class DashboardDataBuilder
     };
 
     private static void AddReadyToTest(
-        List<AttentionItem> attention,
+        List<TodoItem> ticketTodos,
         IEnumerable<JiraTicket> tickets,
         TicketSection section,
         IReadOnlyDictionary<string, TrackedPr> prTracking)
@@ -124,7 +132,7 @@ internal static class DashboardDataBuilder
         {
             var label = JiraStatusFlow.ReadyToTestLabel(ticket, section, PrTracker.IsDevPrMerged(prTracking, ticket.Key));
             if (label != null)
-                attention.Add(new AttentionItem(AttentionKind.ReadyToTest, ticket, label, 0, null));
+                ticketTodos.Add(new TodoItem(TodoKind.ReadyToTest, ticket, section, label));
         }
     }
 

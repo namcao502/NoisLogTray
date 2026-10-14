@@ -3,7 +3,7 @@ namespace NoisLogTray;
 // A page's controls in the shell header (ShellForm.AddPage's header control): the Work board's search and buttons,
 // the Ticket tabs. Its empty part lets the mouse through to the header behind it, so a drag there still moves the
 // window and a double-click still maximizes it, as on the rest of the header.
-internal sealed class HeaderToolbar : Panel
+internal class HeaderToolbar : Panel
 {
     private const int WmNcHitTest = 0x0084;
     private const int HtTransparent = -1;

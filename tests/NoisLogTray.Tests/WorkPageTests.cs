@@ -15,9 +15,9 @@ public class WorkPageTests
 
         work.Size = UiScale.S(new Size(1400, 900));
 
-        Assert.Equal(UiScale.S(new Rectangle(820, 0, ShellLayout.LogColumnWidth, 900)), logPage.Bounds);
+        Assert.Equal(UiScale.S(new Rectangle(920, 0, ShellLayout.LogColumnWidth, 900)), logPage.Bounds);
         var tasksArea = logPage.Parent!.Controls.OfType<Label>().Single();
-        Assert.Equal(UiScale.S(new Rectangle(0, 0, 820, 900)), tasksArea.Bounds);
+        Assert.Equal(UiScale.S(new Rectangle(0, 0, 920, 900)), tasksArea.Bounds);
     }
 
     [Fact]

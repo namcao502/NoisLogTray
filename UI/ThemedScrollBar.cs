@@ -97,7 +97,8 @@ internal sealed class ThemedScrollBar : Control
     {
         if (IsDisposed || _target.IsDisposed) return;
         var parent = _target.Parent;
-        var state = ReadState();
+        // A hidden target (a page not on screen) skips the Win32 reads; its default state hides the bar.
+        var state = _target.Visible ? ReadState() : default;
         // A layout panel would place this sibling itself, so there the native bar stays.
         var show = state.NativeVisible && _target.Visible && parent != null && parent is not FlowLayoutPanel && parent is not TableLayoutPanel;
         if (!show)

@@ -25,9 +25,11 @@ internal sealed partial class TrayApp
 
     private void OnClaudeHook(string sessionName, ClaudeHookEvent hookEvent)
     {
-        var host = sessionName == ClaudeAttention.GeneralSessionName ? _claudeHost : _ticketSessions.GetValueOrDefault(sessionName);
+        var isTerminal = TerminalTabs.IsTerminalSession(sessionName);
+        var host = isTerminal ? _terminalHosts.GetValueOrDefault(sessionName) : _ticketSessions.GetValueOrDefault(sessionName);
         if (host == null || !host.IsRunning) return; // a closed tab's or an ended session's late hook
-        if (sessionName == ClaudeAttention.GeneralSessionName) RememberClaudeSessionId(hookEvent);
+        _shipPending.Remove(sessionName); // claude runs in this tab, so its `ship` went through
+        if (isTerminal) RememberClaudeSessionId(sessionName, hookEvent);
         ClaudeWaitReason? current = _claudeWaits.TryGetValue(sessionName, out var reason) ? reason : null;
         var next = ClaudeAttention.Next(current, hookEvent);
         // A turn that finishes while the user looks at that session needs no dot.
@@ -39,10 +41,8 @@ internal sealed partial class TrayApp
         RefreshClaudeAttention();
         if (next != null && !IsWatching(sessionName))
         {
-            var isGeneral = sessionName == ClaudeAttention.GeneralSessionName;
-            var label = isGeneral ? "Terminal" : sessionName;
-            Notify(ClaudeAttention.NoticeText(label, next.Value), ToolTipIcon.Info,
-                open: isGeneral ? () => ShowShell(ShellPage.Claude) : () => ShowTicketTab(sessionName));
+            Notify(ClaudeAttention.NoticeText(ClaudeSessionLabel(sessionName), next.Value), ToolTipIcon.Info,
+                open: isTerminal ? () => ShowTerminalTab(sessionName) : () => ShowTicketTab(sessionName));
         }
     }
 
@@ -70,7 +70,7 @@ internal sealed partial class TrayApp
     private bool IsWatching(string sessionName)
     {
         if (_shell == null || _shell.IsDisposed || !_shell.IsForeground) return false;
-        if (sessionName == ClaudeAttention.GeneralSessionName) return _shell.CurrentPage == ShellPage.Claude;
+        if (TerminalTabs.IsTerminalSession(sessionName)) return _shell.CurrentPage == ShellPage.Claude && _selectedTerminal == sessionName;
         return _shell.CurrentPage == ShellPage.Ticket && _selectedTicket == sessionName;
     }
 
@@ -78,10 +78,20 @@ internal sealed partial class TrayApp
     private void RefreshClaudeAttention()
     {
         if (_shell == null || _shell.IsDisposed) return;
-        var waitingTickets = _claudeWaits.Keys.Where(sn => sn != ClaudeAttention.GeneralSessionName).ToList();
-        var generalWaiting = _claudeWaits.ContainsKey(ClaudeAttention.GeneralSessionName);
-        _shell.SetBadge(ShellPage.Claude, generalWaiting ? 1 : 0);
+        var waitingTerminals = _claudeWaits.Keys.Where(TerminalTabs.IsTerminalSession).ToList();
+        var waitingTickets = _claudeWaits.Keys.Where(sn => !TerminalTabs.IsTerminalSession(sn)).ToList();
+        _shell.SetBadge(ShellPage.Claude, waitingTerminals.Count);
         _shell.SetBadge(ShellPage.Ticket, waitingTickets.Count);
+        _claudePage?.SetWaiting(waitingTerminals);
         _ticketPage?.SetWaiting(waitingTickets);
+        _dashboardPage?.SetClaudeWaits(_claudeWaits.Select(cw => new ClaudeWait(cw.Key, ClaudeSessionLabel(cw.Key), cw.Value)).ToList());
+    }
+
+    // As the notices word it: "Terminal <folder>" for a Terminal tab, else the ticket key.
+    private string ClaudeSessionLabel(string sessionName)
+    {
+        if (!TerminalTabs.IsTerminalSession(sessionName)) return sessionName;
+        var host = _terminalHosts.GetValueOrDefault(sessionName);
+        return $"Terminal {TerminalTabs.Label(host?.CurrentDirectory ?? TerminalDirectory(sessionName))}";
     }
 }

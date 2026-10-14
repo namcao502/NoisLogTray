@@ -5,8 +5,9 @@ namespace NoisLogTray;
 // Pure layout rules for the shell window, kept out of the controls so they are unit-tested.
 internal static class ShellLayout
 {
-    // Two 560px cards (LogPage CardW) with 20px outer margins and a 20px gap.
-    internal const int TwoColumnMinWidth = 2 * (LogPage.CardW + 20) + 20;
+    // Two 560px cards with 20px outer margins and a 20px gap.
+    private const int DashboardColumnMinWidth = 560;
+    internal const int TwoColumnMinWidth = 2 * (DashboardColumnMinWidth + 20) + 20;
 
     internal static int DashboardColumns(int pageWidth) => pageWidth >= TwoColumnMinWidth ? 2 : 1;
 
@@ -52,42 +53,63 @@ internal static class ShellLayout
     private const int LogTop = 14;
     private const int LogGap = 12;
 
-    internal const int DashboardTodayHeight = 168;   // header 44 + 3 lines x 28 + 40 padding
-    internal const int DashboardCardMinHeight = 96;
+    internal const int DashboardCardMinHeight = 124; // title, column titles and one row
 
-    // Four cards: 1 column stacks them; 2 columns put Today + In progress left, Attention + New right.
-    // The last card of a column takes the rounding remainder, so the column always reaches the bottom margin.
-    internal static (Rectangle Today, Rectangle InProgress, Rectangle Attention, Rectangle NewTickets) DashboardCardBounds(
-        int width, int height)
+    // The Dashboard's tables (In progress over New) at most this wide while the to-do column keeps its 560; past that the
+    // two columns share the width evenly.
+    private const int DashboardTablesMaxWidth = 680;
+    private const int DashboardHeaderHeight = 30;
+    private const int DashboardTileHeight = 76;
+
+    // Header, two rows of tiles and three list cards at their minimum: the one-column page's height.
+    internal const int DashboardMinHeight = 14 + DashboardHeaderHeight + 12 + 2 * DashboardTileHeight + 12 + 12
+        + 3 * DashboardCardMinHeight + 2 * 12 + 20;
+
+    // The header line, four tiles (one row, or two by two in one column), then the to-do card left of In progress over New,
+    // or all three stacked. The last card of a column takes the rounding remainder, so it reaches the bottom margin.
+    internal static (Rectangle Header, IReadOnlyList<Rectangle> Tiles, Rectangle Todo, Rectangle InProgress, Rectangle NewTickets)
+        DashboardBounds(int width, int height)
     {
         const int margin = 20;
         const int top = 14;
         const int gap = 12;
 
-        if (DashboardColumns(width) == 1)
+        var contentW = width - 2 * margin;
+        var header = new Rectangle(margin, top, contentW, DashboardHeaderHeight);
+        var isTwoColumns = DashboardColumns(width) == 2;
+        var tilesPerRow = isTwoColumns ? 4 : 2;
+        var tileW = (contentW - (tilesPerRow - 1) * gap) / tilesPerRow;
+        var tiles = new List<Rectangle>();
+        for (var tileIndex = 0; tileIndex < 4; tileIndex++)
         {
-            var colW = width - 2 * margin;
-            var today = new Rectangle(margin, top, colW, DashboardTodayHeight);
-            var inProgressY = today.Bottom + gap;
-            var cardH = Math.Max((height - inProgressY - margin - 2 * gap) / 3, DashboardCardMinHeight);
-            var inProgress = new Rectangle(margin, inProgressY, colW, cardH);
-            var attention = new Rectangle(margin, inProgress.Bottom + gap, colW, cardH);
-            var newY = attention.Bottom + gap;
-            return (today, inProgress, attention,
-                new Rectangle(margin, newY, colW, Math.Max(height - newY - margin, DashboardCardMinHeight)));
+            var column = tileIndex % tilesPerRow;
+            var tileX = margin + column * (tileW + gap);
+            // The row's last tile ends at the right margin, like the cards below.
+            var tileWidth = column == tilesPerRow - 1 ? margin + contentW - tileX : tileW;
+            tiles.Add(new Rectangle(tileX, header.Bottom + gap + tileIndex / tilesPerRow * (DashboardTileHeight + gap), tileWidth,
+                DashboardTileHeight));
+        }
+        var listsY = tiles[^1].Bottom + gap;
+
+        if (!isTwoColumns)
+        {
+            var cardH = Math.Max((height - listsY - margin - 2 * gap) / 3, DashboardCardMinHeight);
+            var todo = new Rectangle(margin, listsY, contentW, cardH);
+            var inProgress = new Rectangle(margin, todo.Bottom + gap, contentW, cardH);
+            var newY = inProgress.Bottom + gap;
+            return (header, tiles, todo, inProgress, new Rectangle(margin, newY, contentW, Math.Max(height - newY - margin, DashboardCardMinHeight)));
         }
 
-        var halfW = (width - 3 * margin) / 2;
-        var rightX = 2 * margin + halfW;
-        var leftToday = new Rectangle(margin, top, halfW, DashboardTodayHeight);
-        var leftInProgressY = leftToday.Bottom + gap;
-        var rightH = Math.Max((height - top - margin - gap) / 2, DashboardCardMinHeight);
-        var rightAttention = new Rectangle(rightX, top, halfW, rightH);
-        var rightNewY = rightAttention.Bottom + gap;
-        return (leftToday,
-            new Rectangle(margin, leftInProgressY, halfW, Math.Max(height - leftInProgressY - margin, DashboardCardMinHeight)),
-            rightAttention,
-            new Rectangle(rightX, rightNewY, halfW, Math.Max(height - rightNewY - margin, DashboardCardMinHeight)));
+        var rightW = Math.Max(Math.Min(DashboardTablesMaxWidth, width - 3 * margin - DashboardColumnMinWidth), (width - 3 * margin) / 2);
+        var leftW = width - 3 * margin - rightW;
+        var rightX = 2 * margin + leftW;
+        var rightH = Math.Max((height - listsY - margin - gap) / 2, DashboardCardMinHeight);
+        var inProgressCard = new Rectangle(rightX, listsY, rightW, rightH);
+        var newTicketsY = inProgressCard.Bottom + gap;
+        return (header, tiles,
+            new Rectangle(margin, listsY, leftW, Math.Max(height - listsY - margin, DashboardCardMinHeight)),
+            inProgressCard,
+            new Rectangle(rightX, newTicketsY, rightW, Math.Max(height - newTicketsY - margin, DashboardCardMinHeight)));
     }
 
     internal static bool StartMaximized(AppSettings settings) => settings.WindowMaximized ?? true;

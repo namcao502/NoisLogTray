@@ -248,6 +248,19 @@ public class TicketQueueTests : IDisposable
         => TicketQueue.AddStartedTicket(ticket, now, logTime, isTodayWritten, _path).ToString();
 
     [Fact]
+    public void TodayRefusal_RefusesTheWeekendAndLateHours_Only()
+    {
+        var saturday = new DateTimeOffset(2026, 7, 25, 10, 0, 0, TimeSpan.FromHours(7));
+
+        Assert.Null(TicketQueue.TodayRefusal(Morning, SixPm));
+        Assert.Equal("Weekend", TicketQueue.TodayRefusal(saturday, SixPm).ToString());
+        Assert.Equal("TooLate", TicketQueue.TodayRefusal(Morning, new TimeOnly(9, 30)).ToString());
+        Assert.Equal("TooLate", TicketQueue.TodayRefusal(Morning.AddHours(8), new TimeOnly(19, 0)).ToString());
+        Assert.True(TicketQueue.CanQueue("MDP-12"));
+        Assert.False(TicketQueue.CanQueue("ABC-12"));
+    }
+
+    [Fact]
     public void AddStartedTicket_ReturnsAdded_CreatesNewEntry()
     {
         Assert.Equal("Added", AddStarted("MDP-1", Morning, SixPm, false));

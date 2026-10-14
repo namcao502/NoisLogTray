@@ -3,31 +3,27 @@ using System.Globalization;
 
 namespace NoisLogTray;
 
-// Today at a glance: the queue and today's TSC/HRM coverage, tickets in progress, what needs
-// attention, and new tickets. Draws local data and raises events; TrayApp does the work.
+// Today at a glance: four figures (the queue, today's TSC and HRM, the week), what to do next, tickets in progress and
+// new tickets. Draws local data and raises events; TrayApp does the work.
 internal sealed partial class DashboardPage : UserControl, IShellPage
 {
-    // Logical (100%) px, like ShellLayout's card bounds; scaled where applied.
+    // Logical (100%) px, like ShellLayout's bounds; scaled where applied.
     private const int BuiltW = 600;
-    private const int BuiltH = 640;
-    private const int MinH = 14 + ShellLayout.DashboardTodayHeight + 3 * ShellLayout.DashboardCardMinHeight + 3 * 12 + 20;
+    private const int BuiltH = ShellLayout.DashboardMinHeight;
     private static readonly int CardPad = UiScale.S(16);
     private static readonly int BtnH = UiScale.S(30);
     private static readonly int ToolbarY = UiScale.S(7);    // card-header button, centred on the section title
-    private static readonly int LineY = UiScale.S(44);      // first Today line under the header
-    private static readonly int LineH = UiScale.S(28);
-    private static readonly int StatusX = UiScale.S(78);    // TSC/HRM status text, after the name and the dot
     private static readonly int ListTop = UiScale.S(40);
+    private static readonly int TableHeaderH = TaskTableHeader.TitleFont.Height + UiScale.S(10);
     private const double FullDayHours = 8.0;
     private DateOnly _dataDay;
-    private DateOnly _coverageDay;
+    private DateOnly _weekDay;
 
     private static readonly Color Red = Color.FromArgb(230, 76, 76);
     private static readonly Color Orange = Color.FromArgb(255, 140, 50);
 
     private static readonly Font DateFont = UiScale.Font("Segoe UI Semibold", 11F, FontStyle.Bold);
     private static readonly Font LabelFont = UiScale.Font("Segoe UI", 9F);
-    private static readonly Font NameFont = UiScale.Font("Segoe UI", 9F, FontStyle.Bold);
     private static readonly Font SectionFont = UiScale.Font("Segoe UI", 8.5F, FontStyle.Bold);
 
     internal event Action? LogQueueRequested;
@@ -35,77 +31,92 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
     internal event Func<string, Task>? StartRequested;
     internal event Func<string, Task>? OpenRequested;
     internal event Func<string, Task>? ReadyToTestRequested;
-    internal event Action<string>? QueueTicketRequested;
+    internal event Action<IReadOnlyList<string>>? QueueTicketsRequested;
     internal event Action<string>? MarkDoneRequested;
     internal event Action<string>? CommentsSeen;
     internal event Action<ShellPage>? PageRequested;
+    internal event Action<DateOnly>? LogDayRequested;
+    internal event Action<string>? ClaudeSessionRequested;
+    internal event Action? CleanupRequested;
 
     private readonly LoggingService? _service;
     private readonly TicketStore? _store;
     private readonly string _jiraBaseUrl;
+    private readonly Func<string> _devRepoPath;
+    private readonly Func<IReadOnlyCollection<string>> _openTicketKeys;
     private readonly Dictionary<string, StartStage> _busyTickets = new();
     private readonly System.Windows.Forms.Timer _minuteTimer = new() { Interval = 60_000 };
     private readonly List<(Label Label, string English, string Vietnamese)> _sectionLabels = new();
 
     private DashboardData? _data;
-    private DayCoverage? _coverage;
-    private bool _coverageReading;
-    private bool _coverageFailed;
-    private bool _coverageLoaded; // read once per window show; OnHidden resets it
+    private bool _isTodayWritten;
+    private IReadOnlyList<string> _cleanupKeys = Array.Empty<string>();
+    private IReadOnlyList<ClaudeWait> _claudeWaits = Array.Empty<ClaudeWait>();
+    private IReadOnlyList<DayCoverage>? _week;
+    private bool _weekReading;
+    private bool _weekFailed;
+    private bool _weekLoaded; // read once per window show; OnHidden resets it
     private bool _reloadPending = true; // a Reload while hidden only marks this; the next show rebuilds once
+    private bool _todosPending;
     private bool _rereadPending;
     private bool _rereadPendingSniff;
     private bool _draining;
     private bool _checking;
     private DateTime? _checkedAt;
     private bool _listsRenderPosted;
+    private int _todoRenderedWidth;
     private int _inProgressRenderedWidth;
-    private int _attentionRenderedWidth;
     private int _newTicketsRenderedWidth;
+    private string? _renderedTodoSignature;
 
     // Placed by LayoutCards on every resize.
-    private Card? _todayCard;
+    private readonly StatTile _queueTile = new();
+    private readonly StatTile _tscTile = new();
+    private readonly StatTile _hrmTile = new();
+    private readonly StatTile _weekTile = new();
+    private Card? _todoCard;
     private Card? _inProgressCard;
-    private Card? _attentionCard;
     private Card? _newTicketsCard;
 
     private readonly Label _todayDate = new();
+    private readonly MacButton _recheckBtn = MacButton.Secondary(string.Empty);
     private readonly MacButton _logQueueBtn = MacButton.Primary(string.Empty);
-    private readonly Label _queueLine = new();
-    private readonly Label _tscName = new();
-    private readonly Panel _tscDot = new();
-    private readonly Label _tscStatus = new();
-    private readonly Label _hrmName = new();
-    private readonly Panel _hrmDot = new();
-    private readonly Label _hrmStatus = new();
-    private readonly LinkLabel _recheckLink = new();
-    private readonly LinkLabel _viewTasksLink = new();
+    private readonly Label _todoTitle = new();
+    private readonly MacButton _allTicketsBtn = MacButton.Secondary(string.Empty);
     private readonly Label _checkedLabel = new();
     private readonly MacButton _checkBtn = MacButton.Secondary(string.Empty);
+    private readonly FlowLayoutPanel _todoList = new();
     private readonly FlowLayoutPanel _inProgressList = new();
-    private readonly FlowLayoutPanel _attentionList = new();
     private readonly FlowLayoutPanel _newTicketsList = new();
+    // Each table's column titles, laid out by RenderLists at the list's row width.
+    private readonly TaskTableHeader _inProgressHeader = new();
+    private readonly TaskTableHeader _newTicketsHeader = new();
 
-    internal DashboardPage(LoggingService? service, TicketStore? store, string jiraBaseUrl)
+    internal DashboardPage(LoggingService? service, TicketStore? store, string jiraBaseUrl, Func<string> devRepoPath,
+        Func<IReadOnlyCollection<string>> openTicketKeys)
     {
         _service = service;
         _store = store;
         _jiraBaseUrl = jiraBaseUrl;
+        _devRepoPath = devRepoPath;
+        _openTicketKeys = openTicketKeys;
         BuildLayout();
         _minuteTimer.Tick += (_, _) =>
         {
             // A page switch calls no hook, so a hidden page just skips the tick.
             if (!Visible) return;
-            // Past midnight: yesterday's queue counts and coverage no longer apply. Coverage keeps its
-            // own day because Reload runs from many places and would hide the rollover.
+            // Past midnight: yesterday's queue counts and coverage no longer apply. The week keeps its own day because
+            // Reload runs from many places and would hide the rollover.
             var today = Hcm.Today();
             if (today != _dataDay) Reload();
-            if (_coverageLoaded && !_coverageReading && _coverageDay != today) ReloadCoverage(allowSniff: false);
+            if (_weekLoaded && !_weekReading && _weekDay != today) ReloadCoverage(allowSniff: false);
             RenderToday();
             RenderCoverage();
+            RenderTodos(); // the log time passing changes what is due
         };
         Theme.Changed += OnThemeChanged;
         Lang.Changed += OnLangChanged;
+        TicketCheckInterval.Changed += OnCheckIntervalChanged;
         ReflowListsOnResize();
     }
 
@@ -115,21 +126,28 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         {
             Theme.Changed -= OnThemeChanged;
             Lang.Changed -= OnLangChanged;
+            TicketCheckInterval.Changed -= OnCheckIntervalChanged;
             _minuteTimer.Dispose();
         }
         base.Dispose(disposing);
     }
 
-    internal bool CoverageLoaded => _coverageLoaded;
+    internal bool CoverageLoaded => _weekLoaded;
 
     public void OnPageShown()
     {
         if (_reloadPending || _dataDay != Hcm.Today()) Reload();
-        else RenderToday();
-        // Once per window show, sniffing a Graph token when none is cached; the week card's first read shares it.
-        if (!_coverageLoaded)
+        else
         {
-            _coverageLoaded = true;
+            // The clock may have passed the log time while another page was shown.
+            RenderToday();
+            RenderCoverage();
+            RenderTodos(force: _todosPending);
+        }
+        // Once per window show, sniffing a Graph token when none is cached; the week card's first read shares it.
+        if (!_weekLoaded)
+        {
+            _weekLoaded = true;
             ReloadCoverage(allowSniff: true);
         }
         _minuteTimer.Start();
@@ -145,38 +163,53 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
     public void OnHidden()
     {
         _minuteTimer.Stop();
-        _coverageLoaded = false;
+        _weekLoaded = false;
     }
 
     private void BuildLayout()
     {
         BackColor = Theme.WindowBg;
 
-        // Cards are built at the bounds the built Size lays them out at, so the anchors set
-        // below record the right edge distances.
-        var (today, inProgress, attention, newTickets) = ShellLayout.DashboardCardBounds(BuiltW, BuiltH);
-        var todayCard = BuildTodayCard(UiScale.S(today));
-        var inProgressCard = BuildListCard(UiScale.S(inProgress), "IN PROGRESS", "ĐANG LÀM", _inProgressList);
-        var attentionCard = BuildListCard(UiScale.S(attention), "NEEDS ATTENTION", "CẦN CHÚ Ý", _attentionList);
-        var newTicketsCard = BuildListCard(UiScale.S(newTickets), "NEW TICKETS", "TICKET MỚI", _newTicketsList);
-        BuildAttentionHeader(attentionCard);
+        // Cards are built at the bounds the built Size lays them out at, so the anchors set below record the right edge
+        // distances. The header and the tiles are placed by LayoutCards alone, with no anchors.
+        var (_, tiles, todo, inProgress, newTickets) = ShellLayout.DashboardBounds(BuiltW, BuiltH);
+        _todayDate.AutoSize = false;
+        ThemedToolTip.Track(_todayDate);
+        _todayDate.TextAlign = ContentAlignment.MiddleLeft;
+        _todayDate.Font = DateFont;
+        _todayDate.BackColor = Color.Transparent;
+        _recheckBtn.Click += (_, _) => ReloadCoverage(allowSniff: true);
+        _logQueueBtn.Click += (_, _) => LogQueueRequested?.Invoke();
+        Controls.Add(_todayDate);
+        Controls.Add(_recheckBtn);
+        Controls.Add(_logQueueBtn);
+        var statTiles = new[] { _queueTile, _tscTile, _hrmTile, _weekTile };
+        for (var tileIndex = 0; tileIndex < statTiles.Length; tileIndex++)
+        {
+            statTiles[tileIndex].Bounds = UiScale.S(tiles[tileIndex]);
+            Controls.Add(statTiles[tileIndex]);
+        }
+
+        var todoCard = BuildTodoCard(UiScale.S(todo));
+        var inProgressCard = BuildListCard(UiScale.S(inProgress), "IN PROGRESS", "ĐANG LÀM", _inProgressList, _inProgressHeader);
+        var newTicketsCard = BuildListCard(UiScale.S(newTickets), "NEW TICKETS", "TICKET MỚI", _newTicketsList, _newTicketsHeader);
+        BuildInProgressHeader(inProgressCard);
         BuildNewTicketsHeader(newTicketsCard);
 
-        Controls.Add(todayCard);
+        Controls.Add(todoCard);
         Controls.Add(inProgressCard);
-        Controls.Add(attentionCard);
         Controls.Add(newTicketsCard);
-        _todayCard = todayCard;
-        _inProgressCard = inProgressCard;
-        _attentionCard = attentionCard;
-        _newTicketsCard = newTicketsCard;
 
         ApplyTexts();
         ApplyColors();
 
+        // Only now LayoutCards runs: the Size below lays everything out once, at the built bounds.
+        _todoCard = todoCard;
+        _inProgressCard = inProgressCard;
+        _newTicketsCard = newTicketsCard;
         // Sized before anchoring: WinForms records each anchor's edge distances when Anchor is set.
         Size = UiScale.S(new Size(BuiltW, BuiltH));
-        MinimumSize = UiScale.S(new Size(BuiltW, MinH));
+        MinimumSize = UiScale.S(new Size(BuiltW, BuiltH));
         AnchorForResize();
     }
 
@@ -188,15 +221,23 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
 
     private void LayoutCards()
     {
-        if (_todayCard == null || _inProgressCard == null || _attentionCard == null || _newTicketsCard == null) return;
+        if (_todoCard == null || _inProgressCard == null || _newTicketsCard == null) return;
 
         // ShellLayout works in logical px: convert the page size in, scale the bounds back out.
-        var (today, inProgress, attention, newTickets) = ShellLayout.DashboardCardBounds(
+        var (header, tiles, todo, inProgress, newTickets) = ShellLayout.DashboardBounds(
             UiScale.Logical(ClientSize.Width), UiScale.Logical(ClientSize.Height));
         SuspendLayout();
-        _todayCard.Bounds = UiScale.S(today);
+        var headerBounds = UiScale.S(header);
+        var buttonWidth = ButtonWidths.ToolbarWidth(_logQueueBtn.Font);
+        var buttonY = headerBounds.Y + (headerBounds.Height - BtnH) / 2;
+        _logQueueBtn.Bounds = new Rectangle(headerBounds.Right - buttonWidth, buttonY, buttonWidth, BtnH);
+        _recheckBtn.Bounds = new Rectangle(_logQueueBtn.Left - UiScale.S(8) - buttonWidth, buttonY, buttonWidth, BtnH);
+        _todayDate.Bounds = new Rectangle(headerBounds.X, headerBounds.Y, Math.Max(UiScale.S(40), _recheckBtn.Left - UiScale.S(8) - headerBounds.X),
+            headerBounds.Height);
+        var statTiles = new[] { _queueTile, _tscTile, _hrmTile, _weekTile };
+        for (var tileIndex = 0; tileIndex < statTiles.Length; tileIndex++) statTiles[tileIndex].Bounds = UiScale.S(tiles[tileIndex]);
+        _todoCard.Bounds = UiScale.S(todo);
         _inProgressCard.Bounds = UiScale.S(inProgress);
-        _attentionCard.Bounds = UiScale.S(attention);
         _newTicketsCard.Bounds = UiScale.S(newTickets);
         ResumeLayout();
     }
@@ -206,85 +247,37 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         const AnchorStyles stretch = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         const AnchorStyles right = AnchorStyles.Top | AnchorStyles.Right;
 
-        _todayDate.Anchor = stretch;
-        _logQueueBtn.Anchor = right;
-        _queueLine.Anchor = stretch;
-        _tscStatus.Anchor = stretch;
-        _hrmStatus.Anchor = stretch;
-        _recheckLink.Anchor = right;
-        _viewTasksLink.Anchor = right;
+        _todoTitle.Anchor = stretch;
+        _allTicketsBtn.Anchor = right;
         _checkedLabel.Anchor = right;
         _checkBtn.Anchor = right;
-        foreach (var list in new[] { _inProgressList, _attentionList, _newTicketsList })
+        foreach (var list in new[] { _todoList, _inProgressList, _newTicketsList })
             list.Anchor = stretch | AnchorStyles.Bottom;
+        foreach (var header in new[] { _inProgressHeader, _newTicketsHeader })
+            header.Anchor = stretch;
     }
 
-    private Card BuildTodayCard(Rectangle bounds)
+    private Card BuildTodoCard(Rectangle bounds)
     {
         var card = new Card { Bounds = bounds };
-        var innerW = bounds.Width - 2 * CardPad;
+        _todoTitle.AutoSize = false;
+        _todoTitle.Bounds = new Rectangle(CardPad, UiScale.S(14), bounds.Width - 2 * CardPad, SectionFont.Height + UiScale.S(2));
+        _todoTitle.Font = SectionFont;
+        _todoTitle.BackColor = Color.Transparent;
+        card.Controls.Add(_todoTitle);
 
-        _todayDate.AutoSize = false;
-        ThemedToolTip.Track(_todayDate);
-        _todayDate.Bounds = new Rectangle(CardPad, UiScale.S(10), innerW, UiScale.S(26)); // width set by ApplyTexts
-        _todayDate.TextAlign = ContentAlignment.MiddleLeft;
-        _todayDate.Font = DateFont;
-        _todayDate.BackColor = Color.Transparent;
-
-        _logQueueBtn.Click += (_, _) => LogQueueRequested?.Invoke();
-
-        _queueLine.AutoSize = false;
-        ThemedToolTip.Track(_queueLine);
-        _queueLine.Bounds = new Rectangle(CardPad, LineY, innerW, LineH);
-        _queueLine.TextAlign = ContentAlignment.MiddleLeft;
-        _queueLine.Font = LabelFont;
-        _queueLine.BackColor = Color.Transparent;
-        _queueLine.UseMnemonic = false;
-
-        AddStatusLine(card, _tscName, _tscDot, _tscStatus, "TSC", LineY + LineH, bounds.Width - CardPad - StatusX);
-        AddStatusLine(card, _hrmName, _hrmDot, _hrmStatus, "HRM", LineY + 2 * LineH, bounds.Width - CardPad - StatusX);
-
-        _recheckLink.AutoSize = true;
-        _recheckLink.Font = LabelFont;
-        _recheckLink.LinkColor = Theme.Accent;
-        _recheckLink.ActiveLinkColor = Theme.AccentHover;
-        _recheckLink.LinkBehavior = LinkBehavior.HoverUnderline;
-        _recheckLink.BackColor = Color.Transparent;
-        _recheckLink.LinkClicked += (_, _) => ReloadCoverage(allowSniff: true);
-
-        card.Controls.Add(_todayDate);
-        card.Controls.Add(_logQueueBtn);
-        card.Controls.Add(_queueLine);
-        card.Controls.Add(_recheckLink);
+        var listInset = UiScale.S(8);
+        _todoList.Bounds = new Rectangle(listInset, ListTop, bounds.Width - 2 * listInset, bounds.Height - ListTop - listInset);
+        _todoList.FlowDirection = FlowDirection.TopDown;
+        _todoList.WrapContents = false;
+        _todoList.AutoScroll = true;
+        _todoList.Padding = new Padding(0);
+        card.Controls.Add(_todoList);
+        ThemedScrollBar.Attach(_todoList);
         return card;
     }
 
-    private static void AddStatusLine(Card card, Label name, Panel dot, Label status, string text, int y, int statusW)
-    {
-        name.Text = text;
-        name.AutoSize = false;
-        name.Bounds = new Rectangle(CardPad, y, UiScale.S(44), LineH);
-        name.TextAlign = ContentAlignment.MiddleLeft;
-        name.Font = NameFont;
-        name.BackColor = Color.Transparent;
-
-        var dotSize = UiScale.S(10);
-        dot.Bounds = new Rectangle(StatusX - UiScale.S(18), y + (LineH - dotSize) / 2, dotSize, dotSize);
-
-        status.AutoSize = false;
-        ThemedToolTip.Track(status);
-        status.Bounds = new Rectangle(StatusX, y, statusW, LineH);
-        status.TextAlign = ContentAlignment.MiddleLeft;
-        status.Font = LabelFont;
-        status.BackColor = Color.Transparent;
-        status.UseMnemonic = false;
-
-        card.Controls.Add(name);
-        card.Controls.Add(dot);
-        card.Controls.Add(status);
-    }
-
-    private Card BuildListCard(Rectangle bounds, string english, string vietnamese, FlowLayoutPanel list)
+    private Card BuildListCard(Rectangle bounds, string english, string vietnamese, FlowLayoutPanel list, TaskTableHeader header)
     {
         var card = new Card { Bounds = bounds };
         var title = new Label
@@ -298,7 +291,10 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         card.Controls.Add(title);
 
         var listInset = UiScale.S(8);
-        list.Bounds = new Rectangle(listInset, ListTop, bounds.Width - 2 * listInset, bounds.Height - ListTop - listInset);
+        header.Bounds = new Rectangle(listInset, ListTop, bounds.Width - 2 * listInset, TableHeaderH);
+        card.Controls.Add(header);
+        var listTop = ListTop + TableHeaderH;
+        list.Bounds = new Rectangle(listInset, listTop, bounds.Width - 2 * listInset, bounds.Height - listTop - listInset);
         list.FlowDirection = FlowDirection.TopDown;
         list.WrapContents = false;
         list.AutoScroll = true;
@@ -308,17 +304,11 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         return card;
     }
 
-    private void BuildAttentionHeader(Card card)
+    private void BuildInProgressHeader(Card card)
     {
-        _viewTasksLink.AutoSize = true;
-        _viewTasksLink.Font = LabelFont;
-        _viewTasksLink.LinkColor = Theme.Accent;
-        _viewTasksLink.ActiveLinkColor = Theme.AccentHover;
-        _viewTasksLink.LinkBehavior = LinkBehavior.HoverUnderline;
-        _viewTasksLink.BackColor = Color.Transparent;
-        _viewTasksLink.Visible = _store != null; // no Tasks page to open when Tasks is off
-        _viewTasksLink.LinkClicked += (_, _) => PageRequested?.Invoke(ShellPage.Work);
-        card.Controls.Add(_viewTasksLink);
+        _allTicketsBtn.Visible = _store != null; // no board to open when Tasks is off
+        _allTicketsBtn.Click += (_, _) => PageRequested?.Invoke(ShellPage.Work);
+        card.Controls.Add(_allTicketsBtn);
     }
 
     private void BuildNewTicketsHeader(Card card)
@@ -339,15 +329,15 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
     // Rows are built at the list's width; posted, like TasksPage, once per resize burst.
     private void ReflowListsOnResize()
     {
+        _todoList.Resize += OnListResize;
         _inProgressList.Resize += OnListResize;
-        _attentionList.Resize += OnListResize;
         _newTicketsList.Resize += OnListResize;
     }
 
     private void OnListResize(object? sender, EventArgs e)
     {
-        var changed = _inProgressList.ClientSize.Width != _inProgressRenderedWidth
-            || _attentionList.ClientSize.Width != _attentionRenderedWidth
+        var changed = _todoList.ClientSize.Width != _todoRenderedWidth
+            || _inProgressList.ClientSize.Width != _inProgressRenderedWidth
             || _newTicketsList.ClientSize.Width != _newTicketsRenderedWidth;
         if (!changed || !IsHandleCreated || _listsRenderPosted) return;
         _listsRenderPosted = true;
@@ -356,6 +346,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
             _listsRenderPosted = false;
             if (IsDisposed) return;
             RenderLists();
+            RenderTodos(force: true);
         });
     }
 
@@ -363,17 +354,18 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
     private void ApplyTexts()
     {
         foreach (var (label, english, vietnamese) in _sectionLabels) label.Text = Lang.T(english, vietnamese);
+        _queueTile.Title = Lang.T("QUEUE", "HÀNG ĐỢI");
+        _tscTile.Title = Lang.T("TSC TODAY", "TSC HÔM NAY");
+        _hrmTile.Title = Lang.T("HRM TODAY", "HRM HÔM NAY");
+        _weekTile.Title = Lang.T("THIS WEEK", "TUẦN NÀY");
 
         _logQueueBtn.Text = Lang.T("Log queue now", "Log queue ngay");
-        var logQueueW = ButtonWidth(_logQueueBtn);
-        _logQueueBtn.Bounds = new Rectangle(_logQueueBtn.Parent!.ClientSize.Width - CardPad - logQueueW, ToolbarY, logQueueW, BtnH);
-        _todayDate.Width = Math.Max(UiScale.S(40), _logQueueBtn.Left - UiScale.S(8) - CardPad);
+        _recheckBtn.Text = Lang.T("Re-check", "Kiểm tra lại");
+        LayoutCards();
 
-        _recheckLink.Text = Lang.T("Re-check", "Kiểm tra lại");
-        PlaceRightLink(_recheckLink, LineY + 2 * LineH, LineH);
-        _hrmStatus.Width = Math.Max(UiScale.S(40), _recheckLink.Left - UiScale.S(8) - StatusX);
-        _viewTasksLink.Text = Lang.T("All tickets", "Tất cả ticket");
-        PlaceRightLink(_viewTasksLink, UiScale.S(10), UiScale.S(24));
+        _allTicketsBtn.Text = Lang.T("All tickets", "Tất cả ticket");
+        var allTicketsW = ButtonWidth(_allTicketsBtn);
+        _allTicketsBtn.Bounds = new Rectangle(_allTicketsBtn.Parent!.ClientSize.Width - CardPad - allTicketsW, ToolbarY, allTicketsW, BtnH);
 
         _checkBtn.Text = Lang.T("Check", "Kiểm tra");
         var checkCard = _checkBtn.Parent!;
@@ -382,14 +374,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         var checkedLabelW = UiScale.S(220);
         var checkedLabelH = UiScale.S(18);
         _checkedLabel.Bounds = new Rectangle(_checkBtn.Left - UiScale.S(8) - checkedLabelW, ToolbarY + (BtnH - checkedLabelH) / 2, checkedLabelW, checkedLabelH);
-        _checkedLabel.Text = CheckedText();
-    }
-
-    private static void PlaceRightLink(LinkLabel link, int y, int lineH)
-    {
-        var card = link.Parent!;
-        var size = link.PreferredSize;
-        link.Location = new Point(card.ClientSize.Width - CardPad - size.Width, y + (lineH - size.Height) / 2);
+        _checkedLabel.Text = CheckedText(TicketCheckInterval.Minutes, _checking, _checkedAt, _store != null);
     }
 
     private static int ButtonWidth(MacButton button)
@@ -399,12 +384,10 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
     {
         BackColor = Theme.WindowBg;
         foreach (var (label, _, _) in _sectionLabels) label.ForeColor = Theme.TextSecondary;
+        _todoTitle.ForeColor = Theme.TextSecondary;
         _todayDate.ForeColor = Theme.TextPrimary;
-        _queueLine.ForeColor = Theme.TextPrimary;
-        _tscName.ForeColor = Theme.TextSecondary;
-        _hrmName.ForeColor = Theme.TextSecondary;
         _checkedLabel.ForeColor = Theme.TextSecondary;
-        foreach (var list in new[] { _inProgressList, _attentionList, _newTicketsList }) list.BackColor = Theme.CardSurface;
+        foreach (var list in new[] { _todoList, _inProgressList, _newTicketsList }) list.BackColor = Theme.CardSurface;
     }
 
     private void OnThemeChanged()
@@ -420,22 +403,25 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         Render();
     }
 
+    private void OnCheckIntervalChanged() => _checkedLabel.Text = CheckedText(TicketCheckInterval.Minutes, _checking, _checkedAt, _store != null);
+
     internal void SetChecking(bool checking, DateTime? checkedAt)
     {
         if (IsDisposed) return;
         _checking = checking;
         if (checkedAt.HasValue) _checkedAt = checkedAt;
         _checkBtn.Enabled = _store != null && !checking;
-        _checkedLabel.Text = CheckedText();
+        _checkedLabel.Text = CheckedText(TicketCheckInterval.Minutes, _checking, _checkedAt, _store != null);
     }
 
-    private string CheckedText()
+    // The New card's header line: the running check, or the last one and how often it runs.
+    internal static string CheckedText(int minutes, bool checking, DateTime? checkedAt, bool isTasksOn)
     {
-        if (_store == null) return string.Empty;
-        if (_checking) return Lang.T("Checking...", "Đang kiểm tra...");
-        return _checkedAt.HasValue
-            ? Lang.T($"Last check {_checkedAt.Value:HH:mm} · every 5 min", $"Check lần cuối {_checkedAt.Value:HH:mm} · 5 phút/lần")
-            : Lang.T("Every 5 min", "5 phút/lần");
+        if (!isTasksOn) return string.Empty;
+        if (checking) return Lang.T("Checking...", "Đang kiểm tra...");
+        return checkedAt.HasValue
+            ? Lang.T($"Last check {checkedAt.Value:HH:mm} · every {minutes} min", $"Check lần cuối {checkedAt.Value:HH:mm} · {minutes} phút/lần")
+            : Lang.T($"Every {minutes} min", $"{minutes} phút/lần");
     }
 
     internal void SetDraining(bool draining)
@@ -443,6 +429,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         if (IsDisposed) return;
         _draining = draining;
         UpdateLogQueueButton();
+        RenderTodos();
     }
 
     private void UpdateLogQueueButton()
@@ -458,9 +445,18 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         if (stage.HasValue) _busyTickets[ticketKey] = stage.Value;
         else _busyTickets.Remove(ticketKey);
         RenderLists();
+        RenderTodos(force: true);
     }
 
-    // Local data only (store + queue); a failed read keeps the last data on screen.
+    // The sessions waiting for the user, from the Claude hook bridge.
+    internal void SetClaudeWaits(IReadOnlyList<ClaudeWait> waits)
+    {
+        if (IsDisposed) return;
+        _claudeWaits = waits;
+        RenderTodos();
+    }
+
+    // Local data only (store, queue, worktree folders); a failed read keeps the last data on screen.
     internal void Reload()
     {
         if (IsDisposed) return;
@@ -475,6 +471,13 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         {
             _data = BuildData();
             _dataDay = Hcm.Today();
+            _isTodayWritten = TscWrittenDates.Contains(_dataDay);
+            var openTicketKeys = _openTicketKeys().ToHashSet();
+            var devRepoPath = _devRepoPath();
+            // A ticket with an open tab may still be in use; the cleanup dialog would only keep it.
+            _cleanupKeys = _data.ShippedKeys
+                .Where(key => !openTicketKeys.Contains(key) && Directory.Exists(TicketWorktrees.BackendPath(devRepoPath, key)))
+                .ToList();
         }
         catch (Exception ex)
         {
@@ -514,8 +517,10 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         RenderToday();
         RenderCoverage();
         RenderLists();
+        RenderTodos(force: true);
     }
 
+    // The date and the queue tile.
     private void RenderToday()
     {
         _todayDate.Text = Lang.LongDate(Hcm.Today().ToDateTime(TimeOnly.MinValue));
@@ -536,15 +541,15 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         else
             left = Lang.T("past log time", "đã qua giờ log");
 
-        _queueLine.Text = Lang.T(
-            $"{count} {(count == 1 ? "ticket" : "tickets")} queued for today -- auto-log at {LogTimeText()} ({left})",
-            $"{count} ticket trong queue -- tự log lúc {LogTimeText()} ({left})");
+        _queueTile.SetValue(count != 0 ? Theme.Accent : Theme.TextSecondary,
+            Lang.T($"{count} {(count == 1 ? "ticket" : "tickets")}", $"{count} ticket"),
+            Lang.T($"auto-log {LogTimeText()} · {left}", $"tự log {LogTimeText()} · {left}"));
     }
 
     internal async void ReloadCoverage(bool allowSniff)
     {
         if (IsDisposed) return;
-        if (_coverageReading)
+        if (_weekReading)
         {
             _rereadPending = true;
             _rereadPendingSniff |= allowSniff;
@@ -556,31 +561,32 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
             return;
         }
 
-        _coverageReading = true;
-        _coverageDay = Hcm.Today();
-        _coverageFailed = false;
+        _weekReading = true;
+        _weekDay = Hcm.Today();
+        _weekFailed = false;
         RenderCoverage();
-        using var busyWork = BusyWork.Shared.Begin(Lang.T("Reading today's logs...", "Đang đọc log hôm nay..."));
+        using var busyWork = BusyWork.Shared.Begin(Lang.T("Reading this week's logs...", "Đang đọc log tuần này..."));
         try
         {
-            var coverage = await _service.CheckWeekAsync(new[] { Hcm.Today() }, AppLogger.Info, allowSniff: allowSniff);
+            var week = await _service.CheckWeekAsync(WeekDates(_weekDay), AppLogger.Info, allowSniff: allowSniff);
             if (IsDisposed) return;
-            _coverage = coverage.Count != 0 ? coverage[0] : null;
-            _coverageFailed = coverage.Count == 0;
+            _week = week.Count != 0 ? week : null;
+            _weekFailed = week.Count == 0;
         }
         catch (Exception ex)
         {
-            AppLogger.Error($"[dashboard] Reading today's coverage failed: {ex.Message}");
+            AppLogger.Error($"[dashboard] Reading this week's coverage failed: {ex.Message}");
             if (IsDisposed) return;
-            _coverage = null;
-            _coverageFailed = true;
+            _week = null;
+            _weekFailed = true;
         }
         finally
         {
-            _coverageReading = false;
+            _weekReading = false;
         }
 
         RenderCoverage();
+        RenderTodos();
         if (!_rereadPending) return;
         var sniff = _rereadPendingSniff;
         _rereadPending = false;
@@ -588,37 +594,64 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         ReloadCoverage(sniff);
     }
 
+    // Monday to today; a weekend day only when it is today.
+    private static List<DateOnly> WeekDates(DateOnly today)
+    {
+        var monday = Hcm.MondayOf(today);
+        return Enumerable.Range(0, today.DayNumber - monday.DayNumber + 1)
+            .Select(monday.AddDays)
+            .Where(date => date == today || (date.DayOfWeek != DayOfWeek.Saturday && date.DayOfWeek != DayOfWeek.Sunday))
+            .ToList();
+    }
+
+    // The TSC, HRM and week tiles.
     private void RenderCoverage()
     {
-        if (_service == null)
+        string? noData = null;
+        if (_service == null) noData = Lang.T("config not loaded", "chưa có cấu hình");
+        // A re-read keeps the last week on screen rather than flashing "Reading..." over it.
+        else if (_weekReading && _week == null) noData = Lang.T("Reading...", "Đang đọc...");
+        else if (_weekFailed) noData = Lang.T("not read", "không đọc được");
+        var today = _week?.FirstOrDefault(dc => dc.Date == Hcm.Today());
+        if (noData != null || _week == null || today == null)
         {
-            var noConfig = Lang.T("config not loaded", "chưa có cấu hình");
-            SetStatus(_tscDot, _tscStatus, WeekCard.Gray, noConfig);
-            SetStatus(_hrmDot, _hrmStatus, WeekCard.Gray, noConfig);
-            return;
-        }
-        if (_coverageReading)
-        {
-            var reading = Lang.T("Reading...", "Đang đọc...");
-            SetStatus(_tscDot, _tscStatus, WeekCard.Gray, reading);
-            SetStatus(_hrmDot, _hrmStatus, WeekCard.Gray, reading);
-            return;
-        }
-        if (_coverageFailed || _coverage == null)
-        {
-            var text = _coverageFailed ? Lang.T("not read", "không đọc được") : "-";
-            SetStatus(_tscDot, _tscStatus, WeekCard.Gray, text);
-            SetStatus(_hrmDot, _hrmStatus, WeekCard.Gray, text);
+            foreach (var tile in new[] { _tscTile, _hrmTile, _weekTile }) tile.SetValue(WeekCard.Gray, noData ?? "-", string.Empty);
             return;
         }
 
-        var (tscColor, tscText) = TodayTscStatus(_coverage);
-        SetStatus(_tscDot, _tscStatus, tscColor, tscText);
+        var (tscColor, tscText) = TodayTscStatus(today);
+        var (hrmColor, hrmText) = WeekCard.HrmStatus(today, future: false);
+        var tscDetail = tscColor == WeekCard.Green && !today.IsOff ? Lang.T("written", "đã ghi") : string.Empty;
+        var hrmDetail = string.Empty;
+        if (!today.IsOff && today.HrmHours != null) hrmText += $" / {FullDayHours:0}h";
+        // A weekend has nothing to log, and before HRM takes today's hours a short day is only waiting: neither is a miss.
+        if (today.Date.DayOfWeek == DayOfWeek.Saturday || today.Date.DayOfWeek == DayOfWeek.Sunday)
+        {
+            tscColor = WeekCard.Gray;
+            hrmColor = WeekCard.Gray;
+            tscDetail = Lang.T("weekend", "cuối tuần");
+            hrmDetail = tscDetail;
+        }
+        else if (!today.IsOff && today.HrmHours != null && today.HrmHours < FullDayHours
+            && DashboardTodos.WeekStatus(new[] { today }, Hcm.Now(), CurrentLogTime()).Due.Count == 0)
+        {
+            hrmColor = WeekCard.Gray;
+            hrmDetail = Lang.T($"logs at {LogTimeText()}", $"log lúc {LogTimeText()}");
+        }
+        _tscTile.SetValue(tscColor, tscText, tscDetail);
+        _hrmTile.SetValue(hrmColor, hrmText, hrmDetail);
 
-        var (hrmColor, hrmText) = WeekCard.HrmStatus(_coverage, future: false);
-        if (!_coverage.IsOff && _coverage.HrmHours != null)
-            hrmText += $" / {FullDayHours:0}h";
-        SetStatus(_hrmDot, _hrmStatus, hrmColor, hrmText);
+        var (due, unlogged) = DashboardTodos.WeekStatus(_week, Hcm.Now(), CurrentLogTime());
+        if (due.Count == 0)
+        {
+            _weekTile.SetValue(WeekCard.Gray, "–", Lang.T("nothing due yet", "chưa có ngày cần log"));
+            return;
+        }
+        var logged = due.Count - unlogged.Count;
+        var missingDays = string.Join(", ", unlogged.Select(dc => dc.Date.ToString("ddd", Lang.Culture)));
+        _weekTile.SetValue(unlogged.Count == 0 ? WeekCard.Green : WeekCard.Amber,
+            Lang.T($"{logged}/{due.Count} days logged", $"{logged}/{due.Count} ngày đủ"),
+            unlogged.Count == 0 ? Lang.T("all logged", "đã đủ") : Lang.T($"missing {missingDays}", $"thiếu {missingDays}"));
     }
 
     // WeekCard's TSC rule with two exceptions: a background read without a token, and an empty
@@ -640,42 +673,41 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         return WeekCard.TscStatus(coverage, future: false);
     }
 
-    private static void SetStatus(Panel dot, Label status, Color color, string text)
-    {
-        dot.BackColor = color;
-        status.ForeColor = color;
-        status.Text = text;
-    }
-
     private void RenderLists()
     {
         _inProgressRenderedWidth = _inProgressList.ClientSize.Width;
-        _attentionRenderedWidth = _attentionList.ClientSize.Width;
         _newTicketsRenderedWidth = _newTicketsList.ClientSize.Width;
+        // Before the early returns: an empty or switched-off list still shows its titles.
+        LayoutTableHeader(_inProgressHeader, _inProgressList, InProgressColumns);
+        LayoutTableHeader(_newTicketsHeader, _newTicketsList, NewTicketColumns);
 
         if (_store == null)
         {
             var off = Lang.T("Tasks is off", "Tasks đang tắt");
-            FillList(_inProgressList, Array.Empty<DashboardRow>(), off);
-            FillList(_attentionList, Array.Empty<DashboardRow>(), off);
-            FillList(_newTicketsList, Array.Empty<DashboardRow>(), off);
+            FillList(_inProgressList, Array.Empty<Control>(), off);
+            FillList(_newTicketsList, Array.Empty<Control>(), off);
             return;
         }
         if (_data == null) return;
 
         // Every other row striped, counted per list.
-        FillList(_inProgressList, _data.InProgress.Select((ip, index) => InProgressRow(ip.Ticket, ip.PrSummary, RowWidth(_inProgressList), index % 2 == 1)).ToList(),
+        FillList(_inProgressList, _data.InProgress.Select((ip, index) => InProgressRow(ip.Ticket, ip.Prs, RowWidth(_inProgressList), index % 2 == 1)).ToList(),
             Lang.T("No tickets in progress", "Không có ticket đang làm"));
-        FillList(_attentionList, _data.Attention.Select((ai, index) => AttentionRow(ai, RowWidth(_attentionList), index % 2 == 1)).ToList(),
-            Lang.T("Nothing needs attention", "Không có gì cần xử lý"));
         FillList(_newTicketsList, _data.NewTickets.Select((jt, index) => NewTicketRow(jt, RowWidth(_newTicketsList), index % 2 == 1)).ToList(),
             Lang.T("No new tickets", "Không có ticket mới"));
     }
 
     private static int RowWidth(FlowLayoutPanel list) => list.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - UiScale.S(2);
 
+    private static void LayoutTableHeader(TaskTableHeader header, FlowLayoutPanel list, IReadOnlyList<TaskTableColumn> columns)
+    {
+        var rowWidth = Math.Max(0, RowWidth(list));
+        header.Width = rowWidth;
+        header.SetLayout(TicketTableRow.LayoutFor(rowWidth, columns));
+    }
+
     // Keeps the scroll position; an empty list shows emptyText instead.
-    private static void FillList(FlowLayoutPanel list, IReadOnlyList<DashboardRow> rows, string emptyText)
+    private static void FillList(FlowLayoutPanel list, IReadOnlyList<Control> rows, string emptyText)
     {
         var scroll = list.AutoScrollPosition;
         list.SuspendLayout();
@@ -725,4 +757,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
         if (action == null || _busyTickets.ContainsKey(ticketKey)) return;
         BeginInvoke(new Action(() => action.Invoke(ticketKey)));
     }
+
+    // Deferred like the ticket requests: the action may rebuild the row that holds the clicked button.
+    private void RaiseDeferred(Action action) => BeginInvoke(action);
 }

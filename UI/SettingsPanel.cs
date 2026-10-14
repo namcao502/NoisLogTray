@@ -19,11 +19,22 @@ internal sealed class SettingsPanel : UserControl
     private static readonly int Pad = UiScale.S(20);
     private readonly int _innerW;
     private readonly bool _wide;
+    private readonly Action? _onCleanupWorktrees;
+    private readonly Action? _onRebuild;
+    private readonly Action? _onSchedules;
+    private MacButton? _schedulesButton;
     private static readonly int RowH = UiScale.S(30); // pills, inputs and buttons share one height, as in the main window
     private static readonly int Gap = UiScale.S(8);
     private static readonly int CaptionH = UiScale.S(18); // a field's caption, above its input
+    private static readonly int OptionGroupGap = UiScale.S(40);
+
+    private const string TicketCheckCaptionEnglish = "Check Jira and PRs every (minutes)";
+    private const string TicketCheckCaptionVietnamese = "Kiểm tra Jira và PR mỗi (phút)";
+    private const char SecretMaskChar = '•';
+    private static readonly string SecretMask = new(SecretMaskChar, 8);
 
     private readonly Dictionary<string, TextBox> _fields = new();
+    private readonly Dictionary<string, string> _secretValues = new(); // saved secrets whose field shows SecretMask
     private readonly Label _status = new();
     private readonly List<(Control Control, string English, string Vietnamese)> _texts = new();
     private readonly List<Label> _primaryLabels = new();
@@ -31,8 +42,13 @@ internal sealed class SettingsPanel : UserControl
     private readonly List<Panel> _dividers = new();
     private readonly MacButton _english = MacButton.Secondary("English");
     private readonly MacButton _vietnamese = MacButton.Secondary("Tiếng Việt");
+    private readonly MacButton _dark = MacButton.Secondary("");
+    private readonly MacButton _light = MacButton.Secondary("");
     private readonly MacButton _startupOn = MacButton.Secondary("");
     private readonly MacButton _startupOff = MacButton.Secondary("");
+    // Bare numbers, so a pill reads the same in either language; the caption names the unit.
+    private readonly Dictionary<int, MacButton> _ticketCheckPills = TicketCheckInterval.ChoicesMinutes
+        .ToDictionary(m => m, m => MacButton.Secondary(m.ToString(CultureInfo.InvariantCulture)));
     private readonly MacButton _save = MacButton.Primary("");
     private bool _statusIsError;
     private int _y;
@@ -43,8 +59,12 @@ internal sealed class SettingsPanel : UserControl
     internal event Action<IReadOnlyDictionary<string, string>>? SaveRequested;
 
     // width is in physical pixels; null = the dialog's ClientW.
-    internal SettingsPanel(IReadOnlyDictionary<string, string> initial, int? width = null)
+    internal SettingsPanel(IReadOnlyDictionary<string, string> initial, int? width = null, Action? onCleanupWorktrees = null,
+        Action? onRebuild = null, Action? onSchedules = null)
     {
+        _onCleanupWorktrees = onCleanupWorktrees;
+        _onRebuild = onRebuild;
+        _onSchedules = onSchedules;
         var panelW = width ?? ClientW;
         _y = Pad;
         _innerW = panelW - 2 * Pad;
@@ -53,20 +73,31 @@ internal sealed class SettingsPanel : UserControl
 
         if (_wide)
         {
-            // The two option groups share one row, half the width each.
+            // The option groups share one row, left to right.
             var y = _y;
-            var column = (_innerW + Gap) / 2;
-            AddOptionGroup("Language", "Ngôn ngữ", Pad, _vietnamese, _english);
+            var left = AddOptionGroup("Language", "Ngôn ngữ", Pad, _vietnamese, _english) + OptionGroupGap;
             _y = y;
-            AddOptionGroup("Start with Windows", "Khởi động cùng Windows", Pad + column, _startupOn, _startupOff);
+            left = AddOptionGroup("Theme", "Giao diện", left, _dark, _light) + OptionGroupGap;
+            _y = y;
+            AddOptionGroup("Start with Windows", "Khởi động cùng Windows", left, _startupOn, _startupOff);
+            // Its own row: five more pills do not fit beside the other three groups at WideMinWidth.
+            AddOptionGroup(TicketCheckCaptionEnglish, TicketCheckCaptionVietnamese, Pad, TicketCheckPills());
         }
         else
         {
             AddOptionGroup("Language", "Ngôn ngữ", Pad, _vietnamese, _english);
+            AddOptionGroup("Theme", "Giao diện", Pad, _dark, _light);
             AddOptionGroup("Start with Windows", "Khởi động cùng Windows", Pad, _startupOn, _startupOff);
+            AddOptionGroup(TicketCheckCaptionEnglish, TicketCheckCaptionVietnamese, Pad, TicketCheckPills());
+        }
+        foreach (var (minutes, pill) in _ticketCheckPills)
+        {
+            pill.Click += (_, _) => SetTicketCheckInterval(minutes);
         }
         _english.Click += (_, _) => SetLanguage(vietnamese: false);
         _vietnamese.Click += (_, _) => SetLanguage(vietnamese: true);
+        _dark.Click += (_, _) => SetTheme(dark: true);
+        _light.Click += (_, _) => SetTheme(dark: false);
         _startupOn.Click += (_, _) => SetStartup(true);
         _startupOff.Click += (_, _) => SetStartup(false);
         AddDivider();
@@ -123,31 +154,62 @@ internal sealed class SettingsPanel : UserControl
         ShowSelections();
         _fields["JIRA_BASE_URL"].Text = Value(values, "JIRA_BASE_URL", AppConfig.DefaultJiraBaseUrl);
         _fields["JIRA_EMAIL"].Text = Value(values, "JIRA_EMAIL", "");
-        _fields["JIRA_API_TOKEN"].Text = Value(values, "JIRA_API_TOKEN", "");
-        _fields["HRM_API_KEY"].Text = Value(values, "HRM_API_KEY", "");
+        SetSecretField("JIRA_API_TOKEN", Value(values, "JIRA_API_TOKEN", ""));
+        SetSecretField("HRM_API_KEY", Value(values, "HRM_API_KEY", ""));
         _fields["TSC_GRAPH_COLUMNS"].Text = Value(values, "TSC_GRAPH_COLUMNS", "M, J");
         _fields["LOG_TIME"].Text = AppConfig.ParseLogTime(Value(values, "LOG_TIME", ""))
             .ToString("h:mm tt", CultureInfo.InvariantCulture);
         _fields["DEV_REPO_PATH"].Text = Value(values, "DEV_REPO_PATH", AppConfig.DefaultDevRepoPath);
-        _fields["AZURE_DEVOPS_PAT"].Text = Value(values, "AZURE_DEVOPS_PAT", "");
-        _fields["TEAMS_WEBHOOK_URL"].Text = Value(values, "TEAMS_WEBHOOK_URL", "");
-        _fields["TEAMS_POST_WORKFLOW_URL"].Text = Value(values, "TEAMS_POST_WORKFLOW_URL", "");
+        SetSecretField("AZURE_DEVOPS_PAT", Value(values, "AZURE_DEVOPS_PAT", ""));
+        SetSecretField("TEAMS_WEBHOOK_URL", Value(values, "TEAMS_WEBHOOK_URL", ""));
+        SetSecretField("TEAMS_POST_WORKFLOW_URL", Value(values, "TEAMS_POST_WORKFLOW_URL", ""));
         _statusIsError = false;
         _status.Text = "";
+    }
+
+    // A saved secret shows as a short fixed mask instead of one dot per character (tokens and URLs run to hundreds).
+    private void SetSecretField(string key, string value)
+    {
+        _secretValues.Remove(key);
+        if (value.Length == 0)
+        {
+            _fields[key].Text = "";
+            return;
+        }
+
+        _secretValues[key] = value;
+        _fields[key].Text = SecretMask;
+    }
+
+    // A secret field still showing its mask holds the saved value, untouched.
+    private string FieldText(string key)
+    {
+        var text = _fields[key].Text;
+        if (text != SecretMask)
+        {
+            return text;
+        }
+
+        // A mask with no saved value behind it (e.g. Ctrl+Z after an edit) is never a secret.
+        return _secretValues.GetValueOrDefault(key, "");
     }
 
     internal void FocusFirstField() => _fields["JIRA_EMAIL"].Focus();
 
     // What is typed now, saved or not; the page carries it over when it rebuilds the panel at a new width.
-    internal IReadOnlyDictionary<string, string> CurrentValues() =>
-        _fields.ToDictionary(field => field.Key, field => field.Value.Text);
+    internal IReadOnlyDictionary<string, string> CurrentValues()
+    {
+        return _fields.Keys.ToDictionary(fk => fk, fk => FieldText(fk));
+    }
 
     private static string Value(IReadOnlyDictionary<string, string> values, string key, string fallback) =>
         values.TryGetValue(key, out var v) && v.Length != 0 ? v : fallback;
 
-    // A muted caption over a row of pills; the selected pill reads as the primary button.
-    private void AddOptionGroup(string english, string vietnamese, int left, params MacButton[] pills)
+    // A muted caption over a row of pills; the selected pill reads as the primary button. Returns the group's right edge.
+    private int AddOptionGroup(string english, string vietnamese, int left, params MacButton[] pills)
     {
+        var captionRight = left + Math.Max(TextRenderer.MeasureText(english, LabelFont).Width,
+            TextRenderer.MeasureText(vietnamese, LabelFont).Width);
         AddLabelAt(left, english, vietnamese, LabelFont, _secondaryLabels);
         var x = left;
         foreach (var pill in pills)
@@ -159,13 +221,14 @@ internal sealed class SettingsPanel : UserControl
             x += pill.Width + Gap;
         }
         _y += RowH + UiScale.S(14);
+        return Math.Max(captionRight, x - Gap);
     }
 
     // Wide enough for the pill's text in either language.
     private static int PillWidth(MacButton pill)
     {
         if (pill.Text.Length != 0) return TextRenderer.MeasureText(pill.Text, PillFont).Width + UiScale.S(28);
-        return UiScale.S(64); // On/Off pills: "On"/"Bật", "Off"/"Tắt"
+        return UiScale.S(64); // translated short words: "On"/"Bật", "Off"/"Tắt", "Dark"/"Tối", "Light"/"Sáng"
     }
 
     private Label NewLabel(Font font, List<Label> role)
@@ -265,6 +328,23 @@ internal sealed class SettingsPanel : UserControl
         var h = box.PreferredHeight;
         box.SetBounds(UiScale.S(10), (host.Height - h) / 2, host.Width - UiScale.S(20), h);
         box.KeyDown += OnFieldKeyDown;
+        if (secret)
+        {
+            // Posted: a mouse click would otherwise place the caret after the selection, and typing would append to the mask.
+            box.Enter += (_, _) => BeginInvoke(box.SelectAll);
+            // The first edit of a masked field drops the saved value and whatever is left of the mask,
+            // so a half-deleted mask can never be saved as the secret.
+            box.TextChanged += (_, _) =>
+            {
+                if (box.Text == SecretMask || !_secretValues.Remove(key))
+                {
+                    return;
+                }
+
+                box.Text = box.Text.Replace(SecretMaskChar.ToString(), "");
+                box.SelectionStart = box.Text.Length;
+            };
+        }
         host.Controls.Add(box);
         Controls.Add(host);
         _fields[key] = box;
@@ -299,24 +379,62 @@ internal sealed class SettingsPanel : UserControl
 
     private void AddFooter()
     {
-        var logs = MacButton.Secondary("");
-        logs.Size = new Size(Math.Max(TextRenderer.MeasureText("Open log folder", PillFont).Width,
-            TextRenderer.MeasureText("Mở thư mục log", PillFont).Width) + UiScale.S(28), RowH);
-        logs.Location = new Point(Pad, _y);
-        logs.Click += (_, _) =>
+        var footerButtons = new List<(string English, string Vietnamese, Action OnClick)>
         {
-            Directory.CreateDirectory(AppPaths.LogDirectory);
-            Process.Start(new ProcessStartInfo(AppPaths.LogDirectory) { UseShellExecute = true });
+            ("Open log folder", "Mở thư mục log", () =>
+            {
+                Directory.CreateDirectory(AppPaths.LogDirectory);
+                Process.Start(new ProcessStartInfo(AppPaths.LogDirectory) { UseShellExecute = true });
+            }),
         };
-        Controls.Add(logs);
-        _texts.Add((logs, "Open log folder", "Mở thư mục log"));
+        if (_onCleanupWorktrees != null)
+        {
+            footerButtons.Add(("Clean up worktrees...", "Dọn worktree...", _onCleanupWorktrees));
+        }
+        if (_onSchedules != null)
+        {
+            footerButtons.Add(("Schedules...", "Lịch chạy...", _onSchedules));
+        }
+        if (_onRebuild != null)
+        {
+            footerButtons.Add(("Rebuild and restart", "Build lại và khởi động lại", _onRebuild));
+        }
+
+        var x = Pad;
+        foreach (var (english, vietnamese, onClick) in footerButtons)
+        {
+            var button = MacButton.Secondary("");
+            button.Size = new Size(Math.Max(TextRenderer.MeasureText(english, PillFont).Width,
+                TextRenderer.MeasureText(vietnamese, PillFont).Width) + UiScale.S(28), RowH);
+            // A button that would run past the card starts a new row.
+            if (x != Pad && x + button.Width > Pad + _innerW)
+            {
+                x = Pad;
+                _y += RowH + Gap;
+            }
+            button.Location = new Point(x, _y);
+            button.Click += (_, _) => onClick();
+            if (ReferenceEquals(onClick, _onSchedules)) _schedulesButton = button;
+            Controls.Add(button);
+            _texts.Add((button, english, vietnamese));
+            x += button.Width + Gap;
+        }
         _y += RowH;
+    }
+
+    // Null without its action (the first-run dialog).
+    internal MacButton? SchedulesButton => _schedulesButton;
+
+    // A bad knowledge-scan run not seen yet.
+    internal void ShowSchedulesDot(bool show)
+    {
+        if (_schedulesButton != null) _schedulesButton.ShowDot = show;
     }
 
     private void OnLangChanged()
     {
         ApplyLanguage();
-        ShowSelections(); // the language pills follow a toggle made from the header too
+        ShowSelections(); // the pills follow a change made in the other Settings panel (page or dialog) too
     }
 
     private void ApplyLanguage()
@@ -324,6 +442,8 @@ internal sealed class SettingsPanel : UserControl
         foreach (var (control, english, vietnamese) in _texts) control.Text = Lang.T(english, vietnamese);
         _startupOn.Text = Lang.T("On", "Bật");
         _startupOff.Text = Lang.T("Off", "Tắt");
+        _dark.Text = Lang.T("Dark", "Tối");
+        _light.Text = Lang.T("Light", "Sáng");
     }
 
     private void ApplyTheme()
@@ -338,6 +458,7 @@ internal sealed class SettingsPanel : UserControl
         }
         foreach (var divider in _dividers) divider.BackColor = Theme.CardBorder;
         if (!_statusIsError) _status.ForeColor = Theme.TextSecondary;
+        ShowSelections();
         Invalidate(true);
     }
 
@@ -345,6 +466,12 @@ internal sealed class SettingsPanel : UserControl
     {
         _english.Selected = !Lang.Vietnamese;
         _vietnamese.Selected = Lang.Vietnamese;
+        _dark.Selected = Theme.Dark;
+        _light.Selected = !Theme.Dark;
+        foreach (var (minutes, pill) in _ticketCheckPills)
+        {
+            pill.Selected = minutes == TicketCheckInterval.Minutes;
+        }
         var startup = StartupService.IsEnabled();
         _startupOn.Selected = startup;
         _startupOff.Selected = !startup;
@@ -353,6 +480,23 @@ internal sealed class SettingsPanel : UserControl
     private void SetLanguage(bool vietnamese)
     {
         if (Lang.Vietnamese != vietnamese) Lang.Toggle(); // re-labels this panel and the app
+        ShowSelections();
+    }
+
+    private void SetTheme(bool dark)
+    {
+        if (Theme.Dark != dark) Theme.Toggle(); // repaints this panel and the app
+        ShowSelections();
+    }
+
+    private MacButton[] TicketCheckPills()
+    {
+        return TicketCheckInterval.ChoicesMinutes.Select(m => _ticketCheckPills[m]).ToArray();
+    }
+
+    private void SetTicketCheckInterval(int minutes)
+    {
+        TicketCheckInterval.Set(minutes); // the tray re-arms its timer
         ShowSelections();
     }
 
@@ -383,8 +527,8 @@ internal sealed class SettingsPanel : UserControl
     {
         var baseUrl = _fields["JIRA_BASE_URL"].Text.Trim();
         var email = _fields["JIRA_EMAIL"].Text.Trim();
-        var token = _fields["JIRA_API_TOKEN"].Text.Trim();
-        var hrmKey = _fields["HRM_API_KEY"].Text.Trim();
+        var token = FieldText("JIRA_API_TOKEN").Trim();
+        var hrmKey = FieldText("HRM_API_KEY").Trim();
         var columns = TscCells.ParseColumns(_fields["TSC_GRAPH_COLUMNS"].Text);
         var logTimeText = _fields["LOG_TIME"].Text.Trim();
 
@@ -452,9 +596,9 @@ internal sealed class SettingsPanel : UserControl
             ["TSC_GRAPH_COLUMNS"] = string.Join(", ", columns),
             ["LOG_TIME"] = logTime.ToString("h:mm tt", CultureInfo.InvariantCulture),
             ["DEV_REPO_PATH"] = _fields["DEV_REPO_PATH"].Text.Trim(),
-            ["AZURE_DEVOPS_PAT"] = _fields["AZURE_DEVOPS_PAT"].Text.Trim(),
-            ["TEAMS_WEBHOOK_URL"] = _fields["TEAMS_WEBHOOK_URL"].Text.Trim(),
-            ["TEAMS_POST_WORKFLOW_URL"] = _fields["TEAMS_POST_WORKFLOW_URL"].Text.Trim(),
+            ["AZURE_DEVOPS_PAT"] = FieldText("AZURE_DEVOPS_PAT").Trim(),
+            ["TEAMS_WEBHOOK_URL"] = FieldText("TEAMS_WEBHOOK_URL").Trim(),
+            ["TEAMS_POST_WORKFLOW_URL"] = FieldText("TEAMS_POST_WORKFLOW_URL").Trim(),
         };
         SaveRequested?.Invoke(values); // last: the host may dispose this panel in response
     }

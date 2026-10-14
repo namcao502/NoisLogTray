@@ -65,6 +65,35 @@ public class TerminalViewTests
     }
 
     [Fact]
+    public void LinkPath_TurnsAFileHyperlinkIntoItsPath()
+    {
+        using var temp = new TempDirectory();
+        var file = Path.Combine(temp.Path, "docs", "open po proof.sql");
+        var fileUrl = new Uri(file).AbsoluteUri; // file:///C:/.../open%20po%20proof.sql
+
+        Assert.Equal(file, TerminalView.LinkPath(fileUrl));
+        Assert.Equal(file, TerminalView.LinkPath(fileUrl + "#L12"));
+    }
+
+    [Theory]
+    [InlineData("docs/MDP-9262/open-po-proof.sql")]
+    [InlineData(@"docs\MDP-9262\open-po-proof.sql:12")]
+    public void LinkPath_KeepsAPathAsWritten(string url)
+    {
+        Assert.Equal(url, TerminalView.LinkPath(url));
+    }
+
+    [Theory]
+    [InlineData("https://example.com/a.sql")]
+    [InlineData("javascript:alert(1)")]
+    [InlineData("mailto:a@b.c")]
+    [InlineData("")]
+    public void LinkPath_IsNull_ForAnythingButAFileLink(string url)
+    {
+        Assert.Null(TerminalView.LinkPath(url));
+    }
+
+    [Fact]
     public void ResolvePathLink_ReturnsNull_ForARelativePathWithoutASessionFolder()
     {
         Assert.Null(TerminalView.ResolvePathLink("UI/a.cs", null));

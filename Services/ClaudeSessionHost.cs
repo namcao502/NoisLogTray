@@ -44,6 +44,9 @@ internal sealed class ClaudeSessionHost : IDisposable
 
     internal string? CurrentDirectory { get; private set; }
 
+    // Whether the last Start passed hook settings, so claude's hooks will tell when it really runs.
+    internal bool HasHooks { get; private set; }
+
     // Returns the output so far and subscribes in one step, so no chunk is lost or shown twice.
     internal byte[] Attach(Action<byte[]> onOutput)
     {
@@ -84,6 +87,13 @@ internal sealed class ClaudeSessionHost : IDisposable
         return $"{shell} -NoLogo -NoExit -Command \"{script}\"";
     }
 
+    // The native installer puts claude.exe here; otherwise it is looked up on PATH.
+    internal static string DefaultClaudeExecutable()
+    {
+        var localClaude = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "bin", "claude.exe");
+        return File.Exists(localClaude) ? localClaude : "claude.exe";
+    }
+
     private static string PowerShellQuote(string text)
     {
         return "'" + text.Replace("'", "''") + "'";
@@ -101,15 +111,14 @@ internal sealed class ClaudeSessionHost : IDisposable
             if (!_fallBackToProfile) throw new DirectoryNotFoundException($"Directory not found: {directory}");
             directory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         }
-        // The native installer puts claude.exe here; otherwise PowerShell searches PATH. Always the .exe, since a bare
-        // `claude` inside the function would call the function itself.
-        var localClaude = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".local", "bin", "claude.exe");
-        var claudeExecutable = _claudeExecutable ?? (File.Exists(localClaude) ? localClaude : "claude.exe");
+        // Always the .exe, since a bare `claude` inside the function would call the function itself.
+        var claudeExecutable = _claudeExecutable ?? DefaultClaudeExecutable();
         var powerShell7 = (Environment.GetEnvironmentVariable("PATH") ?? "")
             .Split(';', StringSplitOptions.RemoveEmptyEntries)
-            .Select(directoryOnPath => Path.Combine(directoryOnPath.Trim(), "pwsh.exe"))
+            .Select(d => Path.Combine(d.Trim(), "pwsh.exe"))
             .FirstOrDefault(File.Exists);
-        var commandLine = BuildCommandLine(powerShell7, claudeExecutable, _settingsFile?.Invoke(), _argument?.Invoke());
+        var settingsFile = _settingsFile?.Invoke();
+        var commandLine = BuildCommandLine(powerShell7, claudeExecutable, settingsFile, _argument?.Invoke());
 
         var session = new PseudoConsoleSession(commandLine, directory, columns, rows);
         lock (_lock)
@@ -118,6 +127,7 @@ internal sealed class ClaudeSessionHost : IDisposable
             _replayBytes = 0;
             _session = session;
             CurrentDirectory = directory;
+            HasHooks = !string.IsNullOrEmpty(settingsFile);
         }
         session.Output += bytes => OnOutput(session, bytes);
         session.Exited += () => OnExited(session);

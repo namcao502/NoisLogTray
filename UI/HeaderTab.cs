@@ -4,23 +4,27 @@ using System.Drawing.Drawing2D;
 
 namespace NoisLogTray;
 
-// One open ticket in the Ticket page's strip: the key and its × in a single pill, like a browser tab, so the × reads as
-// this tab's close. A middle click closes it too, and Delete closes the focused tab.
-internal sealed class TicketTab : Control
+// One tab of a HeaderTabStrip: text and × in one pill like a browser tab (a middle click or Delete closes too), and with a
+// menu a ▾ between them (or Alt+Down) asks for it.
+internal sealed class HeaderTab : Control
 {
     private static readonly int PadLeft = UiScale.S(12);
     private static readonly int CloseSize = UiScale.S(18);
     private static readonly int ClosePadRight = UiScale.S(5);
     private static readonly int CloseGap = UiScale.S(6);
     private static readonly int Radius = UiScale.S(6);
+    private static readonly int MenuGap = UiScale.S(2);
     private static readonly Font CloseFont = Icons.Regular(13); // inside the 18px hover circle
+    private readonly bool _hasMenu;
     private bool _selected;
     private bool _showDot;
     private bool _hover;
     private bool _closeHover;
+    private bool _menuHover;
 
     internal event Action? SelectRequested;
     internal event Action? CloseRequested;
+    internal event Action? MenuRequested;
 
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal bool Selected
@@ -29,7 +33,7 @@ internal sealed class TicketTab : Control
         set { _selected = value; Invalidate(); }
     }
 
-    // Claude waits for the user in this ticket.
+    // Claude waits for the user in this tab.
     [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
     internal bool ShowDot
     {
@@ -37,16 +41,18 @@ internal sealed class TicketTab : Control
         set { _showDot = value; Invalidate(); }
     }
 
-    internal TicketTab(string ticketKey, int height)
+    internal HeaderTab(string text, int height, bool hasMenu = false)
     {
+        _hasMenu = hasMenu;
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer
             | ControlStyles.ResizeRedraw | ControlStyles.Selectable, true);
-        Text = ticketKey;
+        Text = text;
         Font = UiScale.Font("Segoe UI", 9.5F);
         Cursor = Cursors.Hand;
         TabStop = true;
         AccessibleRole = AccessibleRole.PageTab;
-        Size = new Size(PadLeft + TextRenderer.MeasureText(ticketKey, Font).Width + CloseGap + CloseSize + ClosePadRight, height);
+        var menuWidth = hasMenu ? CloseSize + MenuGap : 0;
+        Size = new Size(PadLeft + TextRenderer.MeasureText(text, Font).Width + CloseGap + menuWidth + CloseSize + ClosePadRight, height);
         Theme.Changed += Invalidate;
     }
 
@@ -58,10 +64,17 @@ internal sealed class TicketTab : Control
 
     internal Rectangle CloseBounds => new(Width - ClosePadRight - CloseSize, (Height - CloseSize) / 2, CloseSize, CloseSize);
 
-    // The mouse's way in (and the tests'): the × or a middle click closes, a left click anywhere else selects.
+    // Left of the ×; empty for a tab without a menu.
+    internal Rectangle MenuBounds => _hasMenu
+        ? new Rectangle(CloseBounds.Left - MenuGap - CloseSize, (Height - CloseSize) / 2, CloseSize, CloseSize)
+        : Rectangle.Empty;
+
+    // The mouse's way in (and the tests'): the × or a middle click closes, the ▾ asks for the menu, a left click anywhere
+    // else selects.
     internal void Press(Point location, MouseButtons button)
     {
         if (button == MouseButtons.Middle || button == MouseButtons.Left && CloseBounds.Contains(location)) CloseRequested?.Invoke();
+        else if (button == MouseButtons.Left && MenuBounds.Contains(location)) MenuRequested?.Invoke();
         else if (button == MouseButtons.Left) SelectRequested?.Invoke();
     }
 
@@ -75,9 +88,11 @@ internal sealed class TicketTab : Control
     {
         base.OnMouseMove(e);
         var closeHover = CloseBounds.Contains(e.Location);
-        if (_hover && closeHover == _closeHover) return;
+        var menuHover = MenuBounds.Contains(e.Location);
+        if (_hover && closeHover == _closeHover && menuHover == _menuHover) return;
         _hover = true;
         _closeHover = closeHover;
+        _menuHover = menuHover;
         Invalidate();
     }
 
@@ -86,6 +101,7 @@ internal sealed class TicketTab : Control
         base.OnMouseLeave(e);
         _hover = false;
         _closeHover = false;
+        _menuHover = false;
         Invalidate();
     }
 
@@ -94,6 +110,7 @@ internal sealed class TicketTab : Control
         base.OnKeyDown(e);
         if (e.KeyCode == Keys.Enter || e.KeyCode == Keys.Space) SelectRequested?.Invoke();
         else if (e.KeyCode == Keys.Delete) CloseRequested?.Invoke();
+        else if (_hasMenu && e.Alt && e.KeyCode == Keys.Down) MenuRequested?.Invoke();
     }
 
     protected override void OnGotFocus(EventArgs e) { Invalidate(); base.OnGotFocus(e); }
@@ -113,7 +130,8 @@ internal sealed class TicketTab : Control
             g.FillPath(brush, path);
 
         var close = CloseBounds;
-        var textRect = new Rectangle(PadLeft, 0, close.Left - CloseGap - PadLeft, Height);
+        var textRight = _hasMenu ? MenuBounds.Left : close.Left;
+        var textRect = new Rectangle(PadLeft, 0, textRight - CloseGap - PadLeft, Height);
         TextRenderer.DrawText(g, Text, Font, textRect, foreground,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis | TextFormatFlags.NoPrefix);
 
@@ -123,6 +141,16 @@ internal sealed class TicketTab : Control
             g.FillEllipse(hoverBrush, close);
         }
         Icons.Draw(g, Icons.Dismiss, CloseFont, close, foreground);
+
+        if (_hasMenu)
+        {
+            if (_menuHover)
+            {
+                using var menuHoverBrush = new SolidBrush(Color.FromArgb(_selected ? 70 : 45, foreground));
+                g.FillEllipse(menuHoverBrush, MenuBounds);
+            }
+            Icons.Draw(g, Icons.ChevronDown, CloseFont, MenuBounds, foreground);
+        }
 
         if (_showDot)
         {

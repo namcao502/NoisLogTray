@@ -15,6 +15,10 @@ public sealed class GitTestRepo : IDisposable
 
         RunGit(_directory.Path, "init", "--bare", "--initial-branch=main", originPath);
         RunGit(_directory.Path, "clone", originPath, RepoPath);
+        // CI has no global git identity; docs/ and .claude/ are ignored like in the real repo.
+        Git("config", "user.name", "Test");
+        Git("config", "user.email", "test@example.com");
+        File.AppendAllText(Path.Combine(RepoPath, ".git", "info", "exclude"), "/docs/\n/.claude/\n");
         Git("checkout", "-b", "main");
         WriteFile("README.md", "seed");
         Commit("seed");
@@ -22,7 +26,10 @@ public sealed class GitTestRepo : IDisposable
     }
 
     // The folder holding both the clone and its origin.
-    public string RootPath => _directory.Path;
+    public string RootPath
+    {
+        get { return _directory.Path; }
+    }
 
     public string RepoPath { get; }
 
@@ -46,7 +53,7 @@ public sealed class GitTestRepo : IDisposable
     public void Commit(string message)
     {
         Git("add", "-A");
-        Git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", message);
+        Git("commit", "-m", message);
     }
 
     public static string RunGit(string workingDirectory, params string[] arguments)

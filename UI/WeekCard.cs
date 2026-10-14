@@ -105,7 +105,7 @@ internal sealed class WeekCard : Card
         var buttonY = UiScale.S(7);
         var buttonH = UiScale.S(30);
         _refresh.Size = new Size(ButtonWidths.ToolbarWidth(_refresh.Font), buttonH);
-        _refresh.Location = new Point(UiScale.S(16 + 528) - _refresh.Width, buttonY);
+        _refresh.Location = new Point(UiScale.S(LogPage.CardW - 16) - _refresh.Width, buttonY);
         _refresh.Click += (_, _) => LoadWeekAsync(allowSniff: true);
         _next.Size = new Size(UiScale.S(34), buttonH);
         _next.Glyph = Icons.ChevronRight;
@@ -116,12 +116,13 @@ internal sealed class WeekCard : Card
         _prev.Location = new Point(_next.Left - UiScale.S(4) - _prev.Width, buttonY);
         _prev.Click += (_, _) => Shift(-7);
 
+        // Over the rows' HRM and TSC dots (BuildRow), which sit 16px further left inside the row list.
         Controls.Add(SectionHeader(_dayHeader, Lang.T("DAY", "NGÀY"), UiScale.S(24), UiScale.S(46)));
-        Controls.Add(SectionHeader(_hrmHeader, Lang.T("HRM (HOURS)", "HRM (GIỜ)"), UiScale.S(166), UiScale.S(46)));
-        Controls.Add(SectionHeader(_tscHeader, "TSC (TICKET)", UiScale.S(316), UiScale.S(46)));
+        Controls.Add(SectionHeader(_hrmHeader, Lang.T("HRM (HOURS)", "HRM (GIỜ)"), UiScale.S(128), UiScale.S(46)));
+        Controls.Add(SectionHeader(_tscHeader, "TSC (TICKET)", UiScale.S(236), UiScale.S(46)));
 
         _rows.Location = UiScale.S(new Point(16, RowsY));
-        _rows.Size = new Size(UiScale.S(528), 5 * RowH); // each row is RowH tall: scaled per row, not as one sum
+        _rows.Size = new Size(UiScale.S(LogPage.CardW - 32), 5 * RowH); // each row is RowH tall: scaled per row, not as one sum
         _rows.FlowDirection = FlowDirection.TopDown;
         _rows.WrapContents = false;
         _rows.AutoScroll = false;
@@ -131,7 +132,7 @@ internal sealed class WeekCard : Card
         _status.AutoSize = false;
         ThemedToolTip.Track(_status);
         _status.Location = UiScale.S(new Point(16, StatusY));
-        _status.Size = UiScale.S(new Size(528, 18));
+        _status.Size = UiScale.S(new Size(LogPage.CardW - 32, 18));
         _status.Font = LabelFont;
         _status.ForeColor = Theme.TextSecondary;
         _status.BackColor = Color.Transparent;
@@ -198,8 +199,8 @@ internal sealed class WeekCard : Card
     private static string StatusText(IReadOnlyList<DayCoverage> coverage) =>
         coverage.Any(dc => dc.TscState == TscReadState.NoToken)
             ? Lang.T("TSC not read yet: Refresh reads it (Chrome runs in the background).", "Chưa đọc TSC: bấm Làm mới để đọc (Chrome chạy ngầm).")
-            : Lang.T("Green = logged, amber = partial, red = missing, gray = not due / off / not read.",
-                "Xanh = đã log, vàng = thiếu, đỏ = chưa log, xám = chưa tới / nghỉ / không đọc được.");
+            : Lang.T("Green logged, amber partial, red missing, gray not due / off / not read.",
+                "Xanh đã log, vàng thiếu, đỏ chưa log, xám chưa tới / nghỉ / không đọc.");
 
     private static IReadOnlyList<DateOnly> Weekdays(DateOnly monday)
     {
@@ -300,17 +301,17 @@ internal sealed class WeekCard : Card
         {
             Text = Lang.Vietnamese ? c.Date.ToString("ddd  dd/MM", Lang.Culture) : c.Date.ToString("ddd  MMM d", Lang.Culture),
             Location = new Point(UiScale.S(8), 0),
-            Size = new Size(UiScale.S(130), RowH),
+            Size = new Size(UiScale.S(100), RowH),
             TextAlign = ContentAlignment.MiddleLeft,
             Font = DayFont,
             ForeColor = Theme.TextPrimary,
             BackColor = Color.Transparent,
         });
 
-        var tscTextX = UiScale.S(318);
-        row.Controls.Add(Dot(hColor, UiScale.S(150)));
-        row.Controls.Add(StatusLabel(hText, hColor, UiScale.S(168), UiScale.S(118)));
-        row.Controls.Add(Dot(tColor, UiScale.S(300)));
+        var tscTextX = UiScale.S(238);
+        row.Controls.Add(Dot(hColor, UiScale.S(112)));
+        row.Controls.Add(StatusLabel(hText, hColor, UiScale.S(130), UiScale.S(86)));
+        row.Controls.Add(Dot(tColor, UiScale.S(220)));
         row.Controls.Add(StatusLabel(tText, tColor, tscTextX, rowWidth - tscTextX - UiScale.S(6)));
 
         if (actionable) WireRowActions(row, c.Date);

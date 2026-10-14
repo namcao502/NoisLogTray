@@ -119,6 +119,41 @@ public class TicketPollerTests : IDisposable
     }
 
     [Fact]
+    public async Task PollAsync_MovesDoneTicketBackToInProgress_WhenJiraSendsItBackFromQa()
+    {
+        _ticketStore.SaveSeen(new List<string> { "MDP-1" });
+        _ticketStore.SaveDone(new Dictionary<string, JiraTicket> { ["MDP-1"] = Ticket("MDP-1") with { Status = "Ready to Test" } });
+        _jira.Assigned["MDP-1"] = Ticket("MDP-1") with { Status = "QA Failed" };
+
+        var result = await _ticketPoller.PollAsync(_jira);
+
+        Assert.NotNull(result);
+        Assert.Equal(new[] { "MDP-1" }, result.ReopenedTickets.Select(t => t.Key));
+        Assert.Empty(_ticketStore.LoadDone());
+        Assert.Equal("QA Failed", _ticketStore.LoadStarted()["MDP-1"].Status);
+    }
+
+    [Fact]
+    public async Task PollAsync_KeepsDoneTicket_WhenJiraStatusDidNotMoveBack()
+    {
+        _ticketStore.SaveSeen(new List<string> { "MDP-1", "MDP-2" });
+        _ticketStore.SaveDone(new Dictionary<string, JiraTicket>
+        {
+            ["MDP-1"] = Ticket("MDP-1") with { Status = "In Progress" },
+            ["MDP-2"] = Ticket("MDP-2") with { Status = "PR & Code Review" },
+        });
+        _jira.Assigned["MDP-1"] = Ticket("MDP-1") with { Status = "In Progress" };
+        _jira.Assigned["MDP-2"] = Ticket("MDP-2") with { Status = "Ready to Test" };
+
+        var result = await _ticketPoller.PollAsync(_jira);
+
+        Assert.NotNull(result);
+        Assert.Empty(result.ReopenedTickets);
+        Assert.Equal(new[] { "MDP-1", "MDP-2" }, _ticketStore.LoadDone().Keys.Order());
+        Assert.Equal("Ready to Test", _ticketStore.LoadDone()["MDP-2"].Status);
+    }
+
+    [Fact]
     public async Task PollAsync_ReturnsNull_WhenAssignedQueryThrows()
     {
         _jira.AssignedException = new HttpRequestException("boom");

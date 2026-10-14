@@ -171,6 +171,8 @@ internal sealed class ModernCalendar : Control
 // Borderless, rounded, shadowed popup host for the calendar.
 internal sealed class CalendarPopupForm : Form
 {
+    private static readonly int Radius = UiScale.S(8);
+
     internal CalendarPopupForm()
     {
         FormBorderStyle = FormBorderStyle.None;
@@ -178,22 +180,13 @@ internal sealed class CalendarPopupForm : Form
         ShowInTaskbar = false;
         TopMost = true;
         BackColor = Theme.CardSurface;
-    }
-
-    protected override CreateParams CreateParams
-    {
-        get
-        {
-            var cp = base.CreateParams;
-            cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW
-            return cp;
-        }
+        WindowShadow.Attach(this, Radius);
     }
 
     protected override void OnShown(EventArgs e)
     {
         base.OnShown(e);
-        var d = UiScale.S(16);
+        var d = 2 * Radius;
         var w = ClientSize.Width;
         var h = ClientSize.Height;
         using var path = new GraphicsPath();

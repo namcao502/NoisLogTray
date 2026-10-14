@@ -44,6 +44,17 @@ internal sealed class SixPmScheduler : IDisposable
         _log?.Invoke($"[scheduler] Log time set to {fireTime:HH:mm}; next fire at {next:yyyy-MM-dd HH:mm}.");
     }
 
+    internal DateTimeOffset NextFire
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _nextFire;
+            }
+        }
+    }
+
     internal void Start()
     {
         DateTimeOffset next;

@@ -49,6 +49,17 @@ public class TicketBoardTests : IDisposable
     }
 
     [Fact]
+    public void Reopen_MovesTicketFromDoneToStarted_WhenTicketIsDone()
+    {
+        _ticketStore.SaveDone(new Dictionary<string, JiraTicket> { ["MDP-1"] = _ticket });
+
+        _ticketBoard.Reopen("MDP-1");
+
+        Assert.Empty(_ticketStore.LoadDone());
+        Assert.Equal(_ticket, _ticketStore.LoadStarted()["MDP-1"]);
+    }
+
+    [Fact]
     public void Add_PutsTicketInPendingAndSeen_WhenTicketIsNotOnBoard()
     {
         _ticketStore.SaveSeen(new List<string>());

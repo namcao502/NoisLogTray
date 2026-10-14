@@ -1,6 +1,7 @@
 namespace NoisLogTray;
 
-// One Jira poll: files newly assigned tickets under New and spots started tickets that Jira finished.
+// One Jira poll: files newly assigned tickets under New, spots started tickets that Jira finished, and moves Done
+// tickets Jira sent back for more work to In progress.
 internal sealed class TicketPoller
 {
     private readonly TicketStore _ticketStore;
@@ -26,6 +27,8 @@ internal sealed class TicketPoller
             return null;
         }
 
+        // The assigned query holds every ticket not yet Done in Jira, so a sent-back one is in it again.
+        var reopenedTickets = _ticketBoard.ReopenSentBack(assigned);
         _ticketBoard.UpdateTicketDetails(assigned);
 
         var seen = _ticketStore.LoadSeen();
@@ -62,7 +65,7 @@ internal sealed class TicketPoller
         _ticketStore.SaveSeen(seenKeys.Concat(keysNewToSeen));
 
         var finishedTickets = await RefreshOffPollTicketsAsync(jira, assigned, pending, started, ct);
-        return new TicketPollResult(newTickets, finishedTickets);
+        return new TicketPollResult(newTickets, finishedTickets, reopenedTickets);
     }
 
     // Tickets that left the assigned query (e.g. closed) are fetched one by one; those turning Done are reported.

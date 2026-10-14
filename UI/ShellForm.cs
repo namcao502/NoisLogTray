@@ -31,8 +31,6 @@ internal sealed class ShellForm : Form
     private readonly WindowGlyphButton _menuBtn = new(WindowGlyphButton.GlyphKind.Menu);
     private readonly NotificationBell _bell = new();
     private readonly BusySpinner _spinner = new(BusyWork.Shared);
-    private readonly ThemeToggleButton _themeBtn = new();
-    private readonly LanguageToggleButton _langBtn = new();
     private readonly WindowGlyphButton _minimizeBtn = new(WindowGlyphButton.GlyphKind.Minimize);
     private readonly WindowGlyphButton _maximizeBtn = new(WindowGlyphButton.GlyphKind.Maximize);
     private readonly CloseButton _closeBtn = new() { Surface = () => Theme.WindowBg };
@@ -148,7 +146,7 @@ internal sealed class ShellForm : Form
         _headerTitle.ForeColor = Theme.TextPrimary;
         _headerTitle.UseMnemonic = false;
 
-        // Right to left: close, maximize/restore, minimize, a wider gap, language, theme, bell, the busy spinner.
+        // Right to left: close, maximize/restore, minimize, a wider gap, bell, the busy spinner.
         _headerButtons.Dock = DockStyle.Right;
         _headerButtons.FlowDirection = FlowDirection.RightToLeft;
         _headerButtons.WrapContents = false;
@@ -162,15 +160,14 @@ internal sealed class ShellForm : Form
         _maximizeBtn.Click += (_, _) => ToggleMaximized();
         _minimizeBtn.Click += (_, _) => WindowState = FormWindowState.Minimized;
         _bell.Click += (_, _) => OpenNoticeHistory();
-        _themeBtn.OnWindow = true;
 
-        var buttons = new Control[] { _closeBtn, _maximizeBtn, _minimizeBtn, _langBtn, _themeBtn, _bell, _spinner };
+        var buttons = new Control[] { _closeBtn, _maximizeBtn, _minimizeBtn, _bell, _spinner };
         foreach (var button in buttons)
         {
             button.Size = new Size(BtnH, BtnH);
             button.Margin = new Padding(BtnGap / 2, 0, BtnGap / 2, 0);
         }
-        _langBtn.Margin = new Padding(BtnGap / 2, 0, BtnGap * 2, 0); // separates the window buttons
+        _bell.Margin = new Padding(BtnGap / 2, 0, BtnGap * 2, 0); // separates the window buttons
         _headerButtons.Controls.AddRange(buttons);
 
         // There is no title bar, so the header (and its title) drags the window.
@@ -551,8 +548,9 @@ internal sealed class ShellForm : Form
                 return true;
         }
 
-        // In the terminal pages Esc belongs to the page (it interrupts a running Claude turn).
-        if (keyData != Keys.Escape || CurrentPage == ShellPage.Claude
+        // In the terminal pages Esc belongs to the page (it interrupts a running Claude turn), while a tab is open there.
+        if (keyData != Keys.Escape
+            || (CurrentPage == ShellPage.Claude && _pages[ShellPage.Claude] is ClaudePage claudePage && claudePage.HasOpenTabs)
             || (CurrentPage == ShellPage.Ticket && _pages[ShellPage.Ticket] is TicketWorkspacePage ticketPage && ticketPage.HasOpenTabs))
             return base.ProcessCmdKey(ref msg, keyData);
 
@@ -610,8 +608,6 @@ internal sealed class ShellForm : Form
         _tips.SetToolTip(_menuBtn, collapseText);
         _menuBtn.AccessibleName = collapseText;
         _tips.SetToolTip(_bell, Lang.T("Notifications", "Thông báo"));
-        _tips.SetToolTip(_themeBtn, Lang.T("Light / dark theme", "Giao diện sáng / tối"));
-        _tips.SetToolTip(_langBtn, Lang.T("Switch to Vietnamese", "Chuyển sang tiếng Anh"));
         _tips.SetToolTip(_minimizeBtn, minimizeText);
         _minimizeBtn.AccessibleName = minimizeText;
         _tips.SetToolTip(_maximizeBtn, maximizeText);

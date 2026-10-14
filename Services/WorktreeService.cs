@@ -6,7 +6,7 @@ internal static class WorktreeService
 {
     private static readonly TimeSpan GitTimeout = TimeSpan.FromMinutes(2);
 
-    internal static bool TryCreate(
+    internal static WorktreeCreateResult Create(
         string ticketKey,
         string repoPath,
         string worktreePath,
@@ -16,19 +16,40 @@ internal static class WorktreeService
         progress?.Report(StartStage.Fetching);
         if (!RunGit(repoPath, isFailureLogged: true, "fetch", "origin"))
         {
-            return false;
+            return WorktreeCreateResult.Failed;
         }
 
         progress?.Report(StartStage.CreatingWorktree);
 
-        // A branch left over from a removed worktree makes `-b` fail, so check it out as-is.
+        // A reworked ticket gets its own branch back (git makes the local one from origin/<KEY> when only that is left).
         // Not logged: a missing branch is the normal case.
-        if (RunGit(repoPath, isFailureLogged: false, "rev-parse", "--verify", "--quiet", $"refs/heads/{ticketKey}"))
+        var hasBranch = RunGit(repoPath, isFailureLogged: false, "rev-parse", "--verify", "--quiet", $"refs/heads/{ticketKey}")
+            || RunGit(repoPath, isFailureLogged: false, "rev-parse", "--verify", "--quiet", $"refs/remotes/origin/{ticketKey}");
+        if (!hasBranch)
         {
-            return RunGit(repoPath, isFailureLogged: true, "worktree", "add", worktreePath, ticketKey);
+            return RunGit(repoPath, isFailureLogged: true, "worktree", "add", worktreePath, "-b", ticketKey, "origin/main")
+                ? WorktreeCreateResult.Created
+                : WorktreeCreateResult.Failed;
         }
 
-        return RunGit(repoPath, isFailureLogged: true, "worktree", "add", worktreePath, "-b", ticketKey, "origin/main");
+        if (!RunGit(repoPath, isFailureLogged: true, "worktree", "add", worktreePath, ticketKey))
+        {
+            return WorktreeCreateResult.Failed;
+        }
+
+        progress?.Report(StartStage.MergingMain);
+        if (RunGit(worktreePath, isFailureLogged: true, "merge", "--no-edit", "origin/main"))
+        {
+            return WorktreeCreateResult.Created;
+        }
+
+        // Only a conflicted merge leaves MERGE_HEAD; one that never started (a local edit in the way) has nothing to abort.
+        if (RunGit(worktreePath, isFailureLogged: false, "rev-parse", "-q", "--verify", "MERGE_HEAD"))
+        {
+            RunGit(worktreePath, isFailureLogged: true, "merge", "--abort");
+        }
+
+        return WorktreeCreateResult.MainNotMerged;
     }
 
     private static bool RunGit(string repoPath, bool isFailureLogged, params string[] arguments)

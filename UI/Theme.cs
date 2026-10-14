@@ -17,6 +17,7 @@ internal static class Theme
     internal static Color WindowBg => Pick(245, 245, 247, 28, 28, 30);
     internal static Color CardSurface => Pick(255, 255, 255, 44, 44, 48);
     internal static Color CardBorder => Pick(229, 229, 234, 62, 62, 66);
+    internal static Color DialogBorder => Pick(205, 205, 212, 82, 82, 88); // a popup's edge, a step stronger than a card's
     internal static Color InputBg => Pick(255, 255, 255, 52, 52, 56);
     internal static Color InputBorder => Pick(208, 208, 214, 78, 78, 84);
     internal static Color TextPrimary => Pick(40, 40, 44, 236, 236, 240);

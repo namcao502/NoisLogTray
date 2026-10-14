@@ -2,24 +2,14 @@ using System.Drawing;
 
 namespace NoisLogTray;
 
-// Fixed column widths for ticket rows (Tasks and Dashboard), so the summary and the facts start at the same x on every
-// row whatever the key, date or hours. Measured once per font.
+// Fixed column widths, so a ticket table's cells (Work board, Dashboard) and a queue row's slots start at the same x on
+// every row whatever the key, date or hours. Measured once per font.
 internal static class RowColumns
 {
-    // The facts TaskRow.Facts yields first, in its order: Due, P, ETA, Logged. Each lists its widest forms in either
-    // language (every month, as "May" is wider than "Sep"); the status follows at its own width.
-    private static readonly string[][] FactSamples =
-    {
-        DateSamples("Due", "Hạn"),
-        new[] { "P 10", "P 2.5", "P -" },
-        DateSamples("ETA", "ETA"),
-        new[] { "Logged 10h 30m", "Đã log 10h 30m", "Logged -", "Đã log -" },
-    };
-
     // Keyed by font: each row type has its own (static) font.
     private static readonly Dictionary<Font, int> KeyWidths = new();
-    private static readonly Dictionary<Font, IReadOnlyList<int>> FactWidthsByFont = new();
     private static int _slotsWidth;
+    private static IReadOnlyDictionary<TaskTableColumn, int>? _tableWidths; // one table, one set of fonts
 
     // Widest realistic key: the project prefix plus five digits. UI thread only, like every caller.
     internal static int KeyWidth(Font keyFont)
@@ -39,24 +29,40 @@ internal static class RowColumns
         return _slotsWidth;
     }
 
-    // The text width of each fixed fact column, in FactSamples' order.
-    internal static IReadOnlyList<int> FactWidths(Font factFont)
+    // A ticket table's fixed columns: each wide enough for its widest cell and its title in either language. The
+    // status gets a set width and is cut with an ellipsis (its tooltip has the full text).
+    internal static IReadOnlyDictionary<TaskTableColumn, int> TableWidths(Font keyFont, Font cellFont, Font titleFont)
     {
-        if (!FactWidthsByFont.TryGetValue(factFont, out var widths))
+        if (_tableWidths != null) return _tableWidths;
+        var dateSamples = Enumerable.Range(1, 12)
+            .Select(month => new DateTime(2026, month, 28))
+            .SelectMany(date => new[] { Lang.ShortDate(date, false), Lang.ShortDate(date, true) })
+            .ToArray();
+        // TaskRow.PrCell's words in both languages.
+        var prSamples = new[] { "Merged", "Đã merge", "Open", "Đang mở", "Abandoned", "Đã hủy", "1/2 merged", "1/2 đã merge" };
+        var cellSamples = new Dictionary<TaskTableColumn, string[]>
         {
-            widths = FactSamples.Select(samples => samples.Max(sample => TextRenderer.MeasureText(sample, factFont).Width)).ToList();
-            FactWidthsByFont[factFont] = widths;
+            [TaskTableColumn.Due] = dateSamples,
+            [TaskTableColumn.Eta] = dateSamples,
+            [TaskTableColumn.Priority] = new[] { "10", "2.5" },
+            [TaskTableColumn.Logged] = new[] { "10h 30m" },
+            [TaskTableColumn.PrMain] = prSamples,
+            [TaskTableColumn.PrDev] = prSamples,
+        };
+        var widths = new Dictionary<TaskTableColumn, int>
+        {
+            [TaskTableColumn.Key] = KeyWidth(keyFont),
+            [TaskTableColumn.Status] = UiScale.S(120),
+        };
+        foreach (var (column, samples) in cellSamples)
+            widths[column] = samples.Max(sample => TextRenderer.MeasureText(sample, cellFont).Width);
+        foreach (var column in widths.Keys.ToList())
+        {
+            var (english, vietnamese) = TaskTableHeader.TitleForms(column);
+            widths[column] = Math.Max(widths[column],
+                Math.Max(TextRenderer.MeasureText(english, titleFont).Width, TextRenderer.MeasureText(vietnamese, titleFont).Width));
         }
+        _tableWidths = widths;
         return widths;
     }
-
-    internal static int DueWidth(Font factFont) => FactWidths(factFont)[0];
-
-    private static string[] DateSamples(string englishLabel, string vietnameseLabel) =>
-        Enumerable.Range(1, 12)
-            .Select(month => new DateTime(2026, month, 28))
-            .SelectMany(date => new[] { $"{englishLabel} {Lang.ShortDate(date, false)}", $"{vietnameseLabel} {Lang.ShortDate(date, true)}" })
-            .Append($"{englishLabel} -")
-            .Append($"{vietnameseLabel} -")
-            .ToArray();
 }

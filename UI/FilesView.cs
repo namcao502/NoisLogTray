@@ -22,6 +22,7 @@ internal sealed class FilesView : UserControl
     private (string Group, string Path, string FullPath, int? Line)? _pendingReveal; // a Ctrl+clicked terminal path, until a listing
     private bool _initStarted;
     private bool _ready;
+    private bool _failed; // the view could not start, so no listing will ever answer a Reveal
     private bool _loading;
     private bool _refreshAgain;
     private int _selectVersion;
@@ -93,7 +94,26 @@ internal sealed class FilesView : UserControl
     // it, or VS Code opens a file the list does not hold (gitignored, or its group failed to list).
     internal void Reveal(string group, string path, string fullPath, int? line)
     {
+        if (_failed)
+        {
+            TicketLauncher.TryOpenVsCode(fullPath, line);
+            return;
+        }
         _pendingReveal = (group, path, fullPath, line);
+    }
+
+    // A clicked path's casing comes from the terminal, the list's from git; the path as listed, or null.
+    internal static string? ListedPath(IReadOnlySet<(string Group, string Path)> files, string group, string path)
+    {
+        if (files.Contains((group, path))) return path;
+        foreach (var listedFile in files)
+        {
+            if (listedFile.Group == group && string.Equals(listedFile.Path, path, StringComparison.OrdinalIgnoreCase))
+            {
+                return listedFile.Path;
+            }
+        }
+        return null;
     }
 
     // The docs group lists the dev repo's copy of a worktree's docs (the docs hook mirrors them); a copy that differs
@@ -160,6 +180,7 @@ internal sealed class FilesView : UserControl
             AppLogger.Error($"[files] files view init failed: {ex.Message}");
             _status.Text = Lang.T("Could not show the files (WebView2 runtime missing?).",
                 "Không hiển thị được file (thiếu WebView2 runtime?).");
+            _failed = true;
             OpenPendingRevealInVsCode();
         }
     }
@@ -206,6 +227,7 @@ internal sealed class FilesView : UserControl
                 _webView.Visible = false;
                 _status.Text = Lang.T("Could not show the files (see log).", "Không hiển thị được file (xem log).");
                 _status.Visible = true;
+                _failed = true;
                 OpenPendingRevealInVsCode();
                 break;
             case "page":
@@ -282,7 +304,7 @@ internal sealed class FilesView : UserControl
             sources.Add((worktree.Repository, $"{worktree.RepoLabel} - {worktree.Repository}", worktree.Path,
                 () => TicketFiles.ListWorktree(worktree.Path)));
         }
-        var listings = await Task.WhenAll(sources.Select(source => Task.Run(source.ListFiles)));
+        var listings = await Task.WhenAll(sources.Select(s => Task.Run(s.ListFiles)));
         if (IsDisposed || _webView.CoreWebView2 == null) return;
         _roots.Clear();
         _files.Clear();
@@ -314,9 +336,13 @@ internal sealed class FilesView : UserControl
         {
             var reveal = _pendingReveal.Value;
             _pendingReveal = null;
-            var listedPath = FullPath(_roots, _files, reveal.Group, reveal.Path);
-            if (listedPath != null && ShowsSameContent(listedPath, reveal.FullPath))
-                Post(new { type = "reveal", group = reveal.Group, path = reveal.Path, line = reveal.Line });
+            var listedPath = ListedPath(_files, reveal.Group, reveal.Path);
+            var listedFullPath = listedPath == null ? null : FullPath(_roots, _files, reveal.Group, listedPath);
+            // Off the UI thread: comparing two copies reads both files whole.
+            var sameContent = listedFullPath != null && await Task.Run(() => ShowsSameContent(listedFullPath, reveal.FullPath));
+            if (IsDisposed || _webView.CoreWebView2 == null) return;
+            if (sameContent)
+                Post(new { type = "reveal", group = reveal.Group, path = listedPath, line = reveal.Line });
             else TicketLauncher.TryOpenVsCode(reveal.FullPath, reveal.Line);
         }
     }

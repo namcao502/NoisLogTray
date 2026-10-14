@@ -18,11 +18,17 @@ internal sealed class AppSettings
     public int? WindowHeight { get; set; }
     public bool? WindowMaximized { get; set; } // null = never saved -> open maximized
     public bool SidebarCollapsed { get; set; }
+    public int? TicketCheckMinutes { get; set; } // how often Jira and the PRs are checked; null = TicketCheckInterval.DefaultMinutes
+    public DateTime? KnowledgeScanJudgedRunAt { get; set; } // start of the newest scan run the tray has judged; null = no baseline yet
+    public DateTime? KnowledgeScanSeenRunAt { get; set; } // start of the newest bad scan run the Schedules dialog has shown
+    public List<string> SeenWorkAttention { get; set; } = new(); // TasksPage.AttentionKeys the Work page has shown
     public Dictionary<string, string> Config { get; set; } = new();
     public List<string> OpenTicketTabs { get; set; } = new(); // ticket keys, in tab order
-    public string? ClaudeDirectory { get; set; } // the Claude page's folder; null = the dev repo
+    public string? ClaudeDirectory { get; set; } // the single Terminal page's folder before tabs; read once to make the first tab
+    public List<TerminalTabSetting>? TerminalTabs { get; set; } // in tab order; null = never saved (make the first tab), unlike []
+    public string? SelectedTerminal { get; set; } // the Terminal page's selected tab
     public List<string> RecentClaudeDirectories { get; set; } = new(); // most recent first
-    public Dictionary<string, string> ClaudeSessionIds { get; set; } = new(); // folder -> the Claude page's last session there
+    public Dictionary<string, string> ClaudeSessionIds { get; set; } = new(); // TerminalTabs.SessionKey -> the tab's last session there
     public Dictionary<string, DateTimeOffset> TeamsPostedAt { get; set; } = new(); // ticket key -> when its Teams post was sent
     public bool TicketHeaderCollapsed { get; set; } // the Ticket tab header shows only its key line
     public double? DiffListWidthEm { get; set; } // the Changes file list width in the diff page's em; null = default
@@ -59,6 +65,7 @@ internal sealed class AppSettings
                 parsed.RecentClaudeDirectories ??= new();
                 parsed.ClaudeSessionIds ??= new();
                 parsed.TeamsPostedAt ??= new();
+                parsed.SeenWorkAttention ??= new();
                 return parsed;
             }
         }

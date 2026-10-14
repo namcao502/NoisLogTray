@@ -19,10 +19,6 @@ internal sealed class TerminalView : UserControl
     private readonly ClaudeSessionHost _host;
     private readonly WebView2 _webView = new() { Dock = DockStyle.Fill };
     private readonly Label _status = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
-    // Only on a view whose session may move (the Claude page): ticket tabs are pinned to their worktree.
-    private readonly Func<IReadOnlyList<string>>? _folderChoices;
-    private readonly MacButton? _folderButton;
-    private readonly ContextMenuStrip _folderMenu = ThemedMenuRenderer.CreateMenu();
     private readonly System.Windows.Forms.Timer _flushTimer = new() { Interval = FlushIntervalMs };
     private readonly object _pendingLock = new();
     private readonly MemoryStream _pending = new();
@@ -34,16 +30,12 @@ internal sealed class TerminalView : UserControl
 
     // Ctrl+digit typed inside the terminal (WebView2 swallows them before the form's ProcessCmdKey).
     internal event Action<ShellPage>? PageRequested;
-    // Raised before the session restarts, so the host's working-directory func can already return the new folder.
-    internal event Action<string>? FolderChosen;
     // Ctrl+click on a path in the terminal, only for a file that exists: its full path and the line, when one was given.
     internal event Action<string, int?>? FileRequested;
 
-    internal TerminalView(ClaudeSessionHost host, Func<IReadOnlyList<string>>? folderChoices = null)
+    internal TerminalView(ClaudeSessionHost host)
     {
         _host = host;
-        _folderChoices = folderChoices;
-        if (folderChoices != null) _folderButton = MacButton.Secondary(FolderButtonText());
         BackColor = Theme.WindowBg;
         _status.Font = UiScale.Font("Segoe UI", 10F);
         _status.ForeColor = Theme.TextSecondary;
@@ -51,7 +43,6 @@ internal sealed class TerminalView : UserControl
         _webView.Visible = false;
         Controls.Add(_webView);
         Controls.Add(_status);
-        if (_folderButton != null) BuildFolderButton(_folderButton);
         _flushTimer.Tick += (_, _) => FlushOutput();
         _host.Exited += OnHostExited;
         Theme.Changed += ApplyTheme;
@@ -67,7 +58,6 @@ internal sealed class TerminalView : UserControl
             _host.Exited -= OnHostExited;
             _host.Detach(OnHostOutput);
             _flushTimer.Dispose();
-            _folderMenu.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -83,72 +73,6 @@ internal sealed class TerminalView : UserControl
         // The window may have been resized while this view was hidden; the page answers with a resize.
         if (_ready && _webView.CoreWebView2 != null) _webView.CoreWebView2.PostWebMessageAsString("{\"type\":\"fit\"}");
         FocusTerminal();
-    }
-
-    // The Folder menu's button, which the Claude page puts in the shell header (HeaderControl); the menu's checked
-    // item names the folder, so no path is shown.
-    internal MacButton? FolderButton => _folderButton;
-
-    private void BuildFolderButton(MacButton folderButton)
-    {
-        folderButton.OnWindow = true;
-        // Fits the longer label of either language plus the chevron, so a language switch never resizes it.
-        var labelWidth = Math.Max(TextRenderer.MeasureText("Folder", folderButton.Font).Width,
-            TextRenderer.MeasureText("Thư mục", folderButton.Font).Width);
-        folderButton.Width = labelWidth + Icons.Small.Height + UiScale.S(30);
-        folderButton.Glyph = Icons.ChevronDown;
-        folderButton.GlyphAfterText = true;
-        folderButton.Click += (_, _) => ShowFolderMenu();
-        _folderMenu.ShowCheckMargin = true;
-    }
-
-    private static string FolderButtonText() => Lang.T("Folder", "Thư mục");
-
-    // Rebuilt on every open, so a folder picked elsewhere or deleted since shows up right.
-    private void ShowFolderMenu()
-    {
-        if (_folderChoices == null || _folderButton == null) return;
-        _folderMenu.Items.Clear();
-        foreach (var folder in _folderChoices())
-        {
-            var item = new ToolStripMenuItem(folder)
-            {
-                Checked = string.Equals(folder, _host.CurrentDirectory, StringComparison.OrdinalIgnoreCase),
-            };
-            item.Click += (_, _) => ChooseFolder(folder);
-            _folderMenu.Items.Add(item);
-        }
-        _folderMenu.Items.Add(new ToolStripSeparator());
-        var browse = new ToolStripMenuItem(Lang.T("Choose another folder...", "Chọn thư mục khác..."));
-        browse.Click += (_, _) => BrowseFolder();
-        _folderMenu.Items.Add(browse);
-        ThemedMenuRenderer.ShowBelow(_folderMenu, _folderButton);
-    }
-
-    private void BrowseFolder()
-    {
-        using var dialog = new FolderBrowserDialog
-        {
-            Description = Lang.T("Choose the folder Claude runs in", "Chọn thư mục để chạy Claude"),
-            UseDescriptionForTitle = true,
-        };
-        if (_host.CurrentDirectory != null && Directory.Exists(_host.CurrentDirectory)) dialog.InitialDirectory = _host.CurrentDirectory;
-        if (dialog.ShowDialog(FindForm()) == DialogResult.OK) ChooseFolder(dialog.SelectedPath);
-    }
-
-    // A running terminal (maybe Claude mid-task) is only stopped after a Yes.
-    private void ChooseFolder(string folder)
-    {
-        if (string.Equals(folder, _host.CurrentDirectory, StringComparison.OrdinalIgnoreCase) && _host.IsRunning) return;
-        if (_host.IsRunning)
-        {
-            var changeFolder = ConfirmDialog.Ask(FindForm(), Lang.T("Change folder?", "Đổi thư mục?"),
-                Lang.T($"The terminal is running. Stop it and start Claude in {folder}?", $"Terminal đang chạy. Dừng nó và mở Claude ở {folder}?"),
-                Lang.T("Change folder", "Đổi thư mục"), destructive: true);
-            if (!changeFolder) return;
-        }
-        FolderChosen?.Invoke(folder);
-        if (_ready) RestartSession();
     }
 
     private async Task InitializeAsync()
@@ -210,9 +134,15 @@ internal sealed class TerminalView : UserControl
                 if (link != null) FileRequested?.Invoke(link.Value.FullPath, link.Value.Line);
                 break;
             case "openUrl":
-                // Text claude printed: only a web link leaves the app.
-                var webUrl = TaskRow.WebUrl(root.GetProperty("url").GetString());
+                // Text claude printed: only a web link leaves the app. Its file paths come as OSC 8 links too (xterm picks
+                // those over the path provider), so a file one opens like a Ctrl+clicked path.
+                var url = root.GetProperty("url").GetString() ?? "";
+                var webUrl = TaskRow.WebUrl(url);
+                var linkPath = webUrl == null ? LinkPath(url) : null;
+                var fileLink = linkPath == null ? null : ResolvePathLink(linkPath, _host.CurrentDirectory);
                 if (webUrl != null) TaskRow.OpenUrl(webUrl);
+                else if (fileLink != null) FileRequested?.Invoke(fileLink.Value.FullPath, fileLink.Value.Line);
+                else AppLogger.Info($"[claude] link not opened: {url}");
                 break;
             case "page":
                 var page = PageForShortcut(root.GetProperty("index").GetInt32());
@@ -262,10 +192,12 @@ internal sealed class TerminalView : UserControl
         }
     }
 
-    private void RestartSession()
+    // A new folder for this terminal (the Terminal page's tab menu). A view not drawn yet only stops the session: once
+    // ready it finds nothing running and starts one, in the new folder.
+    internal void RestartSession()
     {
-        if (!_ready) return;
         _host.Stop();
+        if (!_ready) return;
         lock (_pendingLock) _pending.SetLength(0);
         _webView.CoreWebView2?.PostWebMessageAsString("{\"type\":\"reset\"}");
         StartSession();
@@ -325,6 +257,16 @@ internal sealed class TerminalView : UserControl
     }
 
     // "UI/a.cs:42:7" as printed by claude: a relative path is against the session's folder; null unless the file exists.
+    // An OSC 8 link's target as a path for ResolvePathLink: a file: URI's local path (its #fragment dropped), or text with
+    // no scheme as written; null for any other scheme (http, javascript:, mailto:).
+    internal static string? LinkPath(string url)
+    {
+        if (Uri.TryCreate(url, UriKind.Absolute, out var uri) && uri.IsFile) return uri.LocalPath;
+        // A drive letter parses as a scheme ("C:"), so a rooted Windows path is a path too.
+        var hasScheme = Regex.IsMatch(url, "^[A-Za-z][A-Za-z0-9+.-]+:") && !Path.IsPathRooted(url);
+        return url.Length == 0 || hasScheme ? null : url;
+    }
+
     internal static (string FullPath, int? Line)? ResolvePathLink(string text, string? workingDirectory)
     {
         var match = PathLinkPattern.Match(text);
@@ -349,7 +291,7 @@ internal sealed class TerminalView : UserControl
     {
         if (!string.IsNullOrEmpty(text)) return (text, null);
         if (hasImage) return (null, "\u001bv");
-        if (files.Count != 0) return (string.Join(" ", files.Select(path => $"\"{path}\"")), null);
+        if (files.Count != 0) return (string.Join(" ", files.Select(p => $"\"{p}\"")), null);
         return (null, null);
     }
 
@@ -374,7 +316,6 @@ internal sealed class TerminalView : UserControl
 
     private void ApplyLanguage()
     {
-        if (_folderButton != null) _folderButton.Text = FolderButtonText();
         PostLabels();
     }
 
@@ -388,7 +329,6 @@ internal sealed class TerminalView : UserControl
     private void ApplyTheme()
     {
         BackColor = Theme.WindowBg;
-        _folderButton?.Invalidate();
         if (!_ready || _webView.CoreWebView2 == null) return;
         _webView.CoreWebView2.PostWebMessageAsString(JsonSerializer.Serialize(ThemeMessage()));
     }

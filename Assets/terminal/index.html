@@ -6,13 +6,13 @@
 <style>
   html, body { margin: 0; height: 100%; overflow: hidden; background: #1e1e1e; }
   #terminal { position: absolute; inset: 6px 4px 4px 8px; }
-  /* The app's one scrollbar look (UI/ThemedScrollBar.cs): a pill 8px thick, 11px under the mouse or while dragged,
-     3px in from the edge, shown whenever there is something to scroll; the colors come with the theme message. */
+  /* UI/ThemedScrollBar.cs's look at twice its size (16px, 22px hovered or dragged), easy to grab; the colors come with
+     the theme message, and overviewRuler.width (below) widens xterm's track to hold it. */
   .xterm .xterm-scrollable-element > .invisible.fade { opacity: 1; pointer-events: auto; z-index: 11; }
-  .xterm .xterm-scrollable-element > .scrollbar > .slider { border-radius: 6px; }
-  .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider { width: 8px !important; left: auto !important; right: 3px; }
+  .xterm .xterm-scrollable-element > .scrollbar > .slider { border-radius: 11px; }
+  .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider { width: 16px !important; left: auto !important; right: 3px; }
   .xterm .xterm-scrollable-element > .scrollbar.vertical:hover > .slider,
-  .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider.active { width: 11px !important; }
+  .xterm .xterm-scrollable-element > .scrollbar.vertical > .slider.active { width: 22px !important; }
   /* Back to the newest output (claude's input line); only while scrolled up. Colors come with the theme message. */
   @font-face { font-family: "FluentIcons"; src: url("../icons/FluentSystemIcons-Regular.ttf"); }
   #jump {
@@ -47,6 +47,8 @@
     scrollback: 5000,
     // claude picks its text colors for a dark background; this lifts any too faint for the theme (mostly light).
     minimumContrastRatio: 4.5,
+    // The scroll bar's track (xterm's default is 14px); the fit addon keeps the same width free of text.
+    overviewRuler: { width: 28 },
     allowProposedApi: true,
     theme: startTheme ? startTheme.theme : { background: "#1e1e1e" },
     // OSC 8 hyperlinks a program prints: Ctrl+click opens them in the browser, like the plain-text URLs below.

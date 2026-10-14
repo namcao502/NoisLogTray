@@ -2,9 +2,8 @@ using System.Drawing;
 
 namespace NoisLogTray;
 
-// The Tasks board, the left side of the Work page: assigned Jira tickets in New / In progress / Done / Dismissed
-// sections and "+ Log" for New entry. Its search, Add by key and "Check now" (the host polls Jira) sit in the shell
-// header (HeaderControl), leaving the page to the list.
+// The Tasks board, the left side of the Work page: Jira tickets as a table in New / In progress / Done / Dismissed sections.
+// The search sits in the card over the table; Add by key and "Check now" sit in the shell header (HeaderControl).
 internal sealed class TasksPage : UserControl, IShellPage
 {
     // Logical px, since ShellLayout's Work page rules are built from them; scale before use.
@@ -16,9 +15,8 @@ internal sealed class TasksPage : UserControl, IShellPage
     private static readonly int Inner = UiScale.S(600); // card width
     private static readonly int ButtonH = UiScale.S(28);
     private static readonly int ListInset = UiScale.S(8); // lists sit this far inside the card
-    private static readonly int SearchMaxWidth = UiScale.S(280);
-    private static readonly int SearchMinWidth = UiScale.S(140);
-    private static readonly int AddBoxWidth = UiScale.S(120);
+    private static readonly int AddBoxWidth = UiScale.S(200);
+    private static readonly int AddBoxMinWidth = UiScale.S(100);
     private static readonly int ToolbarGap = UiScale.S(8);
 
     private const string NewId = "new";
@@ -36,8 +34,8 @@ internal sealed class TasksPage : UserControl, IShellPage
     internal event Func<string, Task>? StartRequested;
     internal event Func<string, Task>? OpenRequested;
     internal event Func<string, Task>? ReadyToTestRequested;
-    // Raised at the end of every Reload with AttentionCount, for the sidebar badge.
-    internal event Action<int>? AttentionChanged;
+    // Raised at the end of every Reload with AttentionKeys, for the sidebar badge.
+    internal event Action<IReadOnlyList<string>>? AttentionChanged;
     // Raised after this page moved or added a ticket, so the host refreshes the other ticket views (Dashboard, Ticket page).
     internal event Action? BoardChanged;
     // Add by key's result, as a notice: the header has no room for a result line.
@@ -48,7 +46,8 @@ internal sealed class TasksPage : UserControl, IShellPage
     private readonly TicketStore _ticketStore;
     private readonly TicketBoard _ticketBoard;
     private readonly Func<LoggingService?> _getService;
-    private readonly HashSet<string> _collapsed = new() { DismissedId };
+    // Done and Dismissed start collapsed: each open of the app shows only what still needs work.
+    private readonly HashSet<string> _collapsed = new() { DoneId, DismissedId };
     // Sections the user toggled during the current search; their choice beats auto-expand.
     private readonly HashSet<string> _toggledDuringSearch = new();
     // Debounces renders asked for while typing: the search box, and the tickets typed in New entry.
@@ -57,7 +56,7 @@ internal sealed class TasksPage : UserControl, IShellPage
     private HashSet<string> _entryKeys = new(); // tickets in New entry: their rows read "In entry"
     private List<SectionView> _sections = new();
     private HashSet<string> _devPrMergedKeys = new();
-    private Dictionary<string, string> _prSummaries = new(); // ticket key -> "BE main ✓ · dev ● | FE Portal dev ✓"
+    private Dictionary<string, List<TicketPr>> _ticketPrs = new(); // ticket key -> its latest PR per repo and branch
     private DateTime? _checkedAt;
     private Size _renderedCardSize;
     private bool _renderPending = true; // rows not rendered since the last data/size change while hidden
@@ -66,7 +65,7 @@ internal sealed class TasksPage : UserControl, IShellPage
     private string? _focusTicketKey;
 
     private readonly HeaderToolbar _toolbar = new();
-    private readonly RoundedHost _searchHost = new() { OnWindow = true };
+    private readonly RoundedHost _searchHost = new();
     private readonly TextBox _search = new();
     private readonly RoundedHost _addHost = new() { OnWindow = true };
     private readonly TextBox _addBox = new();
@@ -74,6 +73,7 @@ internal sealed class TasksPage : UserControl, IShellPage
     private readonly MacButton _checkBtn = MacButton.Secondary(string.Empty);
     private readonly Label _checkedLabel = new();
     private readonly Card _card = new();
+    private readonly TaskTableHeader _tableHeader = new();
     private readonly FlowLayoutPanel _body = new();
 
     private sealed record SectionView(string Id, string Title, bool IsDismissed,
@@ -106,7 +106,7 @@ internal sealed class TasksPage : UserControl, IShellPage
     {
         BackColor = Theme.WindowBg;
 
-        SetUpInput(_searchHost, _search, SearchMaxWidth);
+        SetUpInput(_searchHost, _search, Inner - 2 * ListInset);
         // Debounced: each render allocates fresh rows and buttons.
         _search.TextChanged += (_, _) =>
         {
@@ -121,7 +121,7 @@ internal sealed class TasksPage : UserControl, IShellPage
         };
 
         SetUpInput(_addHost, _addBox, AddBoxWidth);
-        _addBox.PlaceholderText = "MDP-1234";
+
         _addBox.KeyDown += (_, e) =>
         {
             if (e.KeyCode != Keys.Enter) return;
@@ -139,14 +139,16 @@ internal sealed class TasksPage : UserControl, IShellPage
         _checkedLabel.Font = LabelFont;
         _checkedLabel.BackColor = Color.Transparent;
 
-        _toolbar.Controls.AddRange(new Control[] { _searchHost, _addHost, _addBtn, _checkBtn, _checkedLabel });
+        _toolbar.Controls.AddRange(new Control[] { _addHost, _addBtn, _checkBtn, _checkedLabel });
         _toolbar.Resize += (_, _) => LayoutToolbar();
 
         // The 20px bottom margin lines the card up with the log column's week card beside it.
         _card.Location = UiScale.S(new Point(20, 14));
         _card.Size = new Size(Inner, H - UiScale.S(14) - UiScale.S(20));
 
-        // No anchor on the list: Render places it for the current card size.
+        // No anchors on the search, the column titles or the list: Render places them for the current card size.
+        _card.Controls.Add(_searchHost);
+        _card.Controls.Add(_tableHeader);
         _body.FlowDirection = FlowDirection.TopDown;
         _body.WrapContents = false;
         _body.AutoScroll = true;
@@ -167,31 +169,20 @@ internal sealed class TasksPage : UserControl, IShellPage
 
     internal Control HeaderControl => _toolbar;
 
-    // Left to right: search, Add by key, Add, Check now, the last check's time. A narrow header drops the time, then
-    // Add by key (Check now stays), and the search box takes what is left.
+    // Left to right: Add by key, Add, Check now, the last check's time. A narrow header drops the time first, then
+    // narrows the Add box.
     private void LayoutToolbar()
     {
         var y = (_toolbar.ClientSize.Height - ButtonH) / 2;
-        var addWidth = _addHost.Width + ToolbarGap + _addBtn.Width;
         var labelWidth = _checkedLabel.Text.Length == 0 ? 0 : TextRenderer.MeasureText(_checkedLabel.Text, LabelFont).Width;
         // A gap before the header's own buttons at the right.
-        var room = _toolbar.ClientSize.Width - ToolbarGap - _checkBtn.Width - ToolbarGap;
-        var showAdd = room - addWidth - ToolbarGap >= SearchMinWidth;
-        if (showAdd) room -= addWidth + ToolbarGap;
-        var showLabel = labelWidth != 0 && room - labelWidth - ToolbarGap >= SearchMinWidth;
+        var room = _toolbar.ClientSize.Width - ToolbarGap - _addBtn.Width - ToolbarGap - _checkBtn.Width - ToolbarGap;
+        var showLabel = labelWidth != 0 && room - labelWidth - ToolbarGap >= AddBoxWidth;
         if (showLabel) room -= labelWidth + ToolbarGap;
 
-        _searchHost.SetBounds(0, y, Math.Clamp(room, UiScale.S(60), SearchMaxWidth), ButtonH);
-        var nextLeft = _searchHost.Right + ToolbarGap;
-        _addHost.Visible = showAdd;
-        _addBtn.Visible = showAdd;
-        if (showAdd)
-        {
-            _addHost.Location = new Point(nextLeft, y);
-            _addBtn.Location = new Point(_addHost.Right + ToolbarGap, y);
-            nextLeft = _addBtn.Right + ToolbarGap;
-        }
-        _checkBtn.Location = new Point(nextLeft, y);
+        _addHost.SetBounds(0, y, Math.Clamp(room, AddBoxMinWidth, AddBoxWidth), ButtonH);
+        _addBtn.Location = new Point(_addHost.Right + ToolbarGap, y);
+        _checkBtn.Location = new Point(_addBtn.Right + ToolbarGap, y);
         _checkedLabel.Visible = showLabel;
         _checkedLabel.Bounds = new Rectangle(_checkBtn.Right + ToolbarGap, y, labelWidth, ButtonH);
     }
@@ -224,7 +215,7 @@ internal sealed class TasksPage : UserControl, IShellPage
         box.Font = InputFont;
         var boxH = box.PreferredHeight;
         box.SetBounds(UiScale.S(8), (host.Height - boxH) / 2, host.Width - UiScale.S(16), boxH);
-        // Sized before anchoring, so the search box follows its host as the header gives it more or less room.
+        // Sized before anchoring, so the box follows its host as the card or the header gives it more or less room.
         box.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         host.Controls.Add(box);
     }
@@ -233,6 +224,7 @@ internal sealed class TasksPage : UserControl, IShellPage
     {
         _search.PlaceholderText = Lang.T("Search tickets", "Tìm ticket");
         _search.AccessibleName = Lang.T("Search tickets", "Tìm ticket");
+        _addBox.PlaceholderText = Lang.T("Add MDP-1234 or link", "Thêm MDP-1234 hoặc link");
         _addBox.AccessibleName = Lang.T("Add a ticket by key or Jira link", "Thêm ticket bằng mã hoặc link Jira");
         _addBtn.Text = Lang.T("Add", "Thêm");
         _checkBtn.Text = Lang.T("Check now", "Kiểm tra");
@@ -253,6 +245,7 @@ internal sealed class TasksPage : UserControl, IShellPage
     {
         BackColor = Theme.WindowBg;
         _body.BackColor = Theme.CardSurface;
+        _tableHeader.BackColor = Theme.CardSurface;
         foreach (var box in new[] { _search, _addBox })
         {
             box.BackColor = Theme.InputBg;
@@ -309,6 +302,7 @@ internal sealed class TasksPage : UserControl, IShellPage
     {
         StartStage.Fetching => Lang.T("Fetching origin...", "Đang fetch origin..."),
         StartStage.CreatingWorktree => Lang.T("Creating worktree...", "Đang tạo worktree..."),
+        StartStage.MergingMain => Lang.T("Merging main...", "Đang merge main..."),
         StartStage.UpdatingJira => Lang.T("Updating Jira...", "Đang cập nhật Jira..."),
         _ => throw new ArgumentOutOfRangeException(nameof(stage), stage, null),
     };
@@ -321,21 +315,34 @@ internal sealed class TasksPage : UserControl, IShellPage
         var prTracking = _ticketStore.LoadPrTracking();
         var ticketKeys = _sections.SelectMany(sv => sv.Tickets).Select(jt => jt.Ticket.Key).Distinct().ToList();
         _devPrMergedKeys = ticketKeys.Where(key => PrTracker.IsDevPrMerged(prTracking, key)).ToHashSet();
-        _prSummaries = ticketKeys.ToDictionary(key => key, key => DashboardDataBuilder.PrSummary(key, prTracking));
+        _ticketPrs = ticketKeys.ToDictionary(key => key, key => DashboardDataBuilder.LatestPrs(key, prTracking));
         // The badge needs the data now; the rows can wait until the page is shown.
         if (Visible) Render();
         else _renderPending = true;
-        AttentionChanged?.Invoke(AttentionCount(SectionTickets(InProgressId), SectionTickets(DoneId), _devPrMergedKeys));
+        AttentionChanged?.Invoke(AttentionKeys(SectionTickets(InProgressId), SectionTickets(DoneId), _devPrMergedKeys));
     }
 
     private IEnumerable<JiraTicket> SectionTickets(string sectionId) =>
         _sections.First(sv => sv.Id == sectionId).Tickets.Select(jt => jt.Ticket);
 
-    // In-progress tickets the user should act on: the Ready to Test button, or Jira already Done.
-    internal static int AttentionCount(IEnumerable<JiraTicket> inProgress, IEnumerable<JiraTicket> done, ISet<string> devPrMergedKeys) =>
-        inProgress.Count(jt => jt.IsStatusDone
-            || TaskRow.ReadyToTestLabel(jt, TicketSection.InProgress, devPrMergedKeys.Contains(jt.Key)) != null)
-        + done.Count(jt => TaskRow.ReadyToTestLabel(jt, TicketSection.Done, devPrMergedKeys.Contains(jt.Key)) != null);
+    // Tickets the user should act on, as "<KEY>|<reason>": the Ready to Test button, or Jira already Done (In progress
+    // only). The reason is part of the key, so a ticket that waits again for another reason counts as new.
+    internal static IReadOnlyList<string> AttentionKeys(IEnumerable<JiraTicket> inProgress, IEnumerable<JiraTicket> done,
+        ISet<string> devPrMergedKeys)
+    {
+        var attentionKeys = new List<string>();
+        foreach (var ticket in inProgress)
+        {
+            if (ticket.IsStatusDone)
+                attentionKeys.Add($"{ticket.Key}|done-in-jira");
+            else if (TaskRow.ReadyToTestLabel(ticket, TicketSection.InProgress, devPrMergedKeys.Contains(ticket.Key)) != null)
+                attentionKeys.Add($"{ticket.Key}|ready-to-test");
+        }
+        attentionKeys.AddRange(done
+            .Where(jt => TaskRow.ReadyToTestLabel(jt, TicketSection.Done, devPrMergedKeys.Contains(jt.Key)) != null)
+            .Select(jt => $"{jt.Key}|ready-to-test"));
+        return attentionKeys;
+    }
 
     // Polling has its own timer, so only a page switch or the window being shown reloads.
     public void OnPageShown()
@@ -357,12 +364,19 @@ internal sealed class TasksPage : UserControl, IShellPage
     {
         _renderPending = false;
         // Bounds first: the list's ClientSize below must reflect this render's layout.
-        _body.Bounds = new Rectangle(ListInset, ListInset, _card.ClientSize.Width - 2 * ListInset, _card.ClientSize.Height - 2 * ListInset);
+        var listWidth = _card.ClientSize.Width - 2 * ListInset;
+        _searchHost.SetBounds(ListInset, ListInset, listWidth, ButtonH);
+        var headerTop = _searchHost.Bottom + UiScale.S(8);
+        var headerHeight = TaskTableHeader.TitleFont.Height + UiScale.S(10);
+        var bodyTop = headerTop + headerHeight;
+        _body.Bounds = new Rectangle(ListInset, bodyTop, listWidth, Math.Max(0, _card.ClientSize.Height - bodyTop - ListInset));
         _renderedCardSize = _card.ClientSize;
 
         var query = _search.Text.Trim();
         var scrollPosition = _body.AutoScrollPosition;
         var rowWidth = _body.ClientSize.Width - SystemInformation.VerticalScrollBarWidth - UiScale.S(2);
+        _tableHeader.SetBounds(ListInset, headerTop, rowWidth, headerHeight);
+        _tableHeader.SetLayout(TaskRow.LayoutFor(rowWidth));
         var jiraBaseUrl = _getService()?.JiraBaseUrl ?? AppConfig.DefaultJiraBaseUrl;
         Control? focusHeader = null;
         TaskRow? focusRow = null;
@@ -388,7 +402,7 @@ internal sealed class TasksPage : UserControl, IShellPage
                     OnTicketMoved, tk => RaiseTicketRequest(StartRequested, tk, "Start"),
                     tk => RaiseTicketRequest(OpenRequested, tk, "Open"), _devPrMergedKeys.Contains(ticket.Key),
                     tk => RaiseTicketRequest(ReadyToTestRequested, tk, "Ready to Test"), busyText, rowWidth,
-                    _prSummaries.GetValueOrDefault(ticket.Key, ""), striped: rowIndex++ % 2 == 1,
+                    _ticketPrs.GetValueOrDefault(ticket.Key), striped: rowIndex++ % 2 == 1,
                     onLog: RaiseLogRequest, isInEntry: _entryKeys.Contains(ticket.Key));
                 _body.Controls.Add(row);
                 if (ticket.Key == _focusTicketKey) focusRow = row;

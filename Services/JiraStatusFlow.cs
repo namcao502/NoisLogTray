@@ -8,6 +8,7 @@ internal static class JiraStatusFlow
     internal const string ReadyToTest = "Ready to Test";
 
     private const string PrAndCodeReview = "PR & Code Review";
+    private static readonly string[] ReworkStatuses = { "In Progress", "QA Failed", "Reopened" };
 
     internal static IReadOnlyList<string> GetStepsToReadyToTest(string? status)
     {
@@ -18,6 +19,20 @@ internal static class JiraStatusFlow
             return new[] { ReadyToTest };
 
         return Array.Empty<string>();
+    }
+
+    // A Done ticket was sent back when Jira moved it from review or later into a rework status. Only a move from past
+    // pre-work counts, so a ticket marked Done while Jira still read In Progress is not pulled back.
+    internal static bool IsSentBack(string? storedStatus, string? liveStatus)
+    {
+        if (string.IsNullOrEmpty(storedStatus) || string.Equals(storedStatus, liveStatus, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var isRework = ReworkStatuses.Any(rs => string.Equals(rs, liveStatus, StringComparison.OrdinalIgnoreCase));
+        var wasPastPreWork = !JiraTicket.PreWorkStatuses.Any(pws => string.Equals(pws, storedStatus, StringComparison.OrdinalIgnoreCase));
+        return isRework && wasPastPreWork;
     }
 
     // Lives here rather than in TaskRow so non-UI code (the Dashboard) can ask the same question.

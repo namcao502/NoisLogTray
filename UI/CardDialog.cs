@@ -4,8 +4,8 @@ using System.Runtime.InteropServices;
 
 namespace NoisLogTray;
 
-// The app's dialog frame instead of a Windows one: a borderless rounded card with a drop shadow and the theme's
-// border. There is no title bar, so dragging the card's background moves it.
+// The app's dialog frame instead of a Windows one: a borderless rounded card with a soft shadow (WindowShadow) and a
+// border, so it stands out from the window behind it. There is no title bar, so dragging the card's background moves it.
 internal class CardDialog : Form
 {
     private static readonly int Radius = UiScale.S(12);
@@ -16,16 +16,7 @@ internal class CardDialog : Form
         ShowInTaskbar = false; // a borderless form gets a taskbar button unless told otherwise
         BackColor = Theme.CardSurface;
         Icon = AppIcon.Load(32);
-    }
-
-    protected override CreateParams CreateParams
-    {
-        get
-        {
-            var cp = base.CreateParams;
-            cp.ClassStyle |= 0x00020000; // CS_DROPSHADOW
-            return cp;
-        }
+        WindowShadow.Attach(this, Radius);
     }
 
     // Any size change (a DPI rescale included) reshapes the rounded corners.
@@ -44,7 +35,7 @@ internal class CardDialog : Form
         base.OnPaint(e);
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         using var path = Rounded(new Rectangle(0, 0, ClientSize.Width - 1, ClientSize.Height - 1), Radius);
-        using var pen = new Pen(Theme.CardBorder, 1f);
+        using var pen = new Pen(Theme.DialogBorder, 1f);
         e.Graphics.DrawPath(pen, path);
     }
 

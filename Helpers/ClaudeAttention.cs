@@ -4,8 +4,6 @@ namespace NoisLogTray;
 
 internal static class ClaudeAttention
 {
-    internal const string GeneralSessionName = "claude"; // never a ticket key: those always have a dash
-
     // Null for anything that is not a JSON object with a string hook_event_name.
     internal static ClaudeHookEvent? Parse(string json)
     {
