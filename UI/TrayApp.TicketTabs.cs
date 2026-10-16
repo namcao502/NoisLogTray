@@ -133,12 +133,12 @@ internal sealed partial class TrayApp
     {
         if (_ticketSessions.TryGetValue(ticketKey, out var host)) return host;
         host = new ClaudeSessionHost(() => BackendWorktreePath(ticketKey),
-            () => _shipPending.Contains(ticketKey) ? $"ship {ticketKey}"
-                : TicketLauncher.GetIdlePrompt(BackendWorktreePath(ticketKey), TicketLauncher.ClaudeProjectsRoot),
+            () => TicketSessionArgument(ticketKey),
             fallBackToProfile: false, settingsFile: HookSettingsFor(ticketKey));
         host.Started += () =>
         {
             if (!host.HasHooks) _shipPending.Remove(ticketKey);
+            _pendingHandOffs.Remove(ticketKey);
         };
         TrackClaudeSession(ticketKey, host);
         _ticketSessions[ticketKey] = host;
@@ -184,6 +184,10 @@ internal sealed partial class TrayApp
         _ticketSessions.Remove(ticketKey);
         host?.Dispose();
         ClearClaudeWait(ticketKey); // Dispose does not raise Exited
+        DropTeamsAnalyses(ticketKey);
+        DropTeamsHandOff(ticketKey);
+        DropCommentFlows(ticketKey);
+        _teamsConversations.Remove(ticketKey);
     }
 
     // A tab whose worktree is gone and whose session is not running has nothing left to show. Skipped while the
@@ -201,6 +205,10 @@ internal sealed partial class TrayApp
             _ticketSessions.Remove(ticketKey);
             host?.Dispose();
             ClearClaudeWait(ticketKey);
+            DropTeamsAnalyses(ticketKey);
+            DropTeamsHandOff(ticketKey);
+            DropCommentFlows(ticketKey);
+            _teamsConversations.Remove(ticketKey);
             pruned = true;
         }
         if (pruned) SaveOpenTickets();

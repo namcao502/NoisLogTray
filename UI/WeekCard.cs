@@ -35,7 +35,7 @@ internal sealed class WeekCard : Card
 
     private readonly Label _sectionLabel = new();
     private readonly Label _weekLabel = new();
-    private readonly Label _status = new();
+    private readonly SingleLineLabel _status = new();
     private readonly Label _dayHeader = new();
     private readonly Label _hrmHeader = new();
     private readonly Label _tscHeader = new();
@@ -355,7 +355,7 @@ internal sealed class WeekCard : Card
 
     private static Label StatusLabel(string text, Color color, int x, int width)
     {
-        var statusLabel = new Label
+        var statusLabel = new SingleLineLabel
         {
             Text = text,
             Location = new Point(x, 0),

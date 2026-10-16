@@ -59,7 +59,7 @@ powershell -ExecutionPolicy Bypass -File scripts\publish.ps1 -Restart   # and st
 A running exe or loaded DLL cannot be overwritten but can be renamed, so `scripts/publish.ps1` publishes to
 `bin/publish/staging`, copies each file over, and for a file in use (the exe, `conpty.dll`, `x64\OpenConsole.exe`, the
 icon fonts) renames the old one to `*.<timestamp>.old` before putting the new one in place. The next run deletes the
-`*.old` files nothing holds any more. Plain `dotnet publish` fails on those files while the app runs.
+`*.old` files nothing holds any more. Plain `dotnet publish` fails on those files while the app runs. The old process keeps running from its renamed exe, but a single-file app reads an assembly out of the bundle on first use by the exe's path, so it would read the new bundle and fail (`FileNotFoundException`); `Program.Main` therefore loads the app's whole assembly reference closure on a background thread at startup (`AssemblyPreload`).
 
 Output: `bin/publish/win-x64/` - a single `NoisLogTray.exe` (runtime baked in) plus
 the `.playwright/` driver folder (its `node.exe` kept out of the bundle by the csproj's
@@ -109,7 +109,15 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   see `TrayApp`), and the Tasks
   board: `TicketStore` (JSON state files), `TicketBoard` (section logic), `TicketPoller` (Jira poll),
   `AzureDevOpsClient` + `PrTracker` + `PrUpdateChecker` (PR tracking), `TeamsNotifier`
-  (Teams webhook cards, plus `PostAsUserAsync` for the ticket tab's own post), `JiraStatusFlow` (the walk to Ready to Test); the Claude terminal:
+  (Teams webhook cards: new ticket, PR merged, PR comment), `JiraStatusFlow` (the walk to Ready to Test); the ticket tab's
+  Teams view (see "Teams view" under the Ticket page): `TeamsWebSniffer` (Playwright on the NOIS Chrome profile
+  `%UserProfile%\.nois-teams-browser`: a headless sniff of the Teams web tokens, and the one visible sign-in),
+  `TeamsChatClient` (`ITeamsChatClient`: Teams' internal chat API with those tokens, session cached until near expiry,
+  `InvalidateSession`), `TeamsThreadService` (finds a ticket's post through the post index, reads it, `SelectChannel`, `SendReplyAsync`,
+  `PostAnnouncementAsync`, `EditAsync`, `DeleteAsync`; partials: `.Chats` = the ticket's group chats (cached list, read, re-read) and
+  `.Attention` = `ReadConversationsAsync`, the background read; `SaveImagesAsync` saves a conversation's images for Claude;
+  `TeamsSignedOutException` / `TeamsReplyUncertainException` from the client), `TeamsReplySuggester`
+  (`claude -p` that analyzes a conversation, read-only tools, images via `--add-dir`) and `ClaudeCli` (one `claude -p` run, shared with `KnowledgeMiner`); the Claude terminal:
   `PseudoConsoleSession` (one child process on a Windows ConPTY, P/Invoke; it uses Microsoft's
   redistributable ConPTY (`conpty.dll` + `x64\OpenConsole.exe` beside the exe, from the
   `Microsoft.Windows.Console.ConPTY` package, copied by hand in the csproj and kept out of the single-file
@@ -156,11 +164,18 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `PrCommentAlerts` (pure edits of the unseen-PR-comment map), `DashboardDataBuilder` (Dashboard data), `DashboardTodos` (pure: the Dashboard's to-do list and the week's due days),
   `ClaudeAttention` (pure: parses a hook payload, maps it to the session's wait, words the notice),
   `Retry` (transient-transport-failure retry with backoff, used by the Jira/Graph/HRM clients),
-  `TeamsPost` (pure: the ticket's Teams post draft, its subject/body split and the body's HTML),
+  `TeamsPost` (pure: the ticket's Teams post draft, its subject/body split and the body's HTML, `WithGreeting` / `ResolvePostLead`),
+  `TeamsChat` (pure: parses the chat API's channels and messages, finds the ticket's post, `NeedsReply`, `SafeHtml`, `DeepLink`),
+  `TeamsReply` (pure: the Claude analysis prompt and the `TeamsAnalysis` JSON read back, `BuildClaudeTask` for the hand-off, `AsksToCheckComments` / `CommentAsk` / `CommentPrompt` / `DoneReply` for the check-comment ask),
+  `TeamsCommentFlows` (pure: the check-comment flow's `IsSafePrompt`, `Next`, `AfterTurn`, `OnAsk`, and `CountOpenThreadsAsync` over the PRs' threads),
+  `TeamsHandOff` (pure: the task line, `Target` = `TeamsHandOffTarget`, the bracketed-paste input, the PowerShell / start commands, `EndsClaude`),
+  `TeamsAttention` (pure: `Pending` = the newest message waiting for the user, `ShouldNotify`, `NoticeText`, `Pruned` marks),
+  `TeamsCompose` (pure: a draft's HTML, `properties.mentions` and `amsreferences`, short names, the people list, image checks),
+  `TeamsPostIndex` (`teams-posts.json`: each channel's ticket posts and how far its pages were read, one lock per file),
   `BusyWork` (`BusyWork.Shared`: the work the user may be waiting on; `Begin(label)` returns a handle whose `Dispose`
   ends it, thread-safe. The Jira/PR check, the drain, the log column's actions, the week card and Dashboard coverage
-  reads, Add by key, Start's worktree, Ready to Test, the Changes/Files listings, the Teams post and the Settings
-  verify all register; a new slow job should too).
+  reads, Add by key, Start's worktree, Ready to Test, the Changes/Files listings, the Changes PR comments, the Teams read,
+  post, reply, edit, delete, sign-in, Claude's analysis and the hand-off's image save, and the Settings verify all register; a new slow job should too).
 - `Models/` - record types (+ the `CredentialCheck` and `NoticeKind` enums): `QueueEntry`,
   `JiraVerifyResult`, `DrainResult`/`EntryLogResult`/`OffWriteResult`,
   `GraphTscOptions`, `TimeSlot`, `ToolEnvelope`, `CredentialCheck`, `UpdateInfo`; Tasks: `JiraTicket`, `DismissedTicket`,
@@ -169,11 +184,16 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   worktree cleanup: `CleanupVerdict`, `WorktreeFacts`, `WorktreeCleanupRow`, `WorktreeCreateResult`;
   Schedules: `ScheduledTask`, `ScheduledTaskState`, `KnowledgeScanRun`, `KnowledgeScanSnapshot`, `ScanRunOutcome`,
   `KnowledgeScanNotice`, `AppJob`, `JobRun`, `AppJobStatus`;
-  Ticket page: `TicketPr`, `TicketWorktree`, `ChangeSet`, `FileChange`, `FileChangeStatus`, `TicketFileKind`, `TicketFileContent`;
+  Ticket page: `TicketPr`, `TicketWorktree`, `ChangeSet`, `FileChange`, `FileChangeStatus`, `TicketFileKind`, `TicketFileContent`,
+  `PrThread`, `PrComment`, `PrThreadStatus`; Teams view: `TeamsChannel`, `TeamsMessage`, `TeamsMessagePage`, `TeamsThread`,
+  `TeamsThreadResult` (with `RecentChannelIds` whenever it lists the channels), `TeamsThreadState`, `TeamsReplyResult`,
+  `TeamsReplyState`, `TeamsSession`, `TeamsSniffResult`, `TeamsDraft`, `TeamsMention`, `TeamsImage`,
+  `TeamsImageProblem`, `TeamsPerson`, `TeamsMessageBody`, `TeamsChannelIndex`, `TeamsIndexedPost`, `TeamsGroupChat`, `TeamsAnalysis`, `TeamsIssue`, `TeamsScreenshot`,
+  `TeamsHandOffTarget`, `TeamsConversation`, `TeamsAttentionItem`, `TeamsCommentFlow`, `TeamsCommentStage`;
   Claude hooks: `ClaudeHookEvent`, `ClaudeWaitReason`; Terminal page: `TerminalTabSetting`; ticket tables: `TaskTableColumn`, `TableCell`; Dashboard: `DashboardData`, `TodoItem`, `TodoKind`, `ClaudeWait`; coverage: `DayCoverage`, `TscReadState`;
   shell: `ShellPage`.
 - `Interface/` - abstractions (`IJiraClient`, implemented by `JiraClient`; `IAzureDevOpsClient`, by
-  `AzureDevOpsClient`; `IShellPage`, implemented by the shell's pages).
+  `AzureDevOpsClient`; `ITeamsChatClient`, by `TeamsChatClient`; `IShellPage`, implemented by the shell's pages).
 - `UI/` - WinForms. `Theme` is a central light/dark palette (`Theme.Action*` are the ticket action button fills; `Theme.Badge` is the red of the
   sidebar badges and the tab dots); controls read it at paint
   time and subscribe to `Theme.Changed` to repaint (Settings' Theme pills call
@@ -204,7 +224,8 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   and the Jira site/email share a row; a width change rebuilds the panel and keeps typed values;
   Dev repo path has a "Browse..." folder picker), `CredentialsForm` (a thin dialog around `SettingsPanel`, used only for first-run and
   while the config is invalid; it gets no cleanup button), `WorktreeCleanupDialog` (Settings' "Clean up worktrees...", see
-  "Worktree cleanup" under `TrayApp`), `TeamsPostView` (the ticket tab's Teams post editor, see the Ticket page), and
+  "Worktree cleanup" under `TrayApp`), `TeamsThreadView` (the ticket tab's Teams view: one web page for the thread, the
+  post and edits; see the Ticket page), and
   **no Windows-default popups**: `CardDialog` is the dialog frame (borderless rounded card, `Theme.DialogBorder`, a soft
   shadow from `WindowShadow`, drag the background to move; `CredentialsForm`, `ConfirmDialog`, `WorktreeCleanupDialog`
   and `SchedulesDialog` derive from it). `WindowShadow.Attach(form, radius)` (also on the calendar popup) is a
@@ -218,7 +239,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   Settings. `ThemedToolTip` is the owner-drawn tooltip every `ToolTip` field uses;
   `ThemedToolTip.Track(label)` is how an ellipsis label is set up (instead of a bare `AutoEllipsis = true`): any
   ToolTip text on a `Label` switches off its own Windows "full text" tooltip, so the shared `FullText` instance
-  takes over and pops only while `IsCut`. A static, shared tooltip uses `SetUntilDisposed`, or it would keep
+  takes over and pops only while `IsCut`. A tracked label taller than one line is a `SingleLineLabel`: a plain `Label` wraps a text too wide for it, and the wrapped text, taller than the label, is drawn from its top edge (the Ticket header's summary rode up that way). A static, shared tooltip uses `SetUntilDisposed`, or it would keep
   every rebuilt row alive. **No Windows scrollbars either**: `ThemedScrollBar.Attach(target)` (a `ScrollableControl`
   with AutoScroll, or a multiline `TextBox`) clips the target's native bar
   away with a window `Region` and lays a sibling over that strip that draws a thin rounded thumb and drives the
@@ -238,7 +259,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   days; rows are rebuilt on a theme switch, so they pick the color when built. A striped row hands that color to its
   buttons (`MacButton.Surface`, `CloseButton.Surface`) so their rounded corners blend in, and a hover restores it on
   leave. The folder
-  picker (`FolderBrowserDialog`) and the Windows balloons stay native. **One icon set**: `Icons` draws Fluent UI
+  picker (`FolderBrowserDialog`), the Teams draft's image picker (`OpenFileDialog`) and the Windows balloons stay native. **One icon set**: `Icons` draws Fluent UI
   System Icons (Microsoft, MIT; `Assets/icons`, loaded with `PrivateFontCollection.AddFontFile`, which also
   registers them with GDI for `TextRenderer`) as font glyphs - `Icons.Draw`, the shared `Small`/`Medium`/
   `MediumFilled` fonts. Constants are the
@@ -420,10 +441,11 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   **To do** (`DashboardTodos.Build`, pure; rows are `TodoRow`: a tinted Fluent icon, the key as a Jira link + a title
   over a gray detail line, up to two buttons always shown; busy tickets show their stage and wait), in this order:
   Claude waiting (permission / question before a finished turn; `TrayApp.RefreshClaudeAttention` pushes
-  `SetClaudeWaits`, labelled like the notices; Open -> `ClaudeSessionRequested` -> that tab), Ready to Test, new PR
+  `SetClaudeWaits`, labelled like the notices; Open -> `ClaudeSessionRequested` -> that tab), Teams messages waiting for an answer
+  (`TodoKind.TeamsMessage`: mentions first, then newest; opens the ticket's Teams tab on that conversation), Ready to Test, new PR
   comments (View PR opens it and marks them seen, Seen), Done in Jira (Done), overdue (Open, or Start for a New ticket),
   today not queued (`TicketQueue.TodayRefusal` null, no today entry, today's TSC cell not written, no drain, the week read
-  and today not off; Queue -> `QueueTicketsRequested` with the Started tickets not Done in Jira, not busy, `CanQueue`),
+  and today not off; Queue is a dropdown (`QueueMenu`) of the Started tickets not Done in Jira, not busy, `CanQueue`, none checked - a click only checks one and the menu stays open - whose last row "Queue N tickets" raises `QueueTicketsRequested` with the checked ones),
   days not fully logged (weekdays before today, and today once `max(LOG_TIME, 18:00)` passed with nothing left to drain,
   per `WeekCard.IsActionable`; Log -> `LogDayRequested` -> the Work page on that date) and worktrees of shipped tickets
   (Done, every live main PR merged, no open tab, the backend worktree folder still there; Clean up -> the cleanup
@@ -663,26 +685,140 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   (`DashboardDataBuilder.LatestPrs` -> `TicketPr`, `Url` from `AzureDevOpsClient.PullRequestUrl`)
   and the Claude / Changes / Files / Teams view buttons plus VS Code (each button is as wide as its longer label,
   English or Vietnamese) - over a `TerminalView`, a `ChangesView`, a `FilesView` or a
-  `TeamsPostView` (the last three created on their first click; all live while the tab is open). The header's VS Code button opens only the backend worktree
+  `TeamsThreadView` (the last three created on their first click; all live while the tab is open). The header's VS Code button opens only the backend worktree
   folder (`TicketLauncher.OpenVsCode`), with no Claude inside it (the Files toolbar's opens the selected file). The ▴/▾ button at the far right collapses the
   header to its key row (the PR rows, and the facts when they had a row of their own, hidden) for every tab at once
   (`AppSettings.TicketHeaderCollapsed`).
-  **Teams view** (`TeamsPostView`, built by `TrayApp.CreateTeamsPostView` in `TrayApp.TeamsPost.cs`) posts a
-  ticket announcement **as the user**: the app POSTs
-  `{"subject": <first line>, "message": <the rest as HTML>}` to the user's own Power Automate workflow
-  (`TEAMS_POST_WORKFLOW_URL`), which posts it in a channel under their account. Without that URL the button
-  is only a notice and the tab keeps its view. The editor (on a `Card`, up to 960px wide) loads `docs\<KEY>\teams-post.md` (dev repo first, then the ticket's
-  worktree) or else `TeamsPost.Build`'s template (`<KEY> <summary>`, an empty description line, then `[BE]` /
-  `[FE <App>]` blocks of the tracked PRs), with the caret on the description line; each show re-reads the
-  draft while it has no edits (Claude may rewrite the file), and "Reload draft" re-reads it anyway. Send or
-  Ctrl+Enter posts. A blank post or one with only the title line is refused in the status line; for a ticket
-  already posted (`AppSettings.TeamsPostedAt`, entries kept 180 days, recorded by `RecordTeamsPost` on
-  `Posted`) the first Send only warns and a second one posts again; closing the tab while sending cancels the
-  request. The workflow answers 202 on receipt, so a failure inside the flow is not seen by the app.
-  **Workflow setup (once):** in Teams create a flow from "Send webhook alerts to a channel", edit it in
-  make.powerautomate.com, replace the "Post card" action in the condition's True branch with "Post message in
-  a chat or channel" (Post as: User, Post in: Channel, Message = `triggerBody()?['message']`, Subject =
-  `triggerBody()?['subject']`), set the trigger to "Anyone", save and paste the trigger URL into Settings.
+  **Teams view** (`TeamsThreadView`, built by `TrayApp.CreateTeamsThreadView` in `TrayApp.TeamsThread.cs`) is one WebView2
+  page (`Assets/teams/`: `index.html`, `thread.js`, `composer.js`) in three modes. **Thread** (the post was found): the post
+  and its replies drawn like Teams on a card, with the reply box at its bottom. From 1300px wide (`matchMedia`) a 340px
+  `#sideColumn` beside the card holds the analysis, always expanded, and the check-comment card (the same nodes, moved, so a typed prompt
+  survives a resize); narrower, they sit in the card instead: just above the
+  reply box sit, in order, Claude's analysis as a collapsible strip (`#analysisStrip`: the summary, the issues and the
+  diagnosis, opened and closed from its header; an Analyze button, always shown, plus a "main point" box that stay put across
+  renders), the "check comment" card (`#commentCard`, below) and the reply suggestions row (`#replySuggestions`). **Chat**: the ticket's Teams group chat is the same
+  thread view over `conversations/{chatId}/messages` (reply, edit, delete work as in a channel; the newest 200 messages, one page). **Post** (`NotPosted`): one card, up to 960px,
+  "New post for <KEY>" with the draft's source, a title box and the post box. **Edit**: one of the user's own messages
+  turns into a box in place (the root also gets its title), Cancel / Save, Esc cancels. Sign-in, a failed read and
+  "waiting for the post" are a panel over the page; a re-read only shows in the top bar's status line, and so does a failed
+  read while the post mode shows, so a half-written post is never lost. **Posts, replies, edits and deletes go through
+  Teams' internal chat API as the user** (`TeamsThreadService` over `TeamsChatClient`), with tokens sniffed headless from
+  the NOIS Chrome profile `%UserProfile%\.nois-teams-browser` (`TeamsWebSniffer`; the page's "Sign in to Teams" opens the
+  one visible Chrome, up to 270s, off the UI thread, then `InvalidateSession`). The API is not public: a Microsoft change
+  breaks it, as with the TSC sniff. **Finding the post**: `TeamsPostIndex` (`teams-posts.json`, its own file since it is
+  written per page read) keeps each channel's ticket posts by key (`TeamsChannelIndex`, `TeamsIndexedPost`, 200 days) and
+  how far its pages were read. A read looks in the selected channel and up to 3 recent ones: it syncs their newest pages
+  (once a minute, back to the last sync less a day) and goes on with a deep scan of up to 40 pages per channel, 15 pages per
+  read, saved after every page; an own post wins, then the selected channel, then the newest. While a deep scan is
+  unfinished and nothing was found the result is `StillSearching`: the view reads again after 5s (else on Activate after
+  60s, or Refresh) and the post mode shows "Looking for an older post in the channel...". A post that is gone is dropped
+  from the index. Teams sometimes answers a post's own read (`;messageid=<root>`) with the root alone (seen after a reaction on
+  it), so when `GetThreadAsync` gets no reply it adds the replies (`rootMessageId`) from the channel's newest page. The channel is picked in the top bar's dropdown (the page's own menu from `TeamsChat.ChannelGroups`:
+  "Recent" first, at most 3, then one group per team, the selected one checked); a pick calls `SelectChannel` (saves
+  `teamsChannelId`, puts it first in `teamsRecentChannelIds`) and reads again. The host keeps the newest message of each
+  kind for a page that (re)loads. **Ticket chats**: `TeamsChatClient.ListChatsAsync` reads up to 3 pages (300 newest conversations,
+  `backwardLink`, which names the user's own `users/8:orgid:<id>/` where the first request said `users/ME/`, so `IsChatListLink` checks
+  only the origin and the path up to `users/`; a link elsewhere ends the paging with the pages read) and `TeamsChat.FindTicketChats` keeps the group chats whose topic starts with the ticket key; the list is cached
+  2 minutes in the service (`GetTicketChatsAsync`) and a failed refresh keeps the old list. When a ticket has a post and/or chats the
+  top bar's conversation dropdown picks one (`ConversationChanged`, "" = the post; kept per ticket for the session in
+  `TrayApp._teamsConversations`); picking clears the old thread and its analysis, and a read that returns after another pick is dropped. The header's Teams button gets a dot while the thread's last message is someone else's
+  (`NeedsReplyChanged`, after every read). Claude's **analysis** replaced the reply suggestions: `claude -p` (`TeamsReplySuggester`, read-only tools) in the
+  ticket's backend worktree, else the dev repo, answers JSON read back as a `TeamsAnalysis` (issues with a status open / answered / fixed,
+  diagnosis, next step, in Vietnamese, and replies to pick from). The conversation's images are saved under
+  `%TEMP%\NoisLogTray\teams-shots\<KEY>\analysis` (`SaveImagesAsync`, through the image cache) and handed over with `--add-dir`; Claude opens them
+  with Read. `TrayApp._teamsSuggestions` keeps the last run per ticket with the id of the message it answers, so reopening the view does not run
+  Claude again on the same question; closing the tab drops it. The page message is still `suggest`. The replies are listed in `#replySuggestions`: a click fills the
+  reply box with that reply (`TeamsCompose.ParagraphsFromText`, caret at the end).
+  **Check comment** (`TeamsCommentFlows`, `TeamsCommentFlow` / `TeamsCommentStage` `Asked` -> `HandedOff` -> `Done`,
+  `TrayApp.TeamsComments.cs`, session-only in `_commentFlows` per ticket and conversation): `TeamsReply.AsksToCheckComments` /
+  `CommentAsk` spot a message from someone else asking to check the PR comments ("check cmt"); `OnCommentAskSeen` (run on every read,
+  `TeamsCommentFlows.OnAsk` keeps or drops the flow) shows a card above the reply box with an editable prompt, default
+  `TeamsReply.CommentPrompt` = `pr-comments <KEY>`. Hand over sends it to the ticket's terminal through `SendLineToClaude` (the
+  hand-off's targets and `ship` guard); `IsSafePrompt` refuses an empty prompt, one over 500 characters, or one with a quote,
+  backtick, `$`, backslash or control character. After the prompt is submitted (`Next` on `UserPromptSubmit`) and the turn ends
+  (`OnCommentFlowHook`, then `CheckCommentFlowsAsync`: `CountOpenThreadsAsync` over the live, non-abandoned PRs, 60s timeout)
+  the flow is `Done` once no thread is open (`PrThread.IsOpen`) or the count is unknown (no PAT, a failure), else it stays
+  `HandedOff` and waits for the next turn; "Done" on the card marks it by hand. A finished flow is a `Notify` and puts
+  `TeamsReply.DoneReply` ("dạ e update r nha a") first in the suggestions; the lead's bot looks for "update", so
+  `BuildPrompt` requires that word in every reply to such an ask. A newer ask replaces an `Asked` flow; the user's own
+  message after the ask drops an `Asked` / `Done` one. **Hand to Claude** (button in a message's hover bar, any message; `TeamsThreadView.HandToClaudeAsync`,
+  guarded against a double click, `TrayApp.TeamsHandOff.cs`): writes `%TEMP%\NoisLogTray\teams-tasks\<KEY>-<yyyyMMdd-HHmmss>.md` (`TeamsReply.BuildClaudeTask`:
+  the thread with a `>>> the message to look at` marker, its images saved in `teams-shots\<KEY>\<stamp>`, an ask to investigate and propose,
+  not to edit code before the user agrees; the permission mode decides the rest) and feeds a line naming it to the ticket's terminal by
+  `TeamsHandOff.Target`: `ClaudePrompt` (running claude: bracketed paste, then Enter after a pause), `ShellPrompt` (claude ended inside the
+  PowerShell, `_claudeEndedInShell`, set by a `SessionEnd` whose reason is not `clear`: runs `claude [--continue] '<line>'` typed at the prompt) or `NotRunning`
+  (the line waits in `_pendingHandOffs` for the session's start). It refuses while `ship` is pending; older hand-off folders are deleted.
+  **Reminders** (`TrayApp.TeamsAttention.cs`): a timer (first look after 1 min, then every 2 min) calls `TeamsThreadService.ReadConversationsAsync` for the
+  Started tickets: each indexed post (no search or sync) and each ticket chat. `TeamsAttention.Pending` takes the newest message when it is
+  someone else's, newer than the user's last message and `AppSettings.TeamsSeenAt`, and sets `MentionsMe` (OrdinalIgnoreCase on the MRI). A new one is
+  a `Notify` (click -> `ShowTeamsConversation`), a dot on the Teams button and a Dashboard to-do; `TeamsNotifiedAt` keeps one notice per message and the
+  very first check (`TeamsAttentionBaselineDone`) only records marks. Opening the conversation in a foreground window marks it seen
+  (`MarkTeamsSeen`). Marks are keyed by `TeamsChat.ConversationKey` and pruned after 60 days, except a conversation the last check read or the
+  user marked seen (a mark holds the message's time, which can be months old, and dropping it would notify again). The watch stops after `TeamsSignedOutException` until
+  sign-in, and it only ever sniffs headless on the Teams profile (no `BrowserLock`).
+  `TeamsChatClient` and `TeamsThreadService` live for the app's lifetime (a Settings save does not rebuild them). The read,
+  post, reply, edit, delete, sign-in and suggestions register with `BusyWork`, except the 10s refresh below.
+  **Reactions**: `TeamsChat.ParseMessage` reads `properties.emotions` (`[{key, users: [{mri}]}]`) into `TeamsMessage.Reactions`
+  (keys must match `^[A-Za-z0-9_-]{1,64}$`, as they go into a URL path); each message shows chips with Teams' own emoji image
+  from `TeamsChat.EmojiUrl` (`statics.teams.cdn.office.net/.../emoticons/<key>/default/30_f.png`, anonymous, the one remote host
+  the page's CSP `img-src` allows; the key as text when it fails), the count, the user's own outlined, and the names in a
+  tooltip (thread senders, then `People`). Display only; reacting stays in Teams. `HasSameMessages` compares them, so the
+  10s read shows a new reaction.
+  **Avatars**: each message's circle shows the sender's Teams picture over the letters. The page asks per MRI
+  (`avatar` message, once per page life, `TeamsThreadView.LoadAvatarAsync`, person MRIs only); `TeamsThreadService.GetAvatarDataUrlAsync`
+  fetches `teams.cloud.microsoft/api/mt/<region>/beta/users/<oid>/profilepicturev2/<mri>?size=HR64x64` with the sniffed
+  `api.spaces.skype.com` ("spaces") token (`TeamsChatClient.GetProfilePictureAsync`: no redirects, 1 MB, jpeg/png/gif/webp), caches
+  it in memory and in `%AppData%\NoisLogTray\teams-avatars\HR64` for 7 days. A 401, a missing spaces token or any failure only
+  leaves the letters: no re-sniff, no sign-out.
+  **Live thread**: while the view is visible, its window is the foreground one and the last result was a thread, a
+  `System.Windows.Forms.Timer` reads again every 10s (`ShouldPoll`, skipped while a read / reply / post / edit / delete runs).
+  That read is quiet (`quiet` on the read delegate): no "Reading Teams..." status, no `BusyWork`, no log line unless it fails or the
+  thread changed. A read with the same messages (`HasSameMessages`: count, ids, edit times) sends nothing to the page, and a failed
+  one leaves the thread on screen. New messages from someone else run the analysis as any read does. The reply box lives
+  outside the re-rendered area, so typed text stays.
+  **The composer** (`composer.js`, one for the reply box, the post and each edit) is a contenteditable with a toolbar
+  (bold, italic, underline, strikethrough, lists, quote, link through the page's own http(s)-only prompt, code: inline for
+  one line, a code block for more or a bare caret; Ctrl+B / I / U). A **code block** (`codeblock.js`) is a widget like Teams':
+  a language dropdown (Plain Text / JSON / SQL / C#, the last pick kept in `localStorage`), a "..." menu with Delete block,
+  line numbers and a clear textarea over a **highlight.js** colored copy (`Assets/highlight`, 11.11.1 common bundle, BSD-3,
+  `LICENSE-highlightjs.txt`), colored through the composer's sink; it goes out as Teams stores it, `<pre class="language-<id>
+  [language-was-manually-selected]" itemid="codeBlockEditor-<guid>">` with `hljs-*` spans, which the host keeps, after Teams'
+  marker paragraph `<p itemtype="http://schema.skype.com/CodeBlockEditor" id="x_<itemid>">` (`TeamsCompose.CodeBlockMarker`; without it
+  Teams draws no language header or copy button; `SafeHtml` drops it on read) and with `properties.formatVariant = "TEAMS"`; any other
+  `language-<id>` from Teams keeps its id and shows as plain text. "@" typed at a word start, or the @ button, lists up to 8 people to tag
+  (accent-insensitive) - the thread's own first, then everyone seen in a read channel or thread (`AppSettings.TeamsPeople`,
+  never the user) - by short name (`TeamsCompose.ShortName` drops a trailing "(...)"); a pick inserts a chip, and Backspace
+  right after a chip removes it. Images are pasted or picked: PNG, JPEG or GIF, at most 10 MB each, 20 MB in all, 6 per
+  message, shown in place with a ×. Pasted HTML keeps only what `TeamsCompose.BuildBody` keeps (http(s) links, no
+  attributes), an image alone becomes an image, anything else pastes as plain text. Host HTML (an edited message's
+  `SafeHtml(forEditor: true)`, a draft) goes through the same DOM whitelist. Sent, the box is HTML with markers -
+  `<span data-mention="i">`, `<img data-image="j">`, `<img data-ams="id">` for an image the edited message kept - plus the
+  mentions and images (`TeamsDraft`); `TeamsThreadView.ParseDraft` checks them again (HTML up to 2 MB). Only two places
+  use `innerHTML`: the message render in `thread.js` (which shows a `pre.language-*` as a card under its language's name) and
+  the inert template behind `composer.setContent` and the code blocks' colors. Enter sends a
+  reply (Shift+Enter adds a line); in the post and an edit Enter adds a line and Ctrl+Enter sends. Images are uploaded to
+  AMS before the message, which needs a plain Chrome User-Agent (a HeadlessChrome one gets 400) and the sniffed
+  `x-ms-client-*` headers; a failed upload sends nothing. Images in the thread are read with the ic3 chat token, only from
+  `*.asm.skype.com` (`TeamsChat.IsAmsImageUrl`), and cached.
+  **The post**: the draft is `docs\<KEY>\teams-post.md` (dev repo first, then the ticket's worktree) or else
+  `TeamsPost.Build`'s template (`<KEY> <summary>`, then `[BE]` / `[FE <App>]` blocks of the tracked PRs). Its first line
+  is the title (`TeamsPost.SplitSubject`), the rest markdown the page renders with marked (line breaks kept); a draft that
+  starts at its PR blocks gets an empty description line above them for the caret. The draft then opens with a
+  greeting to the lead (`TeamsPost.WithGreeting`, applied in `TrayApp.TeamsPost.cs`): the description becomes `a <lead chip>, dạ ...`
+  (the chip is the `<span class="mention" data-mri>` the composer turns into a tag, with the lead's full display name), or
+  `a <lead>, dạ e update ` on its own line when the draft has no description; one that already starts with "a" / "dạ" is left alone.
+  The lead is `AppSettings.TeamsPostLead`, learned from the first mention of the last post (`RecordTeamsPost`), else the
+  known person whose name starts with `TeamsPost.DefaultPostLeadName` ("Minh Dinh") (`ResolvePostLead`), else no chip (`dạ ...`). The page follows a re-read draft
+  until the user changes it; "Reload draft" always replaces it. Post or Ctrl+Enter posts into the selected channel
+  (`PostAnnouncementAsync`); with no channel picked Post only opens the channel list. For a ticket already posted
+  (`AppSettings.TeamsPostedAt`, entries kept 180 days, recorded by `RecordTeamsPost` on `Posted`), and after a post that
+  may or may not have reached Teams (`TeamsReplyState.Uncertain`, which also reads again at once), the first Post only
+  warns and the same content posted again goes out. After a post the view waits for it (one read, as the index got the
+  post when it went up) and shows the thread; closing the tab while sending cancels the request. **Edit and delete**: a
+  message of the user's own shows Edit / Delete in a bar on hover or focus; Edit only when `TeamsChat.IsEditable` (no
+  files, only tags `BuildBody` keeps, only person mentions), Delete asks first (`ConfirmDialog`, raised via `BeginInvoke`
+  outside WebView2's message callback). `EditAsync` keeps the root's ticket key in the title; deleting the root drops it
+  from the index and the view goes back to the post mode.
   **Tabs and sessions** live in `TrayApp.TicketTabs.cs`, not in the page, so a shell rebuild
   reattaches: `_ticketSessions` holds one `ClaudeSessionHost` per open ticket, created with
   `fallBackToProfile: false` (a vanished worktree must not silently run Claude elsewhere) and the
@@ -722,7 +858,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `agent_id`) ends only a `Permission` wait, because background agents keep running after a Stop.
   **Badges and notices:** `TrayApp.OnClaudeHook` (marshaled from the pool thread) keeps
   `_claudeWaits` (session -> reason) and logs each change as `[hooks]`. A (re)starting terminal (`Starting`), an ended
-  one (`Exited`), a claude that ended inside a running terminal (`SessionEnd`: /exit, /clear, Ctrl+C twice; SessionStart
+  one (`Exited`), a claude that ended inside a running terminal (`SessionEnd`: /exit, /clear, Ctrl+C twice; the Teams hand-off treats only a reason other than `clear` as claude ended in the shell; SessionStart
   takes no HTTP hooks) and a closed or pruned tab clear their wait (`Dispose` raises no `Exited`). A `Finished` wait also clears once seen
   (`ClaudeAttention.ClearsWhenSeen`; `AcknowledgeSeenWaits` runs on `ShellForm.PageViewed` - page switch, window
   shown or activated - and on a tab switch, and a Stop arriving while `IsWatching` sets no dot); `Permission` /
@@ -738,8 +874,10 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `.claude\worktrees\<KEY>`; `GitChanges.List(worktree, ticketKey)` runs per worktree. The file list
   on the left is grouped `"BE - Backend-DotNet"` / `"FE - Portal-Angular"`, each a folder tree like Azure DevOps
   (folders first, a folder holding only one subfolder merged into it, folders open/close and stay so across
-  re-lists); the right is a **Monaco** diff (`Assets/diff/index.html`, two columns unless Inline is on, Monaco's
-  narrow-window inline switch disabled, language validation off). A toolbar above both holds the list toggle,
+  re-lists; a group's header opens/closes the whole group the same way, and picking a file from a thread opens its
+  group); the right is a **Monaco** diff (`Assets/diff/index.html`, two columns unless Inline is on, Monaco's
+  narrow-window inline switch disabled, language validation off; one vertical scrollbar, the new side's: the old side's
+  is hidden since both sides scroll together, and the overview ruler is off). A toolbar above both holds the list toggle,
   Refresh, the open file's path, previous/next change (F7 / Shift+F7) and file (Alt+Up/Down), and Inline; the list
   is resizable by its right edge. List width (em), list hidden and Inline are each posted (only the one that changed) as a `layout` message and kept
   in `AppSettings` (`DiffListWidthEm`, `DiffListHidden`, `DiffInline`); toolbar labels come from a `labels`
@@ -752,7 +890,29 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `base..<KEY>` diff, so the development merge never shows. `src/docker-compose.yml` is excluded
   (a local-only edit the worktree skill carries), every git call passes `--no-optional-locks`, and
   `ReadOriginal` / `ReadModified` check the size first (`cat-file -s` for a blob, the file length on
-  disk), so nothing over 1MB is read whole. Monaco is vendored
+  disk), so nothing over 1MB is read whole.
+  **PR comments** sit in a panel right of the diff (read-only; replying or resolving stays in Azure DevOps). With a PAT
+  (`TrayApp._ado`, passed down as `Func<IAzureDevOpsClient?>`) the view reads the threads of the tab's live PRs (the
+  header's `TicketPr`s, abandoned ones left out, main and dev) via `AzureDevOpsClient.GetThreadsAsync`: the PR's
+  iterations, then `threads?$iteration=<last>&$baseIteration=0`, so a line is where the latest push has it (33 -> 36 once
+  lines were added above it), clamped to the file. `ParseThreads` drops deleted threads and those with only system
+  comments (`IsRealComment`, shared with the poll's count) into `PrThread`s. This read runs in its own loop beside the
+  listing (`ReadCommentsAsync`, with its own guard, a Refresh merged into a running read still forces the next one, and
+  a `CancellationTokenSource` cancelled on `Dispose`), so a slow Azure DevOps never holds the file list back. It reads
+  again on Refresh, on an Activate once the last read is 2 minutes old, or when the PR set changed; a PR that fails is a
+  line in the panel ("see log"), the others still show. `PostComments` sends the threads as a `comments` message with
+  every text already worded (status, `lineText`, dates in HCM); the page groups them: PR-level threads first, then one
+  group per file in list order, files no longer listed last. Open threads (active / pending) are expanded, the rest
+  collapsed and dimmed with a one-line snippet. A file row has a badge with its open threads; the lines a thread covers
+  (`PrThread.Line` .. `EndLine`, from `rightFileStart` / `rightFileEnd` or the `left*` pair; an end before the start is no
+  range) get a mark left of the code and a tinted background (accent for open, faint gray for resolved, strongest for the
+  thread last opened from the panel or a mark; old-side lines only side by side, not Inline), and the panel's line text
+  reads "lines 33-36"; clicking a thread's line opens its file at that line, clicking a mark on any line of a range opens
+  the panel on its thread (the narrowest range where two overlap). Only a comment's body is HTML, rendered by `Assets/files/markdown.js`
+  (raw HTML escaped); its links, like the thread's "Open in Azure DevOps" (`?discussionId=`), go to the host as
+  `openUrl` and open only http(s). The toolbar's comment button (open count) hides the panel, kept as
+  `AppSettings.DiffThreadsHidden`; with no PAT, no live PR, or no thread and no error, neither shows. A thread on a
+  renamed file lands in the "no longer listed" group. Monaco is vendored
   under `Assets/monaco` (monaco-editor **0.52.2** `min/vs`, the last AMD build; nls files removed,
   ~12MB; `LICENSE-monaco.txt`) and copied to the output with the rest of `Assets/`.
 - **`FilesView`** - the ticket's files, read-only. The list on the left has one group per source: `Docs - <KEY>`
@@ -761,7 +921,7 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   `TicketFiles.ListWorktree` = tracked + untracked-not-ignored via `git ls-files`, minus files deleted on disk, with
   `--no-optional-locks`). A group that cannot be listed shows its error and the others still list. Each group is a
   folder tree like `ChangesView`'s whose folders build their rows on first open (a 10k-file worktree costs only its top
-  level); a filter box above it switches to a flat list of the first 500 matches. The right shows the selected file by
+  level), under a header that opens/closes the whole group (kept across re-lists; a reveal opens it); a filter box above it switches to a flat list of the first 500 matches. The right shows the selected file by
   `TicketFileKind`: `Text` in Monaco (`Assets/files/index.html`, same vendored Monaco), `Markdown` rendered with a
   Source / Rendered switch, `Image` inline (a data URL, up to 10MB; images in rendered markdown are asked for
   one by one); `Binary`, `TooLarge` (text over `GitChanges.MaxChars`, an image over 10MB) and a failed read (kind
@@ -770,7 +930,8 @@ and all share the flat `NoisLogTray` namespace (folder does not equal namespace)
   language switch; the open file is sent again only when its write time or size changed (or the language
   switched), so a re-list keeps its scroll. VS Code opens the file (`TicketLauncher.OpenVsCode`) and Show in folder
   runs `explorer.exe /select`. `Assets/files/markdown.js` renders with **marked** (`Assets/marked`, MIT,
-  `LICENSE-marked.txt`), loaded before Monaco's AMD loader. Docs come from Jira and other people, so raw HTML is escaped (shown as text) except `<br>`, and a link
+  `LICENSE-marked.txt`; beside it `Assets/highlight`, highlight.js 11.11.1, BSD-3, `LICENSE-highlightjs.txt`, for the Teams
+  composer's code blocks), loaded before Monaco's AMD loader. Docs come from Jira and other people, so raw HTML is escaped (shown as text) except `<br>`, and a link
   becomes an anchor only for http(s) or a relative path that stays inside the group (a relative link to a listed
   file opens it in the view, http(s) opens the browser); `javascript:`, `data:`, `//host` and the like stay plain
   text. List width (em) and list hidden are posted as a `layout` message and kept in `AppSettings`
@@ -927,7 +1088,7 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   writes are **atomic** (temp + rename) and a corrupt file is preserved as
   `settings.json.bad` rather than silently reset (`AppSettings.LoadOrBackup`). The
   project `.env` is gitignored and never copied to a build. Secret keys
-  (`JIRA_API_TOKEN`, `HRM_API_KEY`, `AZURE_DEVOPS_PAT`, `TEAMS_WEBHOOK_URL`, `TEAMS_POST_WORKFLOW_URL`, see `Secrets.Keys`) are encrypted at rest with
+  (`JIRA_API_TOKEN`, `HRM_API_KEY`, `AZURE_DEVOPS_PAT`, `TEAMS_WEBHOOK_URL`, see `Secrets.Keys`) are encrypted at rest with
   Windows DPAPI (CurrentUser) - stored `enc:`-prefixed, decrypted only when building
   the runtime config; `AppConfig` upgrades any leftover plaintext secret on load.
   Required keys: `JIRA_BASE_URL`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `HRM_API_KEY`.
@@ -940,7 +1101,6 @@ Support: `AppConfig` + `Env` (config), `AppPaths` (per-user paths), `Hcm` (timez
   `AZURE_DEVOPS_PAT` (enables PR tracking) and `TEAMS_WEBHOOK_URL` (enables Teams posts); both are
   imported once from `<DEV_REPO_PATH>\docs\local-config\tokens.env` (`AppConfig.ImportDevTokens`)
   when not already in the config - a key the user cleared to empty is never re-imported,
-  `TEAMS_POST_WORKFLOW_URL` (the user's own "post as me" workflow for the ticket tab's Post to Teams; never imported),
   `HRM_PROJECT_ID`, `MS_GRAPH_TOKEN` (override that skips the sniff),
   `TSC_GRAPH_DRIVE_ID` / `_ITEM_ID` / `_SHARE_URL` / `_WORKSHEET`.
 
@@ -951,8 +1111,10 @@ Everything runtime lives under `%AppData%\NoisLogTray` (see `AppPaths`): `queue.
 (`openTicketTabs`), the knowledge-scan watch's run starts (`knowledgeScanJudgedRunAt`, `knowledgeScanSeenRunAt`), the Terminal page's tabs, selected tab, recent folders and resumable session ids (`terminalTabs`,
 `selectedTerminal`, `recentClaudeDirectories`, `claudeSessionIds`), the Work badge's seen tickets (`seenWorkAttention`),
 when each ticket was last posted to
-Teams (`teamsPostedAt`), the Ticket header, Changes and Files layout (`ticketHeaderCollapsed`, `diffListWidthEm`,
-`diffListHidden`, `diffInline`, `filesListWidthEm`, `filesListHidden`), **and** the `Config` key/value map of secrets/settings written from Settings,
+Teams (`teamsPostedAt`), the newest Teams message seen / already notified per conversation and whether the first reminder check ran
+(`teamsSeenAt`, `teamsNotifiedAt`, `teamsAttentionBaselineDone`), the Teams view's channel, recent channels, the people to tag and the lead the post greets (`teamsChannelId`,
+`teamsRecentChannelIds`, `teamsPeople`, `teamsPostLead`), the Ticket header, Changes and Files layout (`ticketHeaderCollapsed`, `diffListWidthEm`,
+`diffListHidden`, `diffInline`, `diffThreadsHidden`, `filesListWidthEm`, `filesListHidden`), **and** the `Config` key/value map of secrets/settings written from Settings,
 via `AppSettings`), and `logs/app-yyyy-MM-dd.log` (one file per day), plus `WebView2/` (the web
 views' browser data: terminal and diff) and `claude-hooks/` (one `<session>.json` hook settings
 file per Claude session, rewritten at every session start since it holds the run's port and token).
@@ -963,7 +1125,8 @@ a missing/bad `settings.json` (preserving the bad copy as `settings.json.bad`). 
 deletes log files older than 30 days (`RetentionDays`) on the first write of each day;
 the Settings "Open log folder" link opens the folder. The TSC Chrome profile (the saved
 Microsoft session) lives separately at
-`%UserProfile%\.tsc-daily-log-browser` (`TscTokenSniffer.ProfileDir`).
+`%UserProfile%\.tsc-daily-log-browser` (`TscTokenSniffer.ProfileDir`), and the Teams one (the NOIS account) at
+`%UserProfile%\.nois-teams-browser` (`TeamsWebSniffer.ProfileDir`).
 
 `tasks/` holds the Tasks ticket state (`.jira-*.json`, incl. `.jira-pr-tracking.json` for PR
 tracking; the app-only `.pr-baseline-done` marker and `.jira-pr-comments.json` - unseen PR comment
@@ -973,6 +1136,14 @@ tickets still on the board - sit beside them), imported once from
 failure disables Tasks for the session and the next start retries.
 
 `job-runs.json` (`JobRuns`) holds the last 10 runs of each in-app job for the Schedules dialog.
+
+`teams-posts.json` (`TeamsPostIndex`) holds the Teams view's post index: per channel, its ticket posts (200 days) and how
+far its pages were synced and deep-scanned. A missing file reads as empty, so the channels are read again; a corrupt one is kept as `teams-posts.json.bad`.
+
+`%TEMP%\NoisLogTray\teams-shots\<KEY>` (conversation images for Claude: `analysis\`, one `<stamp>\` per hand-off) and `teams-tasks` (the hand-off task files) hold temporary files; each hand-off deletes its ticket's old ones.
+
+`teams-avatars/HR64/` holds the Teams view's cached profile pictures, one file per person (`<oid>.jpg` / `.png` / `.gif` / `.webp`),
+reused for 7 days; old files are not cleaned up.
 
 `tsc-written.json` (`TscWrittenDates`) lists the last 31 dates whose TSC cell this app wrote (or was
 about to write); it is recorded before every TSC write. Start -> queue uses it: `AddStartedTicket`

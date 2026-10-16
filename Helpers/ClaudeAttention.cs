@@ -19,7 +19,7 @@ internal static class ClaudeAttention
                 && backgroundTasks.EnumerateArray().Any(bt => bt.ValueKind == JsonValueKind.Object
                     && ReadString(bt, "type") == "subagent" && ReadString(bt, "status") == "running");
             return new ClaudeHookEvent(eventName, ReadString(root, "tool_name"), ReadString(root, "notification_type"), ReadString(root, "agent_id"),
-                ReadString(root, "session_id"), subagentsRunning, ReadString(root, "transcript_path"));
+                ReadString(root, "session_id"), subagentsRunning, ReadString(root, "transcript_path"), ReadString(root, "reason"));
         }
         catch (Exception e) when (e is JsonException || e is InvalidOperationException)
         {

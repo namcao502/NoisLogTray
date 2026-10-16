@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -11,7 +10,6 @@ internal static class KnowledgeMiner
 {
     internal const string ScanFilePrefix = ".daily-knowledge-scan.";
     private static readonly TimeSpan MineTimeout = TimeSpan.FromMinutes(15);
-    private static readonly TimeSpan StreamDrainTimeout = TimeSpan.FromSeconds(5);
     private const int MaxLoggedErrorChars = 500;
 
     internal static string ScanLogPath(string devRepoPath)
@@ -77,74 +75,10 @@ internal static class KnowledgeMiner
 
     private static (int ExitCode, string Output, string Error) RunClaude(string devRepoPath, string ticketKey)
     {
-        var startInfo = new ProcessStartInfo(ClaudeSessionHost.DefaultClaudeExecutable())
-        {
-            WorkingDirectory = devRepoPath,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
         // The same tools and permission mode as the daily scan, which runs it with nobody watching too.
-        foreach (var argument in new[] { "-p", $"mine-knowledge {ticketKey}", "--allowedTools", "Read,Write,Edit,Bash,Skill",
-            "--permission-mode", "acceptEdits", "--output-format", "json" })
-        {
-            startInfo.ArgumentList.Add(argument);
-        }
-        // A tray started from a Claude Code session would otherwise make this a child session of it.
-        foreach (var variableName in startInfo.Environment.Keys.Where(TicketLauncher.IsClaudeSessionVariable).ToList())
-        {
-            startInfo.Environment.Remove(variableName);
-        }
-
-        var output = new StringBuilder();
-        var error = new StringBuilder();
-        using var streamsClosed = new CountdownEvent(2);
-        try
-        {
-            using var process = new Process { StartInfo = startInfo };
-            process.OutputDataReceived += (_, e) => AppendLine(output, e.Data, streamsClosed);
-            process.ErrorDataReceived += (_, e) => AppendLine(error, e.Data, streamsClosed);
-            process.Start();
-            process.BeginOutputReadLine();
-            process.BeginErrorReadLine();
-            if (!process.WaitForExit(MineTimeout))
-            {
-                process.Kill(entireProcessTree: true);
-                return (-1, "", $"timed out after {MineTimeout.TotalMinutes:0} minutes");
-            }
-
-            // Bounded: a child process (an MCP server) may still hold the pipes after claude exits.
-            streamsClosed.Wait(StreamDrainTimeout);
-            lock (output)
-            {
-                lock (error)
-                {
-                    return (process.ExitCode, output.ToString(), error.ToString());
-                }
-            }
-        }
-        catch (Exception exception)
-        {
-            AppLogger.Error($"[mine] could not run claude for {ticketKey}: {exception}");
-            return (-1, "", exception.Message);
-        }
-    }
-
-    private static void AppendLine(StringBuilder target, string? line, CountdownEvent streamsClosed)
-    {
-        if (line == null)
-        {
-            streamsClosed.Signal();
-            return;
-        }
-
-        lock (target)
-        {
-            target.AppendLine(line);
-        }
+        var arguments = new[] { "-p", $"mine-knowledge {ticketKey}", "--allowedTools", "Read,Write,Edit,Bash,Skill",
+            "--permission-mode", "acceptEdits", "--output-format", "json" };
+        return ClaudeCli.Run(devRepoPath, arguments, null, MineTimeout, CancellationToken.None);
     }
 
     // The scan's own format: "yyyy-MM-dd HH:mm:ss <message>", one line each.

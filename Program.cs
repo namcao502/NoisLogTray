@@ -18,6 +18,7 @@ internal static class Program
         if (!createdNew) return;
 
         AppLogger.Info("NoisLogTray started.");
+        AssemblyPreload.Start(typeof(Program).Assembly);
         Theme.Load();
         Lang.Load();
         TicketCheckInterval.Load();

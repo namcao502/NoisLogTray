@@ -120,7 +120,6 @@ internal sealed class AzureDevOpsClient : IAzureDevOpsClient
     internal static string PullRequestUrl(string repository, int pullRequestId) =>
         $"https://dev.azure.com/{Org}/{Project}/_git/{repository}/pullrequest/{pullRequestId}";
 
-    // commentType "system" covers auto-generated entries (policy updates, ref updates) no reviewer wrote.
     private async Task<int> CountRealCommentsAsync(string repository, int pullRequestId)
     {
         var uri = $"{ApiBase}/repositories/{Uri.EscapeDataString(repository)}/pullrequests/{pullRequestId}/threads?api-version=7.1";
@@ -136,13 +135,7 @@ internal sealed class AzureDevOpsClient : IAzureDevOpsClient
 
             foreach (var comment in comments.EnumerateArray())
             {
-                var commentType = comment.TryGetProperty("commentType", out var commentTypeValue)
-                    ? commentTypeValue.GetString()
-                    : null;
-                var isDeleted = comment.TryGetProperty("isDeleted", out var isDeletedValue)
-                    && isDeletedValue.GetBoolean();
-
-                if (commentType != "system" && !isDeleted)
+                if (IsRealComment(comment))
                 {
                     realCommentCount++;
                 }
@@ -152,16 +145,120 @@ internal sealed class AzureDevOpsClient : IAzureDevOpsClient
         return realCommentCount;
     }
 
-    private async Task<JsonDocument> GetJsonAsync(string uri)
+    // commentType "system" covers auto-generated entries (policy updates, ref updates) no reviewer wrote.
+    internal static bool IsRealComment(JsonElement comment)
+    {
+        var commentType = comment.TryGetProperty("commentType", out var commentTypeValue)
+            ? commentTypeValue.GetString()
+            : null;
+        var isDeleted = comment.TryGetProperty("isDeleted", out var isDeletedValue)
+            && isDeletedValue.GetBoolean();
+        return commentType != "system" && !isDeleted;
+    }
+
+    // Positions are tracked to the latest iteration, as the PR's Files view shows them: a comment made on line 33 of the
+    // first push reads line 36 once lines were added above it. The poll's comment count does not need that.
+    public async Task<IReadOnlyList<PrThread>> GetThreadsAsync(string repository, int pullRequestId, CancellationToken cancellationToken)
+    {
+        var pullRequestUri = $"{ApiBase}/repositories/{Uri.EscapeDataString(repository)}/pullrequests/{pullRequestId}";
+        int? lastIterationId = null;
+        using (var iterations = await GetJsonAsync($"{pullRequestUri}/iterations?api-version=7.1", cancellationToken))
+        {
+            foreach (var iteration in iterations.RootElement.GetProperty("value").EnumerateArray())
+            {
+                var iterationId = iteration.GetProperty("id").GetInt32();
+                if (lastIterationId == null || iterationId > lastIterationId)
+                {
+                    lastIterationId = iterationId;
+                }
+            }
+        }
+
+        var tracking = lastIterationId == null ? string.Empty : $"$iteration={lastIterationId}&$baseIteration=0&";
+        using var threads = await GetJsonAsync($"{pullRequestUri}/threads?{tracking}api-version=7.1", cancellationToken);
+        return ParseThreads(threads.RootElement);
+    }
+
+    // Deleted threads and threads left with no real comment (only votes and policy updates) are dropped.
+    internal static List<PrThread> ParseThreads(JsonElement root)
+    {
+        var result = new List<PrThread>();
+        foreach (var thread in root.GetProperty("value").EnumerateArray())
+        {
+            var isThreadDeleted = thread.TryGetProperty("isDeleted", out var threadDeleted) && threadDeleted.GetBoolean();
+            if (isThreadDeleted || !thread.TryGetProperty("comments", out var comments))
+            {
+                continue;
+            }
+
+            var realComments = new List<PrComment>();
+            foreach (var comment in comments.EnumerateArray().Where(IsRealComment))
+            {
+                var author = comment.TryGetProperty("author", out var authorValue)
+                    && authorValue.TryGetProperty("displayName", out var displayName)
+                    ? displayName.GetString()
+                    : null;
+                var content = comment.TryGetProperty("content", out var contentValue) ? contentValue.GetString() : null;
+                var publishedAt = comment.TryGetProperty("publishedDate", out var publishedValue)
+                    && publishedValue.TryGetDateTimeOffset(out var published)
+                    ? published
+                    : DateTimeOffset.MinValue;
+                realComments.Add(new PrComment(author ?? "?", content ?? string.Empty, publishedAt));
+            }
+            if (realComments.Count == 0)
+            {
+                continue;
+            }
+
+            var statusText = thread.TryGetProperty("status", out var statusValue) ? statusValue.GetString() : null;
+            var status = Enum.TryParse<PrThreadStatus>(statusText, ignoreCase: true, out var parsedStatus) && Enum.IsDefined(parsedStatus)
+                ? parsedStatus
+                : PrThreadStatus.Unknown;
+
+            string? filePath = null;
+            int? line = null;
+            int? endLine = null;
+            var isOnOldSide = false;
+            if (thread.TryGetProperty("threadContext", out var context) && context.ValueKind == JsonValueKind.Object)
+            {
+                filePath = context.TryGetProperty("filePath", out var filePathValue) ? filePathValue.GetString()?.TrimStart('/') : null;
+                // A position without its line leaves the thread on its file, unplaced, rather than failing the whole PR.
+                if (context.TryGetProperty("rightFileStart", out var rightStart) && rightStart.ValueKind == JsonValueKind.Object)
+                {
+                    line = rightStart.TryGetProperty("line", out var rightLine) ? rightLine.GetInt32() : null;
+                    endLine = context.TryGetProperty("rightFileEnd", out var rightEnd) && rightEnd.ValueKind == JsonValueKind.Object
+                        && rightEnd.TryGetProperty("line", out var rightEndLine) ? rightEndLine.GetInt32() : null;
+                }
+                else if (context.TryGetProperty("leftFileStart", out var leftStart) && leftStart.ValueKind == JsonValueKind.Object)
+                {
+                    line = leftStart.TryGetProperty("line", out var leftLine) ? leftLine.GetInt32() : null;
+                    endLine = context.TryGetProperty("leftFileEnd", out var leftEnd) && leftEnd.ValueKind == JsonValueKind.Object
+                        && leftEnd.TryGetProperty("line", out var leftEndLine) ? leftEndLine.GetInt32() : null;
+                    isOnOldSide = true;
+                }
+                // An end before the start (or without a start) is no range; the thread still marks its first line.
+                if (line == null || endLine < line)
+                {
+                    endLine = null;
+                }
+            }
+
+            result.Add(new PrThread(thread.GetProperty("id").GetInt32(), status, filePath, line, isOnOldSide, realComments, endLine));
+        }
+
+        return result;
+    }
+
+    private async Task<JsonDocument> GetJsonAsync(string uri, CancellationToken cancellationToken = default)
     {
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
         request.Headers.Authorization = new AuthenticationHeaderValue(
             "Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes($":{_pat}")));
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
 
-        using var response = await HttpClient.SendAsync(request);
+        using var response = await HttpClient.SendAsync(request, cancellationToken);
         response.EnsureSuccessStatusCode();
-        var body = await response.Content.ReadAsStringAsync();
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
         return JsonDocument.Parse(body);
     }
 }

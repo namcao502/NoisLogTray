@@ -136,6 +136,56 @@ public class AppSettingsTests : IDisposable
     }
 
     [Fact]
+    public void AppSettings_RoundTripsTeamsRecentChannelIds()
+    {
+        AppSettings.Save(new AppSettings { TeamsRecentChannelIds = new List<string> { "c2", "c1" } }, _path);
+
+        Assert.Equal(new[] { "c2", "c1" }, AppSettings.Load(_path).TeamsRecentChannelIds);
+    }
+
+    [Fact]
+    public void Load_DefaultsTeamsRecentChannelIds_WhenMissing()
+    {
+        File.WriteAllText(_path, "{ \"teamsRecentChannelIds\": null }");
+
+        var read = AppSettings.LoadOrBackup(out var corrupt, _path);
+        Assert.False(corrupt);
+        Assert.Empty(read.TeamsRecentChannelIds);
+    }
+
+    [Fact]
+    public void AppSettings_RoundTripsTeamsPeople()
+    {
+        var people = new List<TeamsPerson> { new("8:orgid:a", "Ann"), new("8:orgid:b", "Bob") };
+        AppSettings.Save(new AppSettings { TeamsPeople = people }, _path);
+
+        Assert.Equal(people, AppSettings.Load(_path).TeamsPeople);
+    }
+
+    [Fact]
+    public void Load_DefaultsTeamsPeople_WhenMissing()
+    {
+        File.WriteAllText(_path, "{ \"teamsPeople\": null }");
+
+        var read = AppSettings.LoadOrBackup(out var corrupt, _path);
+        Assert.False(corrupt);
+        Assert.Empty(read.TeamsPeople);
+    }
+
+    [Fact]
+    public void Load_DefaultsTeamsPostLeadToNull()
+    {
+        File.WriteAllText(_path, "{ }");
+
+        var read = AppSettings.LoadOrBackup(out var corrupt, _path);
+        Assert.False(corrupt);
+        Assert.Null(read.TeamsPostLead);
+
+        AppSettings.Save(new AppSettings { TeamsPostLead = new TeamsPerson("8:a", "Ann") }, _path);
+        Assert.Equal(new TeamsPerson("8:a", "Ann"), AppSettings.Load(_path).TeamsPostLead);
+    }
+
+    [Fact]
     public void TerminalTabs_KeepNullApartFromEmpty()
     {
         AppSettings.Save(new AppSettings(), _path);
@@ -155,5 +205,16 @@ public class AppSettingsTests : IDisposable
         Assert.Equal(@"C:\a", read.TerminalTabs!.Single().Directory);
         Assert.Equal("claude2", read.SelectedTerminal);
     }
-}
 
+    [Fact]
+    public void Load_DefaultsTeamsSeenAndNotifiedMaps_WhenMissing()
+    {
+        File.WriteAllText(_path, "{ \"teamsSeenAt\": null, \"teamsNotifiedAt\": null }");
+
+        var read = AppSettings.LoadOrBackup(out var corrupt, _path);
+        Assert.False(corrupt);
+        Assert.Empty(read.TeamsSeenAt);
+        Assert.Empty(read.TeamsNotifiedAt);
+        Assert.False(read.TeamsAttentionBaselineDone);
+    }
+}

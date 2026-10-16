@@ -14,6 +14,26 @@ internal static class AppPaths
 
     internal static string JobRunsPath => Path.Combine(DataDirectory, "job-runs.json");
 
+    internal static string TeamsPostIndexPath
+    {
+        get { return Path.Combine(DataDirectory, "teams-posts.json"); }
+    }
+
+    internal static string TeamsAvatarsDir
+    {
+        get { return Path.Combine(DataDirectory, "teams-avatars"); }
+    }
+
+    internal static string TeamsShotsDir(string ticketKey)
+    {
+        return Path.Combine(Path.GetTempPath(), "NoisLogTray", "teams-shots", ticketKey);
+    }
+
+    internal static string TeamsTasksDir
+    {
+        get { return Path.Combine(Path.GetTempPath(), "NoisLogTray", "teams-tasks"); }
+    }
+
     internal static string SettingsPath => Path.Combine(DataDirectory, "settings.json");
 
     // Legacy per-user config file. Config now lives in settings.json; on load,

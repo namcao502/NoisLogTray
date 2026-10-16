@@ -192,6 +192,15 @@ internal sealed class TerminalView : UserControl
         }
     }
 
+    // For a hand-off to a stopped terminal; a view not ready yet starts the session itself once its page is ready.
+    internal void EnsureStarted()
+    {
+        if (_ready && !_host.IsRunning)
+        {
+            StartSession();
+        }
+    }
+
     // A new folder for this terminal (the Terminal page's tab menu). A view not drawn yet only stops the session: once
     // ready it finds nothing running and starts one, in the new folder.
     internal void RestartSession()

@@ -60,4 +60,14 @@ public class MacButtonTests
 
         Assert.Equal(glyph.Right + 6, text.Left);
     }
+
+    [Fact]
+    public void ContentBounds_CutsATextTooWideForTheButton_SoTheGlyphStaysInside()
+    {
+        var (text, glyph) = MacButton.ContentBounds(Button, textWidth: 400, glyphWidth: 16, gap: 6, glyphAfterText: true);
+
+        Assert.True(text.Left >= 0);
+        Assert.True(glyph.Right <= Button.Width);
+        Assert.Equal(text.Right + 6, glyph.Left);
+    }
 }

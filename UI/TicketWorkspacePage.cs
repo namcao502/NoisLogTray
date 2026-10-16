@@ -11,7 +11,8 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     private readonly string _jiraBaseUrl;
     private readonly Func<string> _devRepoPath;
     private readonly Func<string, ClaudeSessionHost> _sessionFor;
-    private readonly Func<string, TeamsPostView?> _teamsPostFor;
+    private readonly Func<string, TeamsThreadView?> _teamsViewFor;
+    private readonly Func<IAzureDevOpsClient?> _ado;
     private readonly HeaderTabStrip _tabStrip = new(hasMenus: false, hasAddButton: false);
     private readonly Panel _viewHost = new() { Dock = DockStyle.Fill };
     private readonly Label _empty = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
@@ -29,14 +30,18 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     internal event Action<string?>? SelectionChanged;
     internal event Action<ShellPage>? PageRequested;
 
+    private readonly Dictionary<string, string> _openOnTeams = new();
+    private HashSet<string> _teamsAttentionKeys = new();
+
     internal TicketWorkspacePage(TicketStore? store, string jiraBaseUrl, Func<string> devRepoPath,
-        Func<string, ClaudeSessionHost> sessionFor, Func<string, TeamsPostView?> teamsPostFor)
+        Func<string, ClaudeSessionHost> sessionFor, Func<string, TeamsThreadView?> teamsViewFor, Func<IAzureDevOpsClient?> ado)
     {
         _store = store;
         _jiraBaseUrl = jiraBaseUrl;
         _devRepoPath = devRepoPath;
         _sessionFor = sessionFor;
-        _teamsPostFor = teamsPostFor;
+        _teamsViewFor = teamsViewFor;
+        _ado = ado;
 
         _empty.Font = UiScale.Font("Segoe UI", 10F);
         _empty.UseMnemonic = false;
@@ -136,7 +141,7 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     private void CreateView(string key)
     {
         var view = new TicketWorkspaceView(key, _jiraBaseUrl, _sessionFor(key),
-            () => TicketWorktrees.Find(_devRepoPath(), key), () => TicketFiles.DocsPath(_devRepoPath(), key), () => _teamsPostFor(key))
+            () => TicketWorktrees.Find(_devRepoPath(), key), () => TicketFiles.DocsPath(_devRepoPath(), key), () => _teamsViewFor(key), _ado)
         {
             Dock = DockStyle.Fill,
             Visible = false,
@@ -145,8 +150,20 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
         view.VsCodeRequested += OnViewVsCodeRequested;
         view.HeaderCollapseToggled += OnHeaderCollapseToggled;
         view.SetHeaderCollapsed(_headerCollapsed);
+        view.SetTeamsAttention(_teamsAttentionKeys.Contains(key));
         _viewHost.Controls.Add(view);
         _views[key] = view;
+        // Before the first Activate, so the terminal of a tab opened from a Teams notice does not start.
+        if (_openOnTeams.Remove(key, out var chatId))
+        {
+            view.ShowTeams(chatId);
+        }
+    }
+
+    // The next view created for this key opens on Teams ("" the post, else a chat id) instead of Claude.
+    internal void OpenOnTeams(string key, string chatId)
+    {
+        _openOnTeams[key] = chatId;
     }
 
     private void SelectTab(string key)
@@ -168,6 +185,46 @@ internal sealed class TicketWorkspacePage : UserControl, IShellPage
     private void ActivateSelected()
     {
         if (_selected != null && Visible && IsHandleCreated) _views[_selected].Activate();
+    }
+
+    // Shows the ticket's terminal; false when the ticket has no open tab.
+    internal bool ShowClaude(string key)
+    {
+        if (!_views.TryGetValue(key, out var view))
+        {
+            return false;
+        }
+        view.ShowClaude();
+        return true;
+    }
+
+    // Shows the ticket's Teams view on a conversation; false when the ticket has no open tab.
+    internal bool ShowTeams(string key, string chatId)
+    {
+        if (!_views.TryGetValue(key, out var view))
+        {
+            return false;
+        }
+        view.ShowTeams(chatId);
+        return true;
+    }
+
+    internal void SetCommentFlow(string key, TeamsCommentFlow? flow)
+    {
+        if (_views.TryGetValue(key, out var view))
+        {
+            view.SetCommentFlow(flow);
+        }
+    }
+
+    // The tickets with a Teams message waiting get a dot on their Teams button.
+    internal void SetTeamsAttention(IReadOnlySet<string> ticketKeys)
+    {
+        _teamsAttentionKeys = ticketKeys.ToHashSet();
+        foreach (var (key, view) in _views)
+        {
+            view.SetTeamsAttention(ticketKeys.Contains(key));
+        }
     }
 
     // Tabs whose Claude waits for the user get a dot.

@@ -109,4 +109,110 @@ public class TicketWorkspaceViewTests
 
         Assert.Null(TicketWorkspaceView.FindTicket("MDP-9", started, NoTickets, NoTickets, NoDismissed));
     }
+
+    [Fact]
+    public void TicketWorkspaceView_ShowsTeamsDot_WhenTeamsViewNeedsReply()
+    {
+        using var temp = new TempDirectory();
+        using var host = new ClaudeSessionHost(() => temp.Path, fallBackToProfile: false);
+        TeamsThreadView? teamsView = null;
+        using var view = new TicketWorkspaceView("MDP-1", "https://example.atlassian.net", host, () => Array.Empty<TicketWorktree>(), () => null,
+            () =>
+            {
+                teamsView = NewTeamsView();
+                return teamsView;
+            }, () => null);
+        var teamsButton = FindButton(view, "Teams");
+        Assert.NotNull(teamsButton);
+
+        teamsButton.PerformClick();
+        var root = TeamsMessageOf("1", "8:orgid:me", 0);
+        teamsView!.ApplyResult(TeamsFound(root, TeamsMessageOf("2", "8:orgid:other", 1)));
+        Assert.True(teamsButton.ShowDot);
+
+        teamsView.ApplyResult(TeamsFound(root, TeamsMessageOf("2", "8:orgid:other", 1), TeamsMessageOf("3", "8:orgid:me", 2)));
+        Assert.False(teamsButton.ShowDot);
+    }
+
+    [Fact]
+    public void TicketWorkspacePage_OpensNewTabOnTeams_WhenAskedBeforeSetTabs()
+    {
+        using var temp = new TempDirectory();
+        using var host = new ClaudeSessionHost(() => temp.Path, fallBackToProfile: false);
+        using var page = new TicketWorkspacePage(null, "https://example.atlassian.net", () => temp.Path, _ => host, _ => NewTeamsView(), () => null);
+
+        page.OpenOnTeams("MDP-1", "");
+        page.SetTabs(new[] { "MDP-1" }, "MDP-1");
+
+        var teamsButton = FindButton(page, "Teams");
+        Assert.NotNull(teamsButton);
+        Assert.True(teamsButton.Selected);
+        Assert.False(host.IsRunning);
+    }
+
+    [Fact]
+    public void TicketWorkspacePage_GivesNewTabTheTeamsDot_WhenItsTicketHasAttention()
+    {
+        using var temp = new TempDirectory();
+        using var host = new ClaudeSessionHost(() => temp.Path, fallBackToProfile: false);
+        using var page = new TicketWorkspacePage(null, "https://example.atlassian.net", () => temp.Path, _ => host, _ => NewTeamsView(), () => null);
+
+        page.SetTeamsAttention(new HashSet<string> { "MDP-1" });
+        page.SetTabs(new[] { "MDP-1" }, "MDP-1");
+
+        var teamsButton = FindButton(page, "Teams");
+        Assert.NotNull(teamsButton);
+        Assert.True(teamsButton.ShowDot);
+    }
+
+    private static TeamsThreadView NewTeamsView()
+    {
+        var sent = Task.FromResult(new TeamsReplyResult(TeamsReplyState.Sent, null, null));
+        return new TeamsThreadView("MDP-1",
+            (_, _, _) => new TaskCompletionSource<TeamsThreadResult>().Task,
+            _ => new TaskCompletionSource<TeamsThreadResult>().Task,
+            (_, _, _, _, _) => Task.FromResult<(TeamsAnalysis? Analysis, string? Error)>((null, null)),
+            (_, _, _) => sent,
+            (_, _, _) => sent,
+            (_, _, _, _, _) => sent,
+            (_, _, _) => sent,
+            (_, _, _) => Task.FromResult<string?>(null),
+            () => ("", null),
+            (_, _) => Task.FromResult<string?>(null),
+            (_, _, _) => Task.FromResult<string?>(null),
+            () => Task.FromResult(false),
+            _ => { },
+            null,
+            (_, _, _, _) => { },
+            (_, _, _) => Task.FromResult<string?>(null),
+            (_, _) => { });
+    }
+
+    private static TeamsMessage TeamsMessageOf(string id, string senderId, int minutes)
+    {
+        return new TeamsMessage(id, senderId, "name", new DateTimeOffset(2026, 10, 14, 9, minutes, 0, TimeSpan.Zero), "text", true, id == "1" ? "MDP-1 x" : null);
+    }
+
+    private static TeamsThreadResult TeamsFound(params TeamsMessage[] messages)
+    {
+        return new TeamsThreadResult(TeamsThreadState.Found, new TeamsThread("19:c@thread.tacv2", "1", messages), "8:orgid:me",
+            new[] { new TeamsChannel("19:c@thread.tacv2", "MDP", "PR in the hole") }, "19:c@thread.tacv2", null);
+    }
+
+    private static MacButton? FindButton(Control parent, string text)
+    {
+        foreach (Control child in parent.Controls)
+        {
+            if (child is MacButton button && button.Text == text)
+            {
+                return button;
+            }
+            var found = FindButton(child, text);
+            if (found != null)
+            {
+                return found;
+            }
+        }
+        return null;
+    }
 }

@@ -6,11 +6,17 @@ using Microsoft.Web.WebView2.WinForms;
 
 namespace NoisLogTray;
 
-// The ticket's branch changes across its worktrees, diffed by Monaco. Lists again on every Activate / Refresh.
+// The ticket's branch changes across its worktrees, diffed by Monaco, beside the comments on the ticket's PRs. Lists again on
+// every Activate / Refresh; the comments are read again on Refresh, or once they are 2 minutes old or the PRs changed.
 internal sealed class ChangesView : UserControl
 {
+    private static readonly TimeSpan CommentsMaxAge = TimeSpan.FromMinutes(2);
+
     private readonly string _ticketKey;
     private readonly Func<IReadOnlyList<TicketWorktree>> _worktrees;
+    private readonly Func<IReadOnlyList<TicketPr>> _prs;
+    private readonly Func<IAzureDevOpsClient?> _ado;
+    private readonly CancellationTokenSource _commentsCancel = new();
     private readonly WebView2 _webView = new() { Dock = DockStyle.Fill };
     private readonly Label _status = new() { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter };
     private readonly Dictionary<string, (string WorktreePath, ChangeSet Set)> _changeSets = new();
@@ -20,14 +26,24 @@ internal sealed class ChangesView : UserControl
     private bool _loading;
     private bool _refreshAgain;
     private int _selectVersion;
+    private List<(TicketPr Pr, IReadOnlyList<PrThread> Threads)> _prThreads = new();
+    private List<TicketPr> _failedPrs = new();
+    private string? _commentsSignature;
+    private DateTime? _commentsReadAtUtc;
+    private bool _readingComments;
+    private bool _readCommentsAgain;
+    private bool _forceCommentsAgain;
 
     // Ctrl+digit typed inside the diff page (WebView2 swallows them before the form's ProcessCmdKey).
     internal event Action<ShellPage>? PageRequested;
 
-    internal ChangesView(string ticketKey, Func<IReadOnlyList<TicketWorktree>> worktrees)
+    internal ChangesView(string ticketKey, Func<IReadOnlyList<TicketWorktree>> worktrees, Func<IReadOnlyList<TicketPr>> prs,
+        Func<IAzureDevOpsClient?> ado)
     {
         _ticketKey = ticketKey;
         _worktrees = worktrees;
+        _prs = prs;
+        _ado = ado;
         BackColor = Theme.WindowBg;
         _status.Font = UiScale.Font("Segoe UI", 10F);
         _status.ForeColor = Theme.TextSecondary;
@@ -45,6 +61,8 @@ internal sealed class ChangesView : UserControl
         {
             Theme.Changed -= ApplyTheme;
             Lang.Changed -= OnLanguageChanged;
+            _commentsCancel.Cancel(); // a comment read still waiting on Azure DevOps ends now
+            _commentsCancel.Dispose();
         }
         base.Dispose(disposing);
     }
@@ -60,6 +78,7 @@ internal sealed class ChangesView : UserControl
             return;
         }
         _ = RefreshAsync();
+        _ = ReadCommentsAsync(force: false);
     }
 
     private async Task InitializeAsync()
@@ -76,6 +95,7 @@ internal sealed class ChangesView : UserControl
             var listWidth = settings.DiffListWidthEm?.ToString(CultureInfo.InvariantCulture) ?? "";
             core.Navigate(WebViewSetup.PageUrl($"diff/index.html?fontSize={fontSize}&loading={loading}&listWidth={listWidth}"
                 + $"&listHidden={(settings.DiffListHidden ? 1 : 0)}&inline={(settings.DiffInline ? 1 : 0)}"
+                + $"&threadsHidden={(settings.DiffThreadsHidden ? 1 : 0)}"
                 + $"&dark={(Theme.Dark ? 1 : 0)}&colors={Uri.EscapeDataString(JsonSerializer.Serialize(ThemeColors()))}"));
             _webView.Visible = true;
             _status.Visible = false;
@@ -100,6 +120,7 @@ internal sealed class ChangesView : UserControl
                 ApplyTheme();
                 PostLabels();
                 _ = RefreshAsync();
+                _ = ReadCommentsAsync(force: false);
                 break;
             case "layout":
                 // One changed setting per message, kept across restarts; a tab opened later starts from it.
@@ -107,10 +128,17 @@ internal sealed class ChangesView : UserControl
                 if (root.TryGetProperty("listWidth", out var listWidth)) settings.DiffListWidthEm = listWidth.GetDouble();
                 if (root.TryGetProperty("listHidden", out var listHidden)) settings.DiffListHidden = listHidden.GetBoolean();
                 if (root.TryGetProperty("inline", out var inline)) settings.DiffInline = inline.GetBoolean();
+                if (root.TryGetProperty("threadsHidden", out var threadsHidden)) settings.DiffThreadsHidden = threadsHidden.GetBoolean();
                 AppSettings.Save(settings);
                 break;
             case "refresh":
                 _ = RefreshAsync();
+                _ = ReadCommentsAsync(force: true);
+                break;
+            case "openUrl":
+                // Only a web link leaves the app, whatever the page sends (a comment's own links included).
+                var webUrl = TaskRow.WebUrl(root.GetProperty("url").GetString());
+                if (webUrl != null) TaskRow.OpenUrl(webUrl);
                 break;
             case "select":
                 _ = SelectAsync(root.GetProperty("repository").GetString() ?? "", root.GetProperty("path").GetString() ?? "");
@@ -128,11 +156,12 @@ internal sealed class ChangesView : UserControl
         }
     }
 
-    // The strings in the toolbar and the file list follow the language, so a switch relabels and lists again.
+    // The strings in the toolbar, the file list and the comments follow the language, so a switch relabels and lists again.
     private void OnLanguageChanged()
     {
         PostLabels();
         _ = RefreshAsync();
+        PostComments();
     }
 
     private void PostLabels()
@@ -149,6 +178,9 @@ internal sealed class ChangesView : UserControl
             nextChange = Lang.T("Next change (F7)", "Thay đổi kế (F7)"),
             previousFile = Lang.T("Previous file (Alt+Up)", "File trước (Alt+↑)"),
             nextFile = Lang.T("Next file (Alt+Down)", "File kế (Alt+↓)"),
+            threads = Lang.T("Show or hide the PR comments", "Ẩn / hiện comment PR"),
+            general = Lang.T("General", "Chung"),
+            openInAdo = Lang.T("Open in Azure DevOps", "Mở trên Azure DevOps"),
         });
     }
 
@@ -222,6 +254,152 @@ internal sealed class ChangesView : UserControl
         });
     }
 
+    // Its own loop beside the listing's, so a slow Azure DevOps never holds the file list back.
+    private async Task ReadCommentsAsync(bool force)
+    {
+        if (!_ready || IsDisposed) return;
+        if (_readingComments)
+        {
+            _readCommentsAgain = true;
+            _forceCommentsAgain |= force; // a Refresh merged into the next read must still read
+            return;
+        }
+        _readingComments = true;
+        var ado = _ado();
+        var livePrs = ado == null ? new List<TicketPr>() : _prs().Where(tp => tp.Status != "abandoned").ToList();
+        var signature = string.Join(",", livePrs.Select(tp => $"{tp.Repository}|{tp.Branch}|{tp.PullRequestId}"));
+        var isStale = force || signature != _commentsSignature || _commentsReadAtUtc == null
+            || DateTime.UtcNow - _commentsReadAtUtc > CommentsMaxAge;
+        try
+        {
+            if (ado == null || livePrs.Count == 0)
+            {
+                _prThreads = new List<(TicketPr Pr, IReadOnlyList<PrThread> Threads)>();
+                _failedPrs = new List<TicketPr>();
+            }
+            else if (isStale)
+            {
+                await FetchThreadsAsync(ado, livePrs);
+            }
+            _commentsSignature = signature;
+        }
+        catch (OperationCanceledException) when (IsDisposed)
+        {
+            return; // the tab closed while reading
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"[changes] reading the comments of {_ticketKey} failed: {ex.Message}");
+        }
+        finally
+        {
+            _readingComments = false;
+        }
+        if (IsDisposed) return;
+        PostComments();
+        if (_readCommentsAgain)
+        {
+            var forceAgain = _forceCommentsAgain;
+            _readCommentsAgain = false;
+            _forceCommentsAgain = false;
+            await ReadCommentsAsync(forceAgain);
+        }
+    }
+
+    // One PR that cannot be read is a line in the panel; the others still show.
+    private async Task FetchThreadsAsync(IAzureDevOpsClient ado, List<TicketPr> livePrs)
+    {
+        var cancellationToken = _commentsCancel.Token;
+        using var busyWork = BusyWork.Shared.Begin(Lang.T($"Reading the PR comments of {_ticketKey}...", $"Đang đọc comment PR của {_ticketKey}..."));
+        var reads = await Task.WhenAll(livePrs.Select(async tp =>
+        {
+            try
+            {
+                return (Pr: tp, Threads: await ado.GetThreadsAsync(tp.Repository, tp.PullRequestId, cancellationToken), Failed: false);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                AppLogger.Error($"[changes] reading the comments of {tp.Repository} PR #{tp.PullRequestId} failed: {ex.Message}");
+                return (Pr: tp, Threads: (IReadOnlyList<PrThread>)new List<PrThread>(), Failed: true);
+            }
+        }));
+        _prThreads = reads.Where(read => !read.Failed).Select(read => (read.Pr, read.Threads)).ToList();
+        _failedPrs = reads.Where(read => read.Failed).Select(read => read.Pr).ToList();
+        _commentsReadAtUtc = DateTime.UtcNow;
+    }
+
+    // Texts are built here, in the current language; only a comment's own markdown is rendered by the page.
+    private void PostComments()
+    {
+        if (!_ready || IsDisposed || _webView.CoreWebView2 == null) return;
+        var currentYear = Hcm.Now().Year;
+        var threads = new List<object>();
+        foreach (var (pr, prThreads) in _prThreads)
+        {
+            foreach (var thread in prThreads)
+            {
+                string? lineText = null;
+                if (thread.Line != null)
+                {
+                    var isRange = thread.EndLine != null && thread.EndLine != thread.Line;
+                    var lines = isRange ? $"{thread.Line}-{thread.EndLine}" : $"{thread.Line}";
+                    lineText = thread.IsOnOldSide
+                        ? Lang.T(isRange ? $"old lines {lines}" : $"old line {lines}", $"dòng cũ {lines}")
+                        : Lang.T(isRange ? $"lines {lines}" : $"line {lines}", $"dòng {lines}");
+                }
+                threads.Add(new
+                {
+                    id = thread.Id,
+                    repository = pr.Repository,
+                    path = thread.FilePath,
+                    line = thread.Line,
+                    endLine = thread.EndLine,
+                    oldSide = thread.IsOnOldSide,
+                    lineText,
+                    open = thread.IsOpen,
+                    status = StatusText(thread.Status),
+                    pr = $"{pr.Branch} #{pr.PullRequestId}",
+                    url = $"{pr.Url}?discussionId={thread.Id}",
+                    comments = thread.Comments.Select(pc => new
+                    {
+                        author = pc.Author,
+                        date = CommentDate(pc.PublishedAt, currentYear),
+                        text = pc.Content,
+                    }).ToList(),
+                });
+            }
+        }
+        var errors = _failedPrs
+            .Select(tp => $"{tp.RepoName} {tp.Branch} #{tp.PullRequestId}")
+            .Select(label => Lang.T($"Could not read the comments of {label} (see log).", $"Không đọc được comment của {label} (xem log)."))
+            .ToList();
+        Post(new { type = "comments", threads, errors });
+    }
+
+    // In HCM time like the rest of the app; the year only when it is not this one.
+    private static string CommentDate(DateTimeOffset publishedAt, int currentYear)
+    {
+        var publishedHcm = Hcm.ToHcm(publishedAt);
+        var format = publishedHcm.Year == currentYear
+            ? Lang.T("MMM d, HH:mm", "dd/MM HH:mm")
+            : Lang.T("MMM d yyyy, HH:mm", "dd/MM/yyyy HH:mm");
+        return publishedHcm.ToString(format, Lang.Culture);
+    }
+
+    internal static string StatusText(PrThreadStatus status)
+    {
+        return status switch
+        {
+            PrThreadStatus.Active => Lang.T("Active", "Đang mở"),
+            PrThreadStatus.Pending => Lang.T("Pending", "Chờ"),
+            PrThreadStatus.Fixed => Lang.T("Resolved", "Đã xử lý"),
+            PrThreadStatus.WontFix => Lang.T("Won't fix", "Không sửa"),
+            PrThreadStatus.Closed => Lang.T("Closed", "Đã đóng"),
+            PrThreadStatus.ByDesign => Lang.T("By design", "Đúng thiết kế"),
+            _ => Lang.T("Unknown", "Không rõ"),
+        };
+    }
+
     private async Task SelectAsync(string repository, string path)
     {
         try
@@ -276,5 +454,6 @@ internal sealed class ChangesView : UserControl
         muted = ColorTranslator.ToHtml(Theme.TextSecondary),
         line = ColorTranslator.ToHtml(Theme.Divider),
         selection = Theme.Dark ? "#3a5a8c" : "#b4d2ff",
+        accent = ColorTranslator.ToHtml(Theme.Accent),
     };
 }

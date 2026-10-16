@@ -126,7 +126,6 @@ internal sealed class SettingsPanel : UserControl
         AddFieldPair(
             ("Azure DevOps PAT", "PAT Azure DevOps", "AZURE_DEVOPS_PAT", true),
             ("Teams webhook URL", "URL webhook Teams", "TEAMS_WEBHOOK_URL", true));
-        AddField("Teams post workflow URL (posts as you)", "URL Workflow đăng Teams (tên bạn)", "TEAMS_POST_WORKFLOW_URL", secret: true);
         AddStatusAndSave();
         AddDivider();
         AddFooter();
@@ -162,7 +161,6 @@ internal sealed class SettingsPanel : UserControl
         _fields["DEV_REPO_PATH"].Text = Value(values, "DEV_REPO_PATH", AppConfig.DefaultDevRepoPath);
         SetSecretField("AZURE_DEVOPS_PAT", Value(values, "AZURE_DEVOPS_PAT", ""));
         SetSecretField("TEAMS_WEBHOOK_URL", Value(values, "TEAMS_WEBHOOK_URL", ""));
-        SetSecretField("TEAMS_POST_WORKFLOW_URL", Value(values, "TEAMS_POST_WORKFLOW_URL", ""));
         _statusIsError = false;
         _status.Text = "";
     }
@@ -598,7 +596,6 @@ internal sealed class SettingsPanel : UserControl
             ["DEV_REPO_PATH"] = _fields["DEV_REPO_PATH"].Text.Trim(),
             ["AZURE_DEVOPS_PAT"] = FieldText("AZURE_DEVOPS_PAT").Trim(),
             ["TEAMS_WEBHOOK_URL"] = FieldText("TEAMS_WEBHOOK_URL").Trim(),
-            ["TEAMS_POST_WORKFLOW_URL"] = FieldText("TEAMS_POST_WORKFLOW_URL").Trim(),
         };
         SaveRequested?.Invoke(values); // last: the host may dispose this panel in response
     }

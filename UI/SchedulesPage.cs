@@ -34,13 +34,13 @@ internal sealed class SchedulesPage : UserControl, IShellPage
     private readonly ThemedToolTip _tips = new();
     private readonly Card _scanCard = new();
     private readonly Label _scanTitle = new();
-    private readonly Label _taskStatus = new();
-    private readonly Label _runStatus = new();
+    private readonly SingleLineLabel _taskStatus = new();
+    private readonly SingleLineLabel _runStatus = new();
     private readonly Label _timeLimitCaption = new();
     private readonly Dictionary<int, MacButton> _timeLimitPills = KnowledgeScan.TimeLimitChoicesHours
         .ToDictionary(h => h, h => MacButton.Secondary(h.ToString(CultureInfo.InvariantCulture)));
     private readonly Panel _runList = new();
-    private readonly Label _runSummary = new();
+    private readonly SingleLineLabel _runSummary = new();
     private readonly RoundedHost _logHost = new();
     private readonly TextBox _logBox = new();
     private readonly Card _jobsCard = new();

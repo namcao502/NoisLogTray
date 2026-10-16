@@ -94,6 +94,16 @@ public class ClaudeAttentionTests
         Assert.Equal(expected, hookEvent!.SubagentsRunning);
     }
 
+    [Fact]
+    public void Parse_ReadsSessionEndReason()
+    {
+        var withReason = ClaudeAttention.Parse("""{"hook_event_name":"SessionEnd","reason":"prompt_input_exit"}""");
+        var withoutReason = ClaudeAttention.Parse("""{"hook_event_name":"SessionEnd"}""");
+
+        Assert.Equal("prompt_input_exit", withReason!.Reason);
+        Assert.Null(withoutReason!.Reason);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("Permission")]

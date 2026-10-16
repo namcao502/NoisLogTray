@@ -2,7 +2,7 @@ using System.Drawing;
 
 namespace NoisLogTray;
 
-// One open ticket: a header over its TerminalView, ChangesView, FilesView or TeamsPostView; the last three are created
+// One open ticket: a header over its TerminalView, ChangesView, FilesView or TeamsThreadView; the last three are created
 // on their first click, then every view stays alive while the tab is open.
 internal sealed class TicketWorkspaceView : UserControl
 {
@@ -27,12 +27,13 @@ internal sealed class TicketWorkspaceView : UserControl
     private readonly string _jiraBaseUrl;
     private readonly Func<IReadOnlyList<TicketWorktree>> _worktrees;
     private readonly Func<string?> _docsPath;
-    private readonly Func<TeamsPostView?> _createTeamsPost;
+    private readonly Func<TeamsThreadView?> _createTeamsView;
+    private readonly Func<IAzureDevOpsClient?> _ado;
     private readonly Panel _header = new() { Dock = DockStyle.Top };
     private readonly Panel _divider = new() { Dock = DockStyle.Bottom, Height = 1 };
     private readonly Panel _body = new() { Dock = DockStyle.Fill };
     private readonly LinkLabel _keyLink = new();
-    private readonly Label _summary = new();
+    private readonly SingleLineLabel _summary = new();
     private readonly FlowLayoutPanel _facts = NewRow();
     private readonly Panel _prPanel = new() { BackColor = Color.Transparent }; // one PR row per repo
     private readonly MacButton _claudeButton = MacButton.Secondary("Claude");
@@ -44,7 +45,9 @@ internal sealed class TicketWorkspaceView : UserControl
     private readonly TerminalView _terminal;
     private ChangesView? _changes;
     private FilesView? _files;
-    private TeamsPostView? _teamsPost;
+    private TeamsThreadView? _teamsView;
+    private bool _teamsNeedsReply;
+    private bool _teamsAttention;
     private BodyView _bodyView = BodyView.Claude;
     private (JiraTicket Ticket, TicketSection Section)? _found;
     private IReadOnlyList<TicketPr> _prs = new List<TicketPr>();
@@ -58,13 +61,15 @@ internal sealed class TicketWorkspaceView : UserControl
     internal string TicketKey { get; }
 
     internal TicketWorkspaceView(string ticketKey, string jiraBaseUrl, ClaudeSessionHost session,
-        Func<IReadOnlyList<TicketWorktree>> worktrees, Func<string?> docsPath, Func<TeamsPostView?> createTeamsPost)
+        Func<IReadOnlyList<TicketWorktree>> worktrees, Func<string?> docsPath, Func<TeamsThreadView?> createTeamsView,
+        Func<IAzureDevOpsClient?> ado)
     {
         TicketKey = ticketKey;
         _jiraBaseUrl = jiraBaseUrl;
         _worktrees = worktrees;
         _docsPath = docsPath;
-        _createTeamsPost = createTeamsPost;
+        _createTeamsView = createTeamsView;
+        _ado = ado;
         BackColor = Theme.WindowBg;
 
         _terminal = new TerminalView(session) { Dock = DockStyle.Fill };
@@ -91,6 +96,11 @@ internal sealed class TicketWorkspaceView : UserControl
             _terminal.FileRequested -= OnFileRequested;
             if (_changes != null) _changes.PageRequested -= OnViewPageRequested;
             if (_files != null) _files.PageRequested -= OnViewPageRequested;
+            if (_teamsView != null)
+            {
+                _teamsView.PageRequested -= OnViewPageRequested;
+                _teamsView.NeedsReplyChanged -= OnTeamsNeedsReplyChanged;
+            }
         }
         base.Dispose(disposing);
     }
@@ -119,7 +129,7 @@ internal sealed class TicketWorkspaceView : UserControl
     {
         if (_bodyView == BodyView.Changes && _changes != null) _changes.Activate();
         else if (_bodyView == BodyView.Files && _files != null) _files.Activate();
-        else if (_bodyView == BodyView.Teams && _teamsPost != null) _teamsPost.Activate();
+        else if (_bodyView == BodyView.Teams && _teamsView != null) _teamsView.Activate();
         else _terminal.Activate();
     }
 
@@ -364,11 +374,38 @@ internal sealed class TicketWorkspaceView : UserControl
         row.Controls.AddRange(items.ToArray());
     }
 
+    // Shows the terminal and starts its session if it is stopped (a hand-off to a terminal that is not running).
+    internal void ShowClaude()
+    {
+        ShowBody(BodyView.Claude);
+        _terminal.EnsureStarted();
+    }
+
+    // Shows the Teams view on a conversation: "" the channel post, else a group chat's id.
+    internal void ShowTeams(string chatId)
+    {
+        ShowBody(BodyView.Teams);
+        _teamsView?.SelectConversation(chatId);
+    }
+
+    // The comment flow of the conversation the Teams view shows; a view not created yet gets it from the first read.
+    internal void SetCommentFlow(TeamsCommentFlow? flow)
+    {
+        _teamsView?.SetCommentFlow(flow);
+    }
+
+    // The Teams button's dot from the background check, beside the view's own needs-reply dot.
+    internal void SetTeamsAttention(bool hasAttention)
+    {
+        _teamsAttention = hasAttention;
+        _teamsButton.ShowDot = _teamsNeedsReply || _teamsAttention;
+    }
+
     private void ShowBody(BodyView bodyView)
     {
         if (bodyView == BodyView.Changes && _changes == null)
         {
-            _changes = new ChangesView(TicketKey, _worktrees) { Dock = DockStyle.Fill };
+            _changes = new ChangesView(TicketKey, _worktrees, () => _prs, _ado) { Dock = DockStyle.Fill };
             _changes.PageRequested += OnViewPageRequested;
             _body.Controls.Add(_changes);
         }
@@ -378,18 +415,23 @@ internal sealed class TicketWorkspaceView : UserControl
             _files.PageRequested += OnViewPageRequested;
             _body.Controls.Add(_files);
         }
-        if (bodyView == BodyView.Teams && _teamsPost == null)
+        if (bodyView == BodyView.Teams && _teamsView == null)
         {
-            _teamsPost = _createTeamsPost();
-            if (_teamsPost == null) return; // no workflow URL yet: TrayApp has said so
-            _teamsPost.Dock = DockStyle.Fill;
-            _body.Controls.Add(_teamsPost);
+            _teamsView = _createTeamsView();
+            if (_teamsView == null)
+            {
+                return;
+            }
+            _teamsView.Dock = DockStyle.Fill;
+            _teamsView.PageRequested += OnViewPageRequested;
+            _teamsView.NeedsReplyChanged += OnTeamsNeedsReplyChanged;
+            _body.Controls.Add(_teamsView);
         }
         _bodyView = bodyView;
         _terminal.Visible = bodyView == BodyView.Claude;
         if (_changes != null) _changes.Visible = bodyView == BodyView.Changes;
         if (_files != null) _files.Visible = bodyView == BodyView.Files;
-        if (_teamsPost != null) _teamsPost.Visible = bodyView == BodyView.Teams;
+        if (_teamsView != null) _teamsView.Visible = bodyView == BodyView.Teams;
         UpdateViewButtons();
         Activate();
     }
@@ -427,6 +469,13 @@ internal sealed class TicketWorkspaceView : UserControl
     private void OnViewPageRequested(ShellPage page)
     {
         PageRequested?.Invoke(page);
+    }
+
+    // The Teams button's dot: someone in the ticket's thread waits on the user.
+    private void OnTeamsNeedsReplyChanged(bool needsReply)
+    {
+        _teamsNeedsReply = needsReply;
+        _teamsButton.ShowDot = _teamsNeedsReply || _teamsAttention;
     }
 
     private void ApplyTheme()

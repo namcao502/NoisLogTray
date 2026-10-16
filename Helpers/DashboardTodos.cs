@@ -5,7 +5,8 @@ namespace NoisLogTray;
 internal static class DashboardTodos
 {
     // week: Monday to today as read, or null until the read is done; busyKeys: tickets a Start / Open / Ready to Test runs on.
-    internal static List<TodoItem> Build(DashboardData data, IReadOnlyList<ClaudeWait> waits, IReadOnlyList<DayCoverage>? week,
+    internal static List<TodoItem> Build(DashboardData data, IReadOnlyList<ClaudeWait> waits,
+        IReadOnlyList<TeamsAttentionItem> teamsMessages, IReadOnlyList<DayCoverage>? week,
         IReadOnlyList<string> cleanupKeys, IReadOnlySet<string> busyKeys, DateTimeOffset nowHcm, TimeOnly logTime,
         bool isTodayWritten, bool isDraining)
     {
@@ -15,6 +16,11 @@ internal static class DashboardTodos
             .OrderBy(cw => cw.Reason == ClaudeWaitReason.Finished ? 1 : 0)
             .ThenBy(cw => cw.Label, StringComparer.Ordinal)
             .Select(cw => new TodoItem(TodoKind.ClaudeWaiting, Wait: cw)));
+        // A mention first, then the newest message.
+        todos.AddRange(teamsMessages
+            .OrderBy(tai => tai.MentionsMe ? 0 : 1)
+            .ThenByDescending(tai => tai.SentAt)
+            .Select(tai => new TodoItem(TodoKind.TeamsMessage, TeamsMessage: tai)));
         todos.AddRange(data.TicketTodos);
 
         var today = DateOnly.FromDateTime(nowHcm.DateTime);
@@ -59,6 +65,6 @@ internal static class DashboardTodos
     // Everything a to-do row shows, so the page rebuilds its rows only when one of them changed.
     internal static string Signature(IReadOnlyList<TodoItem> todos) =>
         string.Join("\n", todos.Select(ti => string.Join("|", ti.Kind, ti.Ticket?.Key, ti.Ticket?.Summary, ti.Ticket?.Status,
-            ti.Ticket?.DueDate, ti.Section, ti.ActionLabel, ti.CommentCount, ti.PrUrl, ti.Day, ti.Wait,
+            ti.Ticket?.DueDate, ti.Section, ti.ActionLabel, ti.CommentCount, ti.PrUrl, ti.Day, ti.Wait, ti.TeamsMessage?.ConversationKey, ti.TeamsMessage?.SentAt,
             ti.TicketKeys == null ? null : string.Join(",", ti.TicketKeys))));
 }

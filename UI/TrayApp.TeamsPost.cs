@@ -1,35 +1,37 @@
 namespace NoisLogTray;
 
-// The ticket tab's Teams view: a draft sent as the user through their workflow.
+// The Teams view's draft: the ticket announcement, posted as the user into the picked channel.
 internal sealed partial class TrayApp
 {
     private static readonly TimeSpan TeamsPostedAtKeep = TimeSpan.FromDays(180);
 
-    // Null (with a notice) until the workflow URL is set, so the tab stays on its current view.
-    private TeamsPostView? CreateTeamsPostView(string ticketKey)
+    // The draft file Claude wrote, else one built from the board; and when the ticket was last posted.
+    private (string Draft, DateTimeOffset? PostedAt) LoadTeamsDraft(string ticketKey)
     {
-        if (!_teams.CanPostAsUser)
-        {
-            Notify(Lang.T("Set the Teams post workflow URL in Settings first.", "Hãy nhập URL Workflow đăng Teams trong Settings trước."), ToolTipIcon.Warning,
-                open: EditCredentials);
-            return null;
-        }
-        // _teams is read at send time: a Settings save replaces it.
-        var view = new TeamsPostView(ticketKey,
-            () => TeamsPost.ReadDraft(DevRepoPath, BackendWorktreePath(ticketKey), ticketKey) ?? BuildTeamsDraft(ticketKey),
-            () => AppSettings.Load().TeamsPostedAt.TryGetValue(ticketKey, out var postedAt) ? postedAt : null,
-            (text, cancellationToken) => _teams.PostAsUserAsync(text, cancellationToken));
-        view.Posted += () => RecordTeamsPost(ticketKey);
-        return view;
+        var draft = TeamsPost.ReadDraft(DevRepoPath, BackendWorktreePath(ticketKey), ticketKey) ?? BuildTeamsDraft(ticketKey);
+        var settings = AppSettings.Load();
+        var isPosted = settings.TeamsPostedAt.TryGetValue(ticketKey, out var postedAt);
+        var greeted = TeamsPost.WithGreeting(draft, TeamsPost.ResolvePostLead(settings.TeamsPostLead, settings.TeamsPeople));
+        return (greeted, isPosted ? postedAt : null);
     }
 
-    private void RecordTeamsPost(string ticketKey)
+    private async Task<TeamsReplyResult> PostTeamsAnnouncementAsync(string ticketKey, string subject, TeamsDraft draft, CancellationToken cancellationToken)
+    {
+        using var busyWork = BusyWork.Shared.Begin(Lang.T($"Posting {ticketKey} to Teams...", $"Đang đăng {ticketKey} lên Teams..."));
+        return await _teamsThreads.PostAnnouncementAsync(ticketKey, subject, draft, cancellationToken);
+    }
+
+    private void RecordTeamsPost(string ticketKey, TeamsDraft draft)
     {
         // Entries older than TeamsPostedAtKeep are dropped, so the map stays small.
         var settings = AppSettings.Load();
         var now = Hcm.Now();
         settings.TeamsPostedAt = settings.TeamsPostedAt.Where(kvp => now - kvp.Value < TeamsPostedAtKeep).ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
         settings.TeamsPostedAt[ticketKey] = now;
+        if (draft.Mentions.Count != 0)
+        {
+            settings.TeamsPostLead = new TeamsPerson(draft.Mentions[0].Mri, draft.Mentions[0].DisplayName);
+        }
         AppSettings.Save(settings);
         Notify(Lang.T($"Posted {ticketKey} to Teams.", $"Đã đăng {ticketKey} lên Teams."), ToolTipIcon.Info, NoticeKind.Success,
             () => ShowTicketTab(ticketKey));

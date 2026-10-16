@@ -69,6 +69,25 @@ internal static class GraphTscClient
         return null;
     }
 
+    // Decode one string claim of a JWT's payload. Null for a malformed token, or a claim that is absent or not a string.
+    internal static string? DecodeJwtClaim(string token, string claimName)
+    {
+        using var doc = ParseJwtPayload(token);
+        if (doc == null)
+        {
+            return null;
+        }
+
+        if (doc.RootElement.ValueKind == JsonValueKind.Object
+            && doc.RootElement.TryGetProperty(claimName, out var claim)
+            && claim.ValueKind == JsonValueKind.String)
+        {
+            return claim.GetString();
+        }
+
+        return null;
+    }
+
     internal static async Task<(bool Success, string Cell, string? Error)> WriteTicketAsync(
         string ticket,
         IReadOnlyList<DateOnly> dates,

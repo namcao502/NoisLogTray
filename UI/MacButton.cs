@@ -151,12 +151,14 @@ internal sealed class MacButton : Button
     // The text and the glyph side by side, the pair centered; a lone glyph (no text) is centered by itself.
     internal static (Rectangle Text, Rectangle Glyph) ContentBounds(Size button, int textWidth, int glyphWidth, int gap, bool glyphAfterText)
     {
-        var pairWidth = textWidth == 0 ? glyphWidth : textWidth + gap + glyphWidth;
+        // A text wider than the button gets a narrower box, which OnPaint's EndEllipsis cuts, so the glyph stays inside.
+        var shownTextWidth = textWidth == 0 ? 0 : Math.Max(0, Math.Min(textWidth, button.Width - 2 * UiScale.S(10) - gap - glyphWidth));
+        var pairWidth = shownTextWidth == 0 ? glyphWidth : shownTextWidth + gap + glyphWidth;
         var left = (button.Width - pairWidth) / 2;
-        if (textWidth == 0) return (Rectangle.Empty, new Rectangle(left, 0, glyphWidth, button.Height));
-        var glyphLeft = glyphAfterText ? left + textWidth + gap : left;
+        if (shownTextWidth == 0) return (Rectangle.Empty, new Rectangle(left, 0, glyphWidth, button.Height));
+        var glyphLeft = glyphAfterText ? left + shownTextWidth + gap : left;
         var textLeft = glyphAfterText ? left : left + glyphWidth + gap;
-        return (new Rectangle(textLeft, 0, textWidth, button.Height), new Rectangle(glyphLeft, 0, glyphWidth, button.Height));
+        return (new Rectangle(textLeft, 0, shownTextWidth, button.Height), new Rectangle(glyphLeft, 0, glyphWidth, button.Height));
     }
 
     // Hover: 8% toward white, as AccentHover is to Accent.

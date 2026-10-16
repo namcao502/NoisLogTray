@@ -17,7 +17,7 @@ internal sealed partial class DashboardPage
         _todosPending = false;
         var todos = _data == null
             ? new List<TodoItem>()
-            : DashboardTodos.Build(_data, _claudeWaits, _week, _cleanupKeys, _busyTickets.Keys.ToHashSet(), Hcm.Now(), CurrentLogTime(),
+            : DashboardTodos.Build(_data, _claudeWaits, _teamsMessages, _week, _cleanupKeys, _busyTickets.Keys.ToHashSet(), Hcm.Now(), CurrentLogTime(),
                 _isTodayWritten, _draining);
         _todoTitle.Text = todos.Count == 0 ? Lang.T("TO DO", "VIỆC CẦN LÀM") : Lang.T($"TO DO ({todos.Count})", $"VIỆC CẦN LÀM ({todos.Count})");
         var signature = DashboardTodos.Signature(todos);
@@ -29,13 +29,13 @@ internal sealed partial class DashboardPage
             Lang.T("Nothing to do right now", "Không có việc gì cần làm"));
     }
 
-    private TodoRow TodoRowFor(TodoItem item, int width, bool striped)
+    internal TodoRow TodoRowFor(TodoItem item, int width, bool striped)
     {
         var ticket = item.Ticket;
         var busy = ticket != null && _busyTickets.ContainsKey(ticket.Key);
         // A busy ticket's detail line shows its stage; its buttons wait.
         var detail = busy && _busyTickets.TryGetValue(ticket!.Key, out var stage) ? TasksPage.StageText(stage) : ticket?.Summary ?? string.Empty;
-        var buttons = new List<(string Text, Color? Tint, bool Enabled, Action OnClick, string? Glyph)>();
+        var buttons = new List<(string Text, Color? Tint, bool Enabled, Action<Control> OnClick, string? Glyph)>();
         string title;
         string icon;
         Color tone;
@@ -57,9 +57,27 @@ internal sealed partial class DashboardPage
                 detail = waitTicket?.Summary ?? Lang.T("Open the tab to answer", "Mở tab để trả lời");
                 icon = Icons.WindowConsole;
                 tone = Theme.Accent;
-                buttons.Add((Lang.T("Open", "Mở"), Theme.Accent, true, () => RaiseDeferred(() => ClaudeSessionRequested?.Invoke(wait.SessionName)), null));
+                buttons.Add((Lang.T("Open", "Mở"), Theme.Accent, true, _ => RaiseDeferred(() => ClaudeSessionRequested?.Invoke(wait.SessionName)), null));
                 return new TodoRow(isTerminal ? null : wait.SessionName, isTerminal ? null : JiraUrl(wait.SessionName), icon, tone, title,
                     detail, buttons, width, striped);
+            }
+            case TodoKind.TeamsMessage:
+            {
+                var message = item.TeamsMessage!;
+                var place = message.ChatId == null
+                    ? Lang.T("the post", "bài đăng")
+                    : Lang.T("the chat", "chat");
+                title = message.MentionsMe
+                    ? Lang.T($"{message.SenderName} mentioned you", $"{message.SenderName} nhắc đến bạn")
+                    : Lang.T($"{message.SenderName} wrote in {place}", $"{message.SenderName} nhắn trong {place}");
+                var sentTime = Hcm.ToHcm(message.SentAt).ToString("HH:mm");
+                detail = message.ChatId == null ? sentTime : $"{message.Title} - {sentTime}";
+                icon = Icons.Comment;
+                tone = Theme.Accent;
+                // Listed right to left: Seen at the edge, Open before it.
+                buttons.Add((Lang.T("Seen", "Đã xem"), null, true, _ => RaiseDeferred(() => TeamsSeenRequested?.Invoke(message.ConversationKey, message.SentAt)), null));
+                buttons.Add((Lang.T("Open", "Mở"), Theme.Accent, true, _ => RaiseDeferred(() => TeamsConversationRequested?.Invoke(message.TicketKey, message.ChatId)), null));
+                return new TodoRow(message.TicketKey, JiraUrl(message.TicketKey), icon, tone, title, detail, buttons, width, striped);
             }
             case TodoKind.ReadyToTest:
             {
@@ -68,7 +86,7 @@ internal sealed partial class DashboardPage
                 icon = Icons.Beaker;
                 tone = Theme.ActionReadyToTest;
                 buttons.Add((ButtonWidths.ReadyToTestText, Theme.ActionReadyToTest, !busy,
-                    () => RaiseTicketRequest(ReadyToTestRequested, ticket!.Key, "Ready to Test"), null));
+                    _ => RaiseTicketRequest(ReadyToTestRequested, ticket!.Key, "Ready to Test"), null));
                 break;
             }
             case TodoKind.PrComments:
@@ -78,11 +96,11 @@ internal sealed partial class DashboardPage
                 icon = Icons.Comment;
                 tone = Theme.Accent;
                 // Listed right to left: Seen at the edge, View PR before it.
-                buttons.Add((Lang.T("Seen", "Đã xem"), null, !busy, () => RaiseTicketAction(CommentsSeen, ticket!.Key), null));
+                buttons.Add((Lang.T("Seen", "Đã xem"), null, !busy, _ => RaiseTicketAction(CommentsSeen, ticket!.Key), null));
                 var prUrl = TaskRow.WebUrl(item.PrUrl);
                 if (prUrl != null)
                 {
-                    buttons.Add((Lang.T("View PR", "Xem PR"), Theme.Accent, !busy, () =>
+                    buttons.Add((Lang.T("View PR", "Xem PR"), Theme.Accent, !busy, _ =>
                     {
                         TaskRow.OpenUrl(prUrl);
                         RaiseTicketAction(CommentsSeen, ticket!.Key);
@@ -95,7 +113,7 @@ internal sealed partial class DashboardPage
                 title = $"Jira: {ticket!.Status}";
                 icon = Icons.CheckmarkCircle;
                 tone = Orange;
-                buttons.Add((Lang.T("Done", "Xong"), Theme.ActionDone, !busy, () => RaiseTicketAction(MarkDoneRequested, ticket.Key), Icons.ArrowRight));
+                buttons.Add((Lang.T("Done", "Xong"), Theme.ActionDone, !busy, _ => RaiseTicketAction(MarkDoneRequested, ticket.Key), Icons.ArrowRight));
                 break;
             }
             case TodoKind.Overdue:
@@ -105,8 +123,8 @@ internal sealed partial class DashboardPage
                 icon = Icons.Clock;
                 tone = Red;
                 buttons.Add(item.Section == TicketSection.New
-                    ? (Lang.T("Start", "Bắt đầu"), Theme.ActionStart, !busy, () => RaiseTicketRequest(StartRequested, ticket.Key, "Start"), null)
-                    : (Lang.T("Open", "Mở"), Theme.Accent, !busy, () => RaiseTicketRequest(OpenRequested, ticket.Key, "Open"), null));
+                    ? (Lang.T("Start", "Bắt đầu"), Theme.ActionStart, !busy, _ => RaiseTicketRequest(StartRequested, ticket.Key, "Start"), null)
+                    : (Lang.T("Open", "Mở"), Theme.Accent, !busy, _ => RaiseTicketRequest(OpenRequested, ticket.Key, "Open"), null));
                 break;
             }
             case TodoKind.QueueToday:
@@ -117,7 +135,7 @@ internal sealed partial class DashboardPage
                     $"{ticketKeys.Count} ticket đang làm: {string.Join(", ", ticketKeys)}");
                 icon = Icons.TaskList;
                 tone = Theme.Accent;
-                buttons.Add(("Queue", Theme.Accent, true, () => RaiseQueueRequest(ticketKeys), null));
+                buttons.Add(("Queue", Theme.Accent, true, button => ShowQueueMenu(button, ticketKeys), Icons.ChevronDown));
                 break;
             }
             case TodoKind.UnloggedDay:
@@ -128,7 +146,7 @@ internal sealed partial class DashboardPage
                 detail = Lang.T("Opens Work on that day", "Mở tab Work ở ngày này");
                 icon = Icons.CalendarLtr;
                 tone = WeekCard.Amber;
-                buttons.Add(("Log", Theme.Accent, true, () => RaiseDeferred(() => LogDayRequested?.Invoke(day.Date)), null));
+                buttons.Add(("Log", Theme.Accent, true, _ => RaiseDeferred(() => LogDayRequested?.Invoke(day.Date)), null));
                 break;
             }
             case TodoKind.WorktreeCleanup:
@@ -139,7 +157,7 @@ internal sealed partial class DashboardPage
                 detail = string.Join(", ", ticketKeys);
                 icon = Icons.Broom;
                 tone = Theme.TextSecondary;
-                buttons.Add((Lang.T("Clean up", "Dọn dẹp"), null, true, () => RaiseDeferred(() => CleanupRequested?.Invoke()), null));
+                buttons.Add((Lang.T("Clean up", "Dọn dẹp"), null, true, _ => RaiseDeferred(() => CleanupRequested?.Invoke()), null));
                 break;
             }
             default:
@@ -160,6 +178,60 @@ internal sealed partial class DashboardPage
         if (day.TscState == TscReadState.Read && tscColor != WeekCard.Green) missing.Add(Lang.T("TSC empty", "TSC trống"));
         if (hrmColor != WeekCard.Green) missing.Add(day.HrmHours == null ? Lang.T("HRM unknown", "HRM không rõ") : $"HRM {day.HrmHours:0.#}h / {FullDayHours:0}h");
         return string.Join(", ", missing);
+    }
+
+    // Opened from the to-do's Queue button: the user picks which tickets in progress go into today's queue.
+    private void ShowQueueMenu(Control button, IReadOnlyList<string> ticketKeys)
+    {
+        var tickets = ticketKeys
+            .Select(key => _data?.InProgress.Select(ip => ip.Ticket).FirstOrDefault(jt => jt.Key == key))
+            .OfType<JiraTicket>()
+            .ToList();
+        var menu = QueueMenu(tickets, RaiseQueueRequest);
+        // After the Queue item's click, which already ran; the menu is built on every open.
+        menu.Closed += (_, _) => BeginInvoke(menu.Dispose);
+        ThemedMenuRenderer.ShowBelow(menu, button);
+    }
+
+    // One checkable row per ticket, none checked: a click only checks it and the menu stays open. The last row queues
+    // the checked ones, so nothing goes into the queue that the user did not pick.
+    internal static ContextMenuStrip QueueMenu(IReadOnlyList<JiraTicket> tickets, Action<IReadOnlyList<string>> queue)
+    {
+        var menu = ThemedMenuRenderer.CreateMenu();
+        menu.ShowCheckMargin = true;
+        var ticketItems = tickets
+            .Select(jt => new ToolStripMenuItem($"{jt.Key}  {(jt.Summary.Length > 60 ? jt.Summary[..57] + "..." : jt.Summary)}")
+            {
+                CheckOnClick = true,
+                Tag = jt.Key,
+            })
+            .ToList();
+        var queueItem = new ToolStripMenuItem(Lang.T("Check the tickets to queue", "Tick các ticket cần queue")) { Enabled = false };
+        foreach (var ticketItem in ticketItems)
+        {
+            ticketItem.CheckedChanged += (_, _) =>
+            {
+                var checkedCount = ticketItems.Count(tsmi => tsmi.Checked);
+                queueItem.Enabled = checkedCount != 0;
+                queueItem.Text = checkedCount == 0
+                    ? Lang.T("Check the tickets to queue", "Tick các ticket cần queue")
+                    : Lang.T($"Queue {checkedCount} {(checkedCount == 1 ? "ticket" : "tickets")}", $"Queue {checkedCount} ticket");
+            };
+        }
+        queueItem.Click += (_, _) => queue(ticketItems.Where(tsmi => tsmi.Checked).Select(tsmi => (string)tsmi.Tag!).ToList());
+        menu.Items.AddRange(ticketItems.ToArray<ToolStripItem>());
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(queueItem);
+
+        // A ticket row's click closes a menu like any item's; keep it open for the next pick.
+        var isTicketClick = false;
+        menu.ItemClicked += (_, e) => isTicketClick = e.ClickedItem != queueItem;
+        menu.Closing += (_, e) =>
+        {
+            if (e.CloseReason == ToolStripDropDownCloseReason.ItemClicked && isTicketClick) e.Cancel = true;
+            isTicketClick = false;
+        };
+        return menu;
     }
 
     // Deferred like the ticket requests: the queue write ends in a Reload that rebuilds the clicked row.

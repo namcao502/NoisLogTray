@@ -20,6 +20,11 @@ public class PrUpdateCheckerTests
             var prs = PrsByTicket.GetValueOrDefault(ticketKey) ?? new List<PrStatus>();
             return Task.FromResult(new PrLookupResult(prs, !IncompleteTickets.Contains(ticketKey)));
         }
+
+        public Task<IReadOnlyList<PrThread>> GetThreadsAsync(string repository, int pullRequestId, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<PrThread>>(new List<PrThread>());
+        }
     }
 
     private static JiraTicket Ticket(string key, string status = "In Progress")

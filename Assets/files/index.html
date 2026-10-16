@@ -36,6 +36,8 @@
   #markdown blockquote { margin-left: 0; padding-left: 1em; border-left: 3px solid var(--line); color: var(--muted); }
   .empty { padding: 0.8em; color: var(--muted); }
   .group { padding: 0.7em 0.8em 0.3em; font-weight: 600; }
+  .group.toggle { display: flex; gap: 0.4em; align-items: center; cursor: pointer; user-select: none; }
+  .group.toggle:hover { background: var(--line); }
   .error { padding: 0.2em 0.8em; color: #f85149; }
   .folder, .file { display: flex; gap: 0.4em; padding: 0.2em 0.8em; cursor: pointer; white-space: nowrap; }
   .folder { color: var(--muted); }
@@ -175,6 +177,7 @@
     let groupLabels = new Map(); // group id -> its label ("BE - Backend-DotNet")
     const rows = new Map(); // "<group>|<path>" -> the file row on screen (tree rows exist only once their folder opened)
     const expanded = new Set(); // "<group>|<folder path>" of the folders the user opened, kept across re-lists
+    const collapsedGroups = new Set(); // the groups the user closed
     let selected = null; // { group, path } the user picked
     let shown = null; // { group, path, kind, content, note } in the viewer; may lag behind selected until the host answers
     let showSource = false; // a markdown file in Monaco instead of rendered
@@ -270,6 +273,7 @@
       filter.value = "";
       const parts = m.path.split("/");
       for (let count = 1; count < parts.length; count++) expanded.add(m.group + "|" + parts.slice(0, count).join("/"));
+      collapsedGroups.delete(m.group);
       renderTree();
       select(m.group, m.path);
       if (!m.line) return;
@@ -352,14 +356,32 @@
         addFileRow(container, group, path, name, depth);
     };
 
+    // A group header opens and closes its whole list; a closed group stays closed across re-lists.
+    const addGroup = (parent, label, id) => {
+      const header = addText(parent, "group toggle", "");
+      const twisty = addText(header, "twisty", collapsedGroups.has(id) ? chevronRight : chevronDown);
+      addText(header, "", label);
+      const body = document.createElement("div");
+      body.className = "group-body";
+      body.hidden = collapsedGroups.has(id);
+      parent.append(body);
+      header.addEventListener("click", () => {
+        body.hidden = !body.hidden;
+        twisty.textContent = body.hidden ? chevronRight : chevronDown;
+        if (body.hidden) collapsedGroups.add(id);
+        else collapsedGroups.delete(id);
+      });
+      return body;
+    };
+
     const renderTree = () => {
       groups.replaceChildren();
       rows.clear();
       if (listing.groups.length === 0) addText(groups, "empty", listing.emptyText);
       for (const group of listing.groups) {
-        addText(groups, "group", group.label);
-        if (group.error) addText(groups, "error", group.error);
-        renderNode(groups, buildTree(group.files), group.id, "", 0);
+        const body = addGroup(groups, group.label, group.id);
+        if (group.error) addText(body, "error", group.error);
+        renderNode(body, buildTree(group.files), group.id, "", 0);
       }
     };
 

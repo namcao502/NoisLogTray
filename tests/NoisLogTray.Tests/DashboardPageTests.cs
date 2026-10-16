@@ -22,6 +22,27 @@ public class DashboardPageTests
         Assert.Equal(2, tiles.Select(tile => tile.Top).Distinct().Count());
     }
 
+    [Fact]
+    public void QueueMenu_QueuesOnlyTheTicketsTheUserChecked()
+    {
+        IReadOnlyList<string>? queued = null;
+        var tickets = new[] { new JiraTicket("MDP-1", "One", null, null), new JiraTicket("MDP-2", "Two", null, null) };
+        using var menu = DashboardPage.QueueMenu(tickets, ticketKeys => queued = ticketKeys);
+        var ticketItems = menu.Items.OfType<ToolStripMenuItem>().Take(2).ToList();
+        var queueItem = (ToolStripMenuItem)menu.Items[^1];
+
+        Assert.All(ticketItems, tsmi => Assert.False(tsmi.Checked));
+        Assert.False(queueItem.Enabled);
+
+        ticketItems[1].PerformClick();
+        Assert.True(ticketItems[1].Checked);
+        Assert.True(queueItem.Enabled);
+        Assert.Contains("1", queueItem.Text);
+
+        queueItem.PerformClick();
+        Assert.Equal(new[] { "MDP-2" }, queued);
+    }
+
     // Language-neutral asserts: other tests flip Lang in parallel.
     [Fact]
     public void CheckedText_NamesTheConfiguredInterval_AndTheLastCheck()

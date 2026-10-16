@@ -4,6 +4,7 @@ namespace NoisLogTray;
 internal enum TodoKind
 {
     ClaudeWaiting,
+    TeamsMessage,
     ReadyToTest,
     PrComments,
     JiraDone,

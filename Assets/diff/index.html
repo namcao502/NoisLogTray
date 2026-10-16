@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <style>
-  :root { --bg: #1e1e1e; --fg: #ececf0; --muted: #96969e; --line: #3e3e42; --selection: #3a5a8c; }
+  :root { --bg: #1e1e1e; --fg: #ececf0; --muted: #96969e; --line: #3e3e42; --selection: #3a5a8c; --accent: #4c9aff; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--fg); font-family: "Segoe UI", sans-serif; }
   body { display: flex; flex-direction: column; }
   #tools { flex: none; display: flex; align-items: center; gap: 0.4em; padding: 0.35em 0.5em; border-bottom: 1px solid var(--line); }
@@ -15,10 +15,56 @@
   #list { flex: none; width: 23em; max-width: 70%; overflow: auto; box-sizing: border-box; }
   #splitter { flex: none; width: 5px; cursor: col-resize; border-left: 1px solid var(--line); }
   #splitter:hover, #splitter.dragging { background: var(--selection); }
-  #list.hidden, #splitter.hidden { display: none; }
-  #editor { flex: 1; min-width: 0; }
+  #list.hidden, #splitter.hidden, #threads.hidden, #tools button.hidden { display: none; }
+  #editor { flex: 1; min-width: 20em; }
+  /* The PR comments: shrinks before the diff does, never below 16em. */
+  #threads { flex: 0 1 26em; min-width: 16em; overflow: auto; box-sizing: border-box; border-left: 1px solid var(--line); padding-bottom: 0.6em; }
+  .thread-file { display: flex; gap: 0.4em; padding: 0.7em 0.8em 0.2em; font-weight: 600; white-space: nowrap; border-left: 3px solid transparent; }
+  .thread-file.link { cursor: pointer; }
+  .thread-file.link:hover { text-decoration: underline; }
+  .thread-file.current { border-left-color: var(--accent); color: var(--accent); }
+  .thread-file .folder-part { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--muted); font-weight: normal; }
+  details.thread { margin: 0.35em 0.8em; border: 1px solid var(--line); border-radius: 6px; }
+  details.thread.resolved { opacity: 0.65; }
+  details.thread.flash { outline: 2px solid var(--accent); }
+  details.thread > summary { display: flex; flex-wrap: wrap; align-items: center; gap: 0.2em 0.5em; padding: 0.35em 0.6em; cursor: pointer; list-style: none; }
+  details.thread > summary::-webkit-details-marker { display: none; }
+  .pill { font-size: 0.85em; padding: 0 0.55em; border-radius: 1em; background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+  .resolved .pill { background: var(--line); color: var(--muted); }
+  .thread-line { color: var(--accent); cursor: pointer; }
+  .thread-line:hover { text-decoration: underline; }
+  .thread-line.plain { color: var(--muted); cursor: default; text-decoration: none; }
+  .thread-pr { margin-left: auto; color: var(--muted); font-size: 0.85em; }
+  .thread-open { font-family: "FluentIcons"; color: var(--muted); cursor: pointer; padding: 0 0.1em; }
+  .thread-open:hover { color: var(--accent); }
+  .thread-snippet { flex-basis: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 0.9em; }
+  details[open] .thread-snippet { display: none; }
+  .comment { padding: 0.45em 0.7em; border-top: 1px solid var(--line); }
+  .comment-head { display: flex; gap: 0.5em; align-items: baseline; }
+  .comment-author { font-weight: 600; }
+  .comment-date { color: var(--muted); font-size: 0.85em; }
+  .comment-body { overflow-wrap: anywhere; line-height: 1.45; }
+  .comment-body p { margin: 0.3em 0; }
+  .comment-body ul, .comment-body ol { margin: 0.3em 0; padding-left: 1.4em; }
+  .comment-body h1, .comment-body h2, .comment-body h3, .comment-body h4 { font-size: 1em; margin: 0.5em 0 0.2em; }
+  .comment-body code, .comment-body pre { background: var(--line); border-radius: 3px; font-family: Consolas, monospace; font-size: 0.92em; }
+  .comment-body pre { padding: 0.5em; overflow: auto; white-space: pre-wrap; }
+  .comment-body a { color: var(--accent); }
+  .comment-body blockquote { margin: 0.3em 0; padding-left: 0.8em; border-left: 3px solid var(--line); color: var(--muted); }
+  .comment-body table { border-collapse: collapse; }
+  .comment-body th, .comment-body td { border: 1px solid var(--line); padding: 0.2em 0.5em; }
+  .comment-body .alt { color: var(--muted); }
+  /* Commented lines, in the narrow strip left of the code. */
+  .thread-mark { background: var(--accent); width: 4px !important; margin-left: 2px; border-radius: 2px; cursor: pointer; }
+  .thread-mark.resolved-mark { background: var(--muted); opacity: 0.6; }
+  /* The lines a thread covers: open ones tinted with the accent, resolved ones faint, the one last opened from the panel strongest. */
+  .thread-line { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .thread-line.resolved-line { background: color-mix(in srgb, var(--muted) 10%, transparent); }
+  .thread-line.active-line { background: color-mix(in srgb, var(--accent) 30%, transparent); }
   .empty { padding: 0.8em; color: var(--muted); }
   .group { padding: 0.7em 0.8em 0.3em; font-weight: 600; }
+  .group.toggle { display: flex; gap: 0.4em; align-items: center; cursor: pointer; user-select: none; }
+  .group.toggle:hover { background: var(--line); }
   .error { padding: 0.2em 0.8em; color: #f85149; }
   .folder, .file { display: flex; gap: 0.4em; padding: 0.2em 0.8em; cursor: pointer; white-space: nowrap; }
   .folder { color: var(--muted); }
@@ -27,6 +73,9 @@
   /* The app's icon set (UI/Icons.cs), and its thin themed scrollbars instead of Windows' own. */
   @font-face { font-family: "FluentIcons"; src: url("../icons/FluentSystemIcons-Regular.ttf"); }
   #tools button.icon { font-family: "FluentIcons"; font-size: 1.15em; line-height: 1; padding: 0.2em 0.4em; }
+  .glyph { font-family: "FluentIcons"; }
+  #toggleThreads { display: flex; align-items: center; gap: 0.3em; }
+  #toggleThreads .glyph { font-size: 1.1em; line-height: 1; }
   .twisty { flex: none; width: 1em; font-family: "FluentIcons"; display: flex; align-items: center; }
   /* The app's one scrollbar look (UI/ThemedScrollBar.cs): a pill 8px thick, 11px under the mouse or while dragged,
      3px in from the edge, in the secondary text color at 40% / 60% / 80%. The transparent borders place the thumb;
@@ -50,6 +99,7 @@
   body .monaco-scrollable-element > .scrollbar.horizontal > .slider.active { height: 11px !important; }
   .status { flex: none; width: 1em; font-weight: 600; }
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .badge { flex: none; margin-left: auto; padding-left: 0.4em; display: flex; gap: 0.2em; align-items: center; color: var(--accent); }
   .file.A { color: #3fb950; }
   .file.M { color: #d29922; }
   .file.D { color: #f85149; }
@@ -72,12 +122,18 @@
   <button id="previousFile" class="icon">&#xE4E8;</button>
   <button id="nextFile" class="icon">&#xE4E0;</button>
   <button id="inline"></button>
+  <button id="toggleThreads" class="hidden"><span class="glyph">&#xF2FF;</span><span id="threadCount"></span></button>
 </div>
 <div id="content">
   <div id="list"><div id="groups"><div class="empty" id="loading"></div></div></div>
   <div id="splitter"></div>
   <div id="editor"></div>
+  <div id="threads" class="hidden"></div>
 </div>
+<!-- marked before Monaco's loader: once define.amd exists the UMD build registers as a module, not window.marked.
+     markdown.js is the Files view's renderer (raw HTML escaped, only http(s) and relative links kept), here for the PR comments. -->
+<script src="../marked/marked.umd.js"></script>
+<script src="../files/markdown.js"></script>
 <script src="../monaco/vs/loader.js"></script>
 <script>
   const params = new URLSearchParams(location.search);
@@ -100,7 +156,9 @@
   const addText = (parent, className, text) => {
     const element = document.createElement("div");
     element.className = className;
-    element.textContent = text; // never innerHTML: paths and labels come from git and the file system
+    // textContent: paths, labels and comment fields come from git, the file system and Azure DevOps. A comment's body is
+    // the one innerHTML, and only as renderMarkdown's output.
+    element.textContent = text;
     parent.append(element);
     return element;
   };
@@ -109,6 +167,8 @@
   const fail = (error) => post({ type: "failed", message: String((error && error.message) || error) });
 
   const start = () => {
+    if (typeof window.renderMarkdown !== "function") throw new Error("marked or markdown.js did not load");
+
     // Read-only diffs have no project context: language validation would only paint false errors.
     const noValidation = { noSemanticValidation: true, noSyntaxValidation: true };
     monaco.languages.typescript.typescriptDefaults.setDiagnosticsOptions(noValidation);
@@ -122,6 +182,7 @@
       listWidth: Number(params.get("listWidth")) || 23,
       listHidden: params.get("listHidden") === "1",
       inline: params.get("inline") === "1",
+      threadsHidden: params.get("threadsHidden") === "1",
     };
     // Only the setting that changed: another tab's page may hold older values for the others.
     const saveLayout = (name) => post({ type: "layout", [name]: layout[name] });
@@ -129,9 +190,11 @@
     // Two columns even in a narrow window (Monaco goes inline below 900px by default); inline only when asked.
     const diff = monaco.editor.createDiffEditor(document.getElementById("editor"), {
       theme: params.get("dark") === "1" ? "vs-dark" : "vs", readOnly: true, automaticLayout: true, minimap: { enabled: false }, fontSize,
-      useInlineViewWhenSpaceIsLimited: false, renderSideBySide: !layout.inline,
+      useInlineViewWhenSpaceIsLimited: false, renderSideBySide: !layout.inline, renderOverviewRuler: false,
       scrollbar: { vertical: "visible", horizontal: "visible", useShadows: false, verticalScrollbarSize: 14, horizontalScrollbarSize: 14, verticalSliderSize: 8, horizontalSliderSize: 8 },
     });
+    // One vertical bar for the diff, the new side's: the two sides scroll together, and the overview ruler is off.
+    diff.getOriginalEditor().updateOptions({ scrollbar: { vertical: "hidden", verticalScrollbarSize: 0 } });
 
     const clear = () => {
       const old = diff.getModel(); diff.setModel(null);
@@ -142,14 +205,47 @@
     // the open file again; unchanged text keeps the editor (and its scroll) as it is.
     const show = (repository, path, original, modified) => {
       const current = diff.getModel();
-      if (current && shown === repository + "|" + path
-        && current.original.getValue() === original && current.modified.getValue() === modified) return;
-      clear();
-      shown = repository + "|" + path;
-      diff.setModel({
-        original: monaco.editor.createModel(original, undefined, monaco.Uri.from({ scheme: "base", path: "/" + path })),
-        modified: monaco.editor.createModel(modified, undefined, monaco.Uri.from({ scheme: "work", path: "/" + path })),
+      const sameText = current && shown === repository + "|" + path
+        && current.original.getValue() === original && current.modified.getValue() === modified;
+      if (!sameText) {
+        clear();
+        shown = repository + "|" + path;
+        diff.setModel({
+          original: monaco.editor.createModel(original, undefined, monaco.Uri.from({ scheme: "base", path: "/" + path })),
+          modified: monaco.editor.createModel(modified, undefined, monaco.Uri.from({ scheme: "work", path: "/" + path })),
+        });
+      }
+      applyMarks();
+      applyPendingReveal();
+    };
+
+    const clampLine = (model, line) => Math.min(Math.max(line, 1), model.getLineCount());
+    // The shown file's threads with a line; an old-side one only while the old side is on screen (not Inline).
+    const markedThreads = () => threads.filter((thread) => thread.line !== null && thread.repository + "|" + thread.path === shown
+      && (!thread.oldSide || !layout.inline));
+    const modifiedMarks = diff.getModifiedEditor().createDecorationsCollection();
+    const originalMarks = diff.getOriginalEditor().createDecorationsCollection();
+    const applyMarks = () => {
+      const current = diff.getModel();
+      const marksFor = (model, oldSide) => markedThreads().filter((thread) => thread.oldSide === oldSide).map((thread) => {
+        const line = clampLine(model, thread.line);
+        const endLine = clampLine(model, Math.max(thread.endLine || thread.line, thread.line));
+        const lineClass = "thread-line" + (thread.open ? "" : " resolved-line") + (thread.pr + "|" + thread.id === activeThreadKey ? " active-line" : "");
+        return { range: new monaco.Range(line, 1, endLine, 1),
+          options: { isWholeLine: true, className: lineClass,
+            linesDecorationsClassName: thread.open ? "thread-mark" : "thread-mark resolved-mark" } };
       });
+      modifiedMarks.set(current ? marksFor(current.modified, false) : []);
+      originalMarks.set(current ? marksFor(current.original, true) : []);
+    };
+    const applyPendingReveal = () => {
+      const current = diff.getModel();
+      if (pendingReveal === null || current === null || pendingReveal.key !== shown) return;
+      const editor = pendingReveal.oldSide ? diff.getOriginalEditor() : diff.getModifiedEditor();
+      const line = clampLine(pendingReveal.oldSide ? current.original : current.modified, pendingReveal.line);
+      pendingReveal = null;
+      editor.revealLineInCenter(line);
+      editor.setPosition({ lineNumber: line, column: 1 });
     };
 
     const list = document.getElementById("list");
@@ -158,8 +254,16 @@
     const current = document.getElementById("current");
     const inlineButton = document.getElementById("inline");
     let selected = null; // { repository, path }
-    let fileRows = []; // { row, repository, path, label } in list order
+    let fileRows = []; // { row, badge, repository, path, label } in list order
+    const threadsPanel = document.getElementById("threads");
+    const threadsToggle = document.getElementById("toggleThreads");
+    let threads = []; // the "comments" message's threads, see ChangesView.PostComments
+    let threadErrors = [];
+    const labels = { general: "", openInAdo: "" };
+    let pendingReveal = null; // { key, line, oldSide }: a thread's line to go to once its file is shown
+    let activeThreadKey = null; // "<pr>|<id>" of the thread last opened, whose lines are tinted strongest
     const collapsed = new Set(); // "<repository>|<folder path>" of the folders the user closed, kept across re-lists
+    const collapsedGroups = new Set(); // the repositories whose group the user closed
 
     const applyLayout = () => {
       list.style.width = layout.listWidth + "em";
@@ -167,6 +271,10 @@
       splitter.classList.toggle("hidden", layout.listHidden);
       inlineButton.classList.toggle("on", layout.inline);
       diff.updateOptions({ renderSideBySide: !layout.inline });
+      const hasThreads = threads.length !== 0 || threadErrors.length !== 0;
+      threadsPanel.classList.toggle("hidden", layout.threadsHidden || !hasThreads);
+      threadsToggle.classList.toggle("hidden", !hasThreads);
+      threadsToggle.classList.toggle("on", hasThreads && !layout.threadsHidden);
     };
     applyLayout();
 
@@ -183,12 +291,17 @@
       current.title = entry.label + "  " + entry.path;
     };
 
-    const select = (entry) => {
+    // scrollThreads: false when a thread's own line link opened the file, so the panel stays on that thread.
+    const select = (entry, scrollThreads = true) => {
+      // A file picked from a thread may sit in a closed group: open it first, as its header would.
+      const groupBody = entry.row.closest(".group-body");
+      if (groupBody && groupBody.hidden) groupBody.previousElementSibling.click();
       for (const other of groups.querySelectorAll(".file.selected")) other.classList.remove("selected");
       entry.row.classList.add("selected");
       entry.row.scrollIntoView({ block: "nearest" });
       selected = { repository: entry.repository, path: entry.path };
       showCurrent(entry);
+      markCurrentThreadFile(scrollThreads);
       post({ type: "select", repository: entry.repository, path: entry.path });
     };
 
@@ -250,8 +363,9 @@
           addText(row, "twisty", "");
           addText(row, "status", file.status);
           addText(row, "name", name);
+          const badge = addText(row, "badge", "");
           row.title = file.path;
-          const entry = { row, repository, path: file.path, label };
+          const entry = { row, badge, repository, path: file.path, label };
           fileRows.push(entry);
           if (selected && selected.repository === repository && selected.path === file.path) {
             row.classList.add("selected");
@@ -263,27 +377,210 @@
       renderNode(parent, root, "", 0);
     };
 
+    // A group header opens and closes its whole list; a closed group stays closed across re-lists.
+    const addGroup = (parent, label, id) => {
+      const header = addText(parent, "group toggle", "");
+      const twisty = addText(header, "twisty", collapsedGroups.has(id) ? chevronRight : chevronDown);
+      addText(header, "", label);
+      const body = document.createElement("div");
+      body.className = "group-body";
+      body.hidden = collapsedGroups.has(id);
+      parent.append(body);
+      header.addEventListener("click", () => {
+        body.hidden = !body.hidden;
+        twisty.textContent = body.hidden ? chevronRight : chevronDown;
+        if (body.hidden) collapsedGroups.add(id);
+        else collapsedGroups.delete(id);
+      });
+      return body;
+    };
+
     // Keeps the selected file if it is still listed (and asks for its diff again); otherwise empties the editor.
     const renderFiles = (m) => {
       groups.replaceChildren();
       fileRows = [];
       if (m.groups.length === 0) addText(groups, "empty", m.emptyText);
       for (const group of m.groups) {
-        addText(groups, "group", group.label);
-        if (group.error) addText(groups, "error", group.error);
-        renderTree(groups, group.files, group.repository, group.label);
+        const body = addGroup(groups, group.label, group.repository);
+        if (group.error) addText(body, "error", group.error);
+        renderTree(body, group.files, group.repository, group.label);
       }
       const stillListed = selected && fileRows.some((fr) => fr.repository === selected.repository && fr.path === selected.path);
       if (stillListed) post({ type: "select", repository: selected.repository, path: selected.path });
       else if (selected) { selected = null; shown = null; clear(); showCurrent(null); }
+      renderThreads(); // its file order, links and badges follow the list
     };
+
+    // Each listed file's count of open threads, from the threads at hand (they may come before or after the list).
+    const updateBadges = () => {
+      for (const entry of fileRows) {
+        const openCount = threads.filter((thread) => thread.open && thread.repository === entry.repository && thread.path === entry.path).length;
+        entry.badge.replaceChildren();
+        if (openCount === 0) continue;
+        addText(entry.badge, "glyph", "\uF2FF");
+        addText(entry.badge, "", String(openCount));
+      }
+    };
+
+    const threadElements = new Map(); // "<repository>|<thread id>" -> its <details>
+    const fileRowOf = (thread) => fileRows.find((fr) => fr.repository === thread.repository && fr.path === thread.path);
+
+    const markCurrentThreadFile = (scroll) => {
+      const key = selected ? selected.repository + "|" + selected.path : null;
+      for (const header of threadsPanel.querySelectorAll(".thread-file")) {
+        const isCurrent = header.dataset.key === key;
+        header.classList.toggle("current", isCurrent);
+        if (isCurrent && scroll) header.scrollIntoView({ block: "nearest" });
+      }
+    };
+
+    const revealThread = (thread) => {
+      const entry = fileRowOf(thread);
+      if (!entry) return;
+      pendingReveal = { key: entry.repository + "|" + entry.path, line: thread.line, oldSide: thread.oldSide };
+      activeThreadKey = thread.pr + "|" + thread.id;
+      applyMarks();
+      const isSelected = selected && selected.repository === entry.repository && selected.path === entry.path;
+      if (isSelected) applyPendingReveal(); // shown already; else show() applies it once the diff arrives
+      else select(entry, false);
+    };
+
+    // A click on a commented line's mark: the panel opens on its thread.
+    const focusThread = (thread) => {
+      if (layout.threadsHidden) {
+        layout.threadsHidden = false;
+        applyLayout();
+        saveLayout("threadsHidden");
+      }
+      activeThreadKey = thread.pr + "|" + thread.id;
+      applyMarks();
+      const details = threadElements.get(thread.repository + "|" + thread.id);
+      if (!details) return;
+      details.open = true;
+      details.scrollIntoView({ block: "nearest" });
+      details.classList.add("flash");
+      setTimeout(() => details.classList.remove("flash"), 1200);
+    };
+
+    const renderThread = (thread) => {
+      const details = document.createElement("details");
+      details.className = thread.open ? "thread" : "thread resolved";
+      details.open = thread.open;
+      details.dataset.defaultOpen = String(thread.open);
+      const summary = document.createElement("summary");
+      details.append(summary);
+      addText(summary, "pill", thread.status);
+      if (thread.lineText) {
+        const lineLink = addText(summary, "thread-line", thread.lineText);
+        const canReveal = fileRowOf(thread) !== undefined && !(thread.oldSide && layout.inline);
+        if (canReveal) {
+          lineLink.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); revealThread(thread); });
+        } else {
+          lineLink.classList.add("plain");
+        }
+      }
+      addText(summary, "thread-pr", thread.pr);
+      const openLink = addText(summary, "thread-open", "\uF582");
+      openLink.title = labels.openInAdo;
+      openLink.addEventListener("click", (e) => { e.preventDefault(); e.stopPropagation(); post({ type: "openUrl", url: thread.url }); });
+      const first = thread.comments[0];
+      if (first) addText(summary, "thread-snippet", first.author + ": " + first.text.replace(/\s+/g, " ").slice(0, 200));
+      for (const comment of thread.comments) {
+        const block = addText(details, "comment", "");
+        const head = addText(block, "comment-head", "");
+        addText(head, "comment-author", comment.author);
+        addText(head, "comment-date", comment.date);
+        addText(block, "comment-body", "").innerHTML = renderMarkdown(comment.text, { group: "", path: "" });
+      }
+      threadElements.set(thread.repository + "|" + thread.id, details);
+      return details;
+    };
+
+    // PR-level threads first, then one group per file in list order, files no longer listed last; a group's threads by line.
+    const renderThreads = () => {
+      // Every re-list re-renders: a thread the user opened or closed keeps that, the rest follow their (new) status.
+      const userOpen = new Map([...threadElements]
+        .filter(([, details]) => String(details.open) !== details.dataset.defaultOpen)
+        .map(([key, details]) => [key, details.open]));
+      threadsPanel.replaceChildren();
+      threadElements.clear();
+      for (const error of threadErrors) addText(threadsPanel, "error", error);
+      const fileIndex = new Map(fileRows.map((fr, index) => [fr.repository + "|" + fr.path, index]));
+      const repoLabels = new Map(fileRows.map((fr) => [fr.repository, fr.label]));
+      const byFile = new Map();
+      for (const thread of threads) {
+        const key = thread.repository + "|" + (thread.path ?? "");
+        if (!byFile.has(key)) byFile.set(key, []);
+        byFile.get(key).push(thread);
+      }
+      const rank = (key, thread) => thread.path === null ? -1 : (fileIndex.has(key) ? fileIndex.get(key) : fileRows.length);
+      const ordered = [...byFile].sort(([keyA, threadsA], [keyB, threadsB]) =>
+        rank(keyA, threadsA[0]) - rank(keyB, threadsB[0]) || keyA.localeCompare(keyB));
+      for (const [key, fileThreads] of ordered) {
+        const first = fileThreads[0];
+        const repoLabel = repoLabels.get(first.repository) || first.repository;
+        const header = addText(threadsPanel, "thread-file", "");
+        header.dataset.key = key;
+        if (first.path === null) {
+          addText(header, "", labels.general + " · " + repoLabel);
+        } else {
+          const slash = first.path.lastIndexOf("/");
+          addText(header, "", first.path.slice(slash + 1));
+          addText(header, "folder-part", first.path.slice(0, slash + 1));
+          header.title = repoLabel + "  " + first.path;
+          const entry = fileRowOf(first);
+          if (entry) {
+            header.classList.add("link");
+            header.addEventListener("click", () => select(entry, false));
+          }
+        }
+        for (const thread of [...fileThreads].sort((a, b) => (a.line ?? 0) - (b.line ?? 0))) {
+          const details = renderThread(thread);
+          const key = thread.repository + "|" + thread.id;
+          if (userOpen.has(key)) details.open = userOpen.get(key);
+          threadsPanel.append(details);
+        }
+      }
+      const openCount = threads.filter((thread) => thread.open).length;
+      document.getElementById("threadCount").textContent = openCount === 0 ? "" : String(openCount);
+      markCurrentThreadFile(false);
+      updateBadges();
+      applyLayout();
+      applyMarks();
+    };
+
+    // Links in a comment never navigate the page: http(s) opens the browser, anything else stays inert.
+    threadsPanel.addEventListener("click", (e) => {
+      const anchor = e.target.closest("a");
+      if (!anchor) return;
+      e.preventDefault();
+      const href = anchor.getAttribute("href") || "";
+      if (/^https?:\/\//i.test(href)) post({ type: "openUrl", url: href });
+    });
+
+    // The mark left of a commented line opens its thread in the panel.
+    for (const [editor, oldSide] of [[diff.getModifiedEditor(), false], [diff.getOriginalEditor(), true]]) {
+      editor.onMouseDown((e) => {
+        if (e.target.type !== monaco.editor.MouseTargetType.GUTTER_LINE_DECORATIONS || !e.target.position) return;
+        const model = editor.getModel();
+        const clicked = e.target.position.lineNumber;
+        // Any line of a thread's range opens it; the narrowest range wins where two overlap.
+        const thread = markedThreads()
+          .filter((mt) => mt.oldSide === oldSide && model && clampLine(model, mt.line) <= clicked
+            && clicked <= clampLine(model, Math.max(mt.endLine || mt.line, mt.line)))
+          .sort((first, second) => ((first.endLine || first.line) - first.line) - ((second.endLine || second.line) - second.line))[0];
+        if (thread) focusThread(thread);
+      });
+    }
 
     const applyLabels = (m) => {
       const titles = { toggleList: m.files, previousChange: m.previousChange, nextChange: m.nextChange,
-        previousFile: m.previousFile, nextFile: m.nextFile, inline: m.inlineTitle, refresh: m.refresh };
+        previousFile: m.previousFile, nextFile: m.nextFile, inline: m.inlineTitle, refresh: m.refresh, toggleThreads: m.threads };
       for (const [id, title] of Object.entries(titles)) document.getElementById(id).title = title;
       document.getElementById("refresh").textContent = m.refresh;
       inlineButton.textContent = m.inline;
+      labels.general = m.general;
+      labels.openInAdo = m.openInAdo;
     };
 
     document.getElementById("refresh").addEventListener("click", () => post({ type: "refresh" }));
@@ -296,6 +593,12 @@
       layout.inline = !layout.inline;
       applyLayout();
       saveLayout("inline");
+      renderThreads(); // an old-side line has a link and a mark only beside the old side
+    });
+    threadsToggle.addEventListener("click", () => {
+      layout.threadsHidden = !layout.threadsHidden;
+      applyLayout();
+      saveLayout("threadsHidden");
     });
     document.getElementById("previousChange").addEventListener("click", () => diff.goToDiff("previous"));
     document.getElementById("nextChange").addEventListener("click", () => diff.goToDiff("next"));
@@ -335,6 +638,7 @@
     window.chrome.webview.addEventListener("message", (event) => {
       const m = JSON.parse(event.data);
       if (m.type === "files") renderFiles(m);
+      else if (m.type === "comments") { threads = m.threads; threadErrors = m.errors; renderThreads(); }
       else if (m.type === "labels") applyLabels(m);
       else if (m.type === "diff" && selected && selected.repository === m.repository && selected.path === m.path)
         show(m.repository, m.path, m.original, m.modified);

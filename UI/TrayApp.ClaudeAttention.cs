@@ -19,8 +19,16 @@ internal sealed partial class TrayApp
     // inside a running terminal clears through its SessionEnd hook.
     private void TrackClaudeSession(string sessionName, ClaudeSessionHost host)
     {
-        host.Starting += () => ClearClaudeWait(sessionName);
-        host.Exited += () => RunOnUi(() => ClearClaudeWait(sessionName));
+        host.Starting += () =>
+        {
+            _claudeEndedInShell.Remove(sessionName);
+            ClearClaudeWait(sessionName);
+        };
+        host.Exited += () => RunOnUi(() =>
+        {
+            _claudeEndedInShell.Remove(sessionName);
+            ClearClaudeWait(sessionName);
+        });
     }
 
     private void OnClaudeHook(string sessionName, ClaudeHookEvent hookEvent)
@@ -29,9 +37,16 @@ internal sealed partial class TrayApp
         var host = isTerminal ? _terminalHosts.GetValueOrDefault(sessionName) : _ticketSessions.GetValueOrDefault(sessionName);
         if (host == null || !host.IsRunning) return; // a closed tab's or an ended session's late hook
         _shipPending.Remove(sessionName); // claude runs in this tab, so its `ship` went through
+        if (TeamsHandOff.EndsClaude(hookEvent)) _claudeEndedInShell.Add(sessionName);
+        else _claudeEndedInShell.Remove(sessionName);
         if (isTerminal) RememberClaudeSessionId(sessionName, hookEvent);
         ClaudeWaitReason? current = _claudeWaits.TryGetValue(sessionName, out var reason) ? reason : null;
         var next = ClaudeAttention.Next(current, hookEvent);
+        if (!isTerminal)
+        {
+            OnCommentFlowHook(sessionName, hookEvent, hookEvent.EventName == "Stop" && next == ClaudeWaitReason.Finished);
+        }
+
         // A turn that finishes while the user looks at that session needs no dot.
         if (next != null && ClaudeAttention.ClearsWhenSeen(next.Value) && IsWatching(sessionName)) next = null;
         if (next == current) return;

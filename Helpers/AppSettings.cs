@@ -30,10 +30,18 @@ internal sealed class AppSettings
     public List<string> RecentClaudeDirectories { get; set; } = new(); // most recent first
     public Dictionary<string, string> ClaudeSessionIds { get; set; } = new(); // TerminalTabs.SessionKey -> the tab's last session there
     public Dictionary<string, DateTimeOffset> TeamsPostedAt { get; set; } = new(); // ticket key -> when its Teams post was sent
+    public Dictionary<string, DateTimeOffset> TeamsSeenAt { get; set; } = new(); // TeamsChat.ConversationKey -> the newest message the user has seen
+    public Dictionary<string, DateTimeOffset> TeamsNotifiedAt { get; set; } = new(); // TeamsChat.ConversationKey -> the newest message already notified
+    public bool TeamsAttentionBaselineDone { get; set; } // the first background Teams check only records marks
+    public string? TeamsChannelId { get; set; } // the channel the Teams tab posts in and reads from
+    public List<string> TeamsRecentChannelIds { get; set; } = new(); // most recent first, at most TeamsThreadService.MaxRecentChannels
+    public List<TeamsPerson> TeamsPeople { get; set; } = new(); // everyone seen in a read channel or thread, most recently seen first
+    public TeamsPerson? TeamsPostLead { get; set; } // the person the last Teams post tagged first; the next draft greets them
     public bool TicketHeaderCollapsed { get; set; } // the Ticket tab header shows only its key line
     public double? DiffListWidthEm { get; set; } // the Changes file list width in the diff page's em; null = default
     public bool DiffListHidden { get; set; }
     public bool DiffInline { get; set; } // the Changes diff in one column instead of two
+    public bool DiffThreadsHidden { get; set; } // the Changes PR comment panel is closed
     public double? FilesListWidthEm { get; set; } // the Files list width in the files page's em; null = default
     public bool FilesListHidden { get; set; }
 
@@ -65,6 +73,10 @@ internal sealed class AppSettings
                 parsed.RecentClaudeDirectories ??= new();
                 parsed.ClaudeSessionIds ??= new();
                 parsed.TeamsPostedAt ??= new();
+                parsed.TeamsSeenAt ??= new();
+                parsed.TeamsNotifiedAt ??= new();
+                parsed.TeamsRecentChannelIds ??= new();
+                parsed.TeamsPeople ??= new();
                 parsed.SeenWorkAttention ??= new();
                 return parsed;
             }

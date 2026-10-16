@@ -22,6 +22,8 @@ internal static class Hcm
 
     internal static DateOnly Today() => DateOnly.FromDateTime(Now().DateTime);
 
+    internal static DateTimeOffset ToHcm(DateTimeOffset value) => TimeZoneInfo.ConvertTime(value, Zone);
+
     // HRM workDate (YYYY-MM-DD) for a chosen calendar date.
     internal static string ApiDate(DateOnly date) => date.ToString("yyyy-MM-dd");
 

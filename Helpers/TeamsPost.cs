@@ -45,6 +45,60 @@ internal static class TeamsPost
         return null;
     }
 
+    internal const string DefaultPostLeadName = "Minh Dinh";
+
+    internal static TeamsPerson? ResolvePostLead(TeamsPerson? learned, IReadOnlyList<TeamsPerson> people)
+    {
+        if (learned != null)
+        {
+            return learned;
+        }
+        return people.FirstOrDefault(tp => tp.DisplayName.StartsWith(DefaultPostLeadName, StringComparison.OrdinalIgnoreCase));
+    }
+
+    // Starts the description with the lead greeting ("a <lead>, dạ ..."); a description that already greets is left alone.
+    internal static string WithGreeting(string draft, TeamsPerson? lead)
+    {
+        var lineBreak = draft.Contains("\r\n") ? "\r\n" : "\n";
+        var lines = draft.ReplaceLineEndings("\n").Split('\n').ToList();
+        var greeting = lead != null
+            ? $"a <span class=\"mention\" data-mri=\"{Escape(lead.Mri)}\">{Escape(lead.DisplayName)}</span>, dạ "
+            : "dạ ";
+
+        var descriptionIndex = lines.FindIndex(1, line => line.Trim().Length != 0);
+        if (descriptionIndex >= 0 && !lines[descriptionIndex].TrimStart().StartsWith('['))
+        {
+            var description = lines[descriptionIndex].TrimStart();
+            var firstWord = description.Split(new[] { ' ', '\t', ',' }, StringSplitOptions.RemoveEmptyEntries)[0];
+            if (firstWord.Equals("a", StringComparison.OrdinalIgnoreCase) || firstWord.Equals("dạ", StringComparison.OrdinalIgnoreCase))
+            {
+                return draft;
+            }
+            if (firstWord.Length == 1 || char.IsLower(firstWord[1]))
+            {
+                description = char.ToLowerInvariant(description[0]) + description[1..];
+            }
+            lines[descriptionIndex] = greeting + description;
+            return string.Join(lineBreak, lines);
+        }
+
+        var greetingLine = greeting + "e update ";
+        var blockIndex = lines.FindIndex(1, line => line.TrimStart().StartsWith('['));
+        if (blockIndex >= 0)
+        {
+            lines.InsertRange(blockIndex, new[] { greetingLine, "" });
+        }
+        else
+        {
+            while (lines.Count > 1 && lines[^1].Trim().Length == 0)
+            {
+                lines.RemoveAt(lines.Count - 1);
+            }
+            lines.AddRange(new[] { "", greetingLine });
+        }
+        return string.Join(lineBreak, lines);
+    }
+
     // The first line goes in the channel post's Subject (plain text); the rest is the message.
     internal static (string Subject, string Body) SplitSubject(string text)
     {

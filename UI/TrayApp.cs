@@ -17,6 +17,9 @@ internal sealed partial class TrayApp : ApplicationContext
     private string? _configError;
     private TeamsNotifier _teams;
     private IAzureDevOpsClient? _ado; // null when no Azure DevOps PAT is configured
+    // For the app's lifetime, not rebuilt on a Settings save: they hold the Teams session and the channel list.
+    private readonly TeamsChatClient _teamsChat = new(TeamsWebSniffer.SniffAsync);
+    private readonly TeamsThreadService _teamsThreads;
     private readonly SixPmScheduler _scheduler;
     private readonly ToolStripMenuItem _updateItem;
     private readonly ToolStripSeparator _updateSeparator;
@@ -57,6 +60,8 @@ internal sealed partial class TrayApp : ApplicationContext
         _configError = error;
         _service = config != null ? new LoggingService(config) : null;
         (_teams, _ado) = CreatePrIntegrations(config);
+        _teamsThreads = new TeamsThreadService(_teamsChat, new TeamsPostIndex(AppPaths.TeamsPostIndexPath),
+            () => AppSettings.Load(), settings => AppSettings.Save(settings));
         StartHookServer();
 
         var menu = ThemedMenuRenderer.CreateMenu();
@@ -140,6 +145,7 @@ internal sealed partial class TrayApp : ApplicationContext
         CatchUpIfDue();
         _ = CheckForUpdateAsync(); // fire-and-forget; silent on any failure
         StartKnowledgeScanWatch();
+        StartTeamsAttentionWatch();
 
         // TSC logging needs the system Chrome; warn once up front rather than at 6 PM.
         if (_service != null && !TscTokenSniffer.ChromeInstalled())
@@ -207,7 +213,7 @@ internal sealed partial class TrayApp : ApplicationContext
 
     private static (TeamsNotifier Teams, IAzureDevOpsClient? Ado) CreatePrIntegrations(AppConfig? config)
     {
-        var teams = new TeamsNotifier(config?.TeamsWebhookUrl, config?.JiraBaseUrl.TrimEnd('/') ?? AppConfig.DefaultJiraBaseUrl, config?.TeamsPostWorkflowUrl);
+        var teams = new TeamsNotifier(config?.TeamsWebhookUrl, config?.JiraBaseUrl.TrimEnd('/') ?? AppConfig.DefaultJiraBaseUrl);
         var pat = config?.AzureDevOpsPat;
         return (teams, string.IsNullOrEmpty(pat) ? null : new AzureDevOpsClient(pat));
     }
@@ -243,6 +249,8 @@ internal sealed partial class TrayApp : ApplicationContext
                 else ShowTicketTab(sessionName);
             };
             _dashboardPage.CleanupRequested += OpenWorktreeCleanup;
+            _dashboardPage.TeamsConversationRequested += ShowTeamsConversation;
+            _dashboardPage.TeamsSeenRequested += MarkTeamsSeen;
             _dashboardPage.SetChecking(_checkingTickets, _lastTicketCheck);
             _dashboardPage.SetDraining(Volatile.Read(ref _draining) != 0); // a Settings rebuild can land mid-drain
             foreach (var (ticketKey, stage) in _launchStages) _dashboardPage.SetTicketBusy(ticketKey, stage);
@@ -276,7 +284,8 @@ internal sealed partial class TrayApp : ApplicationContext
                 _tasksPage.Reload(); // after subscribing, so the badge has a value right away
             }
             PruneTicketTabs();
-            _ticketPage = new TicketWorkspacePage(_ticketStore, _service?.JiraBaseUrl ?? AppConfig.DefaultJiraBaseUrl, () => DevRepoPath, SessionFor, CreateTeamsPostView);
+            _ticketPage = new TicketWorkspacePage(_ticketStore, _service?.JiraBaseUrl ?? AppConfig.DefaultJiraBaseUrl, () => DevRepoPath, SessionFor, CreateTeamsThreadView,
+                () => _ado);
             _shell.AddPage(ShellPage.Ticket, _ticketPage, _ticketPage.HeaderControl);
             // Deferred: the x button is on the Click stack and SetTabs disposes it.
             _ticketPage.CloseRequested += ticketKey => shell.BeginInvoke(() => CloseTicketTab(ticketKey));
@@ -284,6 +293,10 @@ internal sealed partial class TrayApp : ApplicationContext
             // Only stores and clears a seen dot: SetTabs raises this itself, so it must not call SetTabs.
             _ticketPage.SelectionChanged += ticketKey => { _selectedTicket = ticketKey; AcknowledgeSeenWaits(); };
             _ticketPage.PageRequested += ShowShell;
+            foreach (var (ticketKey, chatId) in _teamsTabsToOpen)
+            {
+                _ticketPage.OpenOnTeams(ticketKey, chatId);
+            }
             _ticketPage.SetTabs(_openTickets, _selectedTicket); // before the page is shown, so HasOpenTabs is right for Esc
             // The sessions live in TrayApp so a rebuilt window (Settings save) reattaches instead of killing them.
             _claudePage = new ClaudePage(TerminalHostFor, ClaudeFolderChoices);
@@ -296,6 +309,7 @@ internal sealed partial class TrayApp : ApplicationContext
             _claudePage.SelectionChanged += OnTerminalSelectionChanged;
             ShowTerminalTabs(); // before the page is shown, so HasOpenTabs is right for Esc
             RefreshClaudeAttention();
+            RefreshTeamsAttention();
             _settingsPage = new SettingsPage();
             _shell.AddPage(ShellPage.Settings, _settingsPage);
             _settingsPage.SaveRequested += OnSettingsSaved;
@@ -625,6 +639,7 @@ internal sealed partial class TrayApp : ApplicationContext
         _scheduler.Dispose();
         _tasksTimer.Dispose();
         _knowledgeScanTimer.Dispose();
+        StopTeamsAttentionWatch();
         _schedulesDialog?.Close();
         _shell?.Dispose();
         foreach (var host in _terminalHosts.Values) host.Dispose();
@@ -683,6 +698,7 @@ internal sealed partial class TrayApp : ApplicationContext
             _scheduler.Dispose();
             _tasksTimer.Dispose();
             _knowledgeScanTimer.Dispose();
+        StopTeamsAttentionWatch();
             Lang.Changed -= ApplyLanguage;
             _tray.Visible = false;
             _tray.Dispose();

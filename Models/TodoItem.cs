@@ -11,4 +11,5 @@ internal sealed record TodoItem(
     string? PrUrl = null,
     DayCoverage? Day = null,
     ClaudeWait? Wait = null,
-    IReadOnlyList<string>? TicketKeys = null);
+    IReadOnlyList<string>? TicketKeys = null,
+    TeamsAttentionItem? TeamsMessage = null);

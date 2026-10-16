@@ -28,8 +28,9 @@ public class DashboardTodosTests
 
     private static List<TodoItem> Todos(DashboardData data, IReadOnlyList<DayCoverage>? week, DateTimeOffset? now = null,
         TimeOnly? logTime = null, bool isTodayWritten = false, bool isDraining = false, IReadOnlyList<ClaudeWait>? waits = null,
-        IReadOnlyList<string>? cleanupKeys = null, IReadOnlySet<string>? busyKeys = null) =>
-        DashboardTodos.Build(data, waits ?? Array.Empty<ClaudeWait>(), week, cleanupKeys ?? Array.Empty<string>(),
+        IReadOnlyList<string>? cleanupKeys = null, IReadOnlySet<string>? busyKeys = null,
+        IReadOnlyList<TeamsAttentionItem>? teamsMessages = null) =>
+        DashboardTodos.Build(data, waits ?? Array.Empty<ClaudeWait>(), teamsMessages ?? Array.Empty<TeamsAttentionItem>(), week, cleanupKeys ?? Array.Empty<string>(),
             busyKeys ?? new HashSet<string>(), now ?? Morning, logTime ?? SixPm, isTodayWritten, isDraining);
 
     private static bool HasQueueToday(List<TodoItem> todos) => todos.Exists(ti => ti.Kind == TodoKind.QueueToday);
@@ -56,6 +57,36 @@ public class DashboardTodosTests
             todos.Select(ti => ti.Kind));
         Assert.Equal("claude", todos[0].Wait!.SessionName);
         Assert.Equal(new[] { "MDP-3" }, todos[^1].TicketKeys);
+    }
+
+    private static TeamsAttentionItem TeamsItem(string conversationKey, bool mentionsMe, int minute) =>
+        new("MDP-1", conversationKey, null, "", "An", new DateTimeOffset(2026, 10, 14, 9, minute, 0, TimeSpan.FromHours(7)), mentionsMe);
+
+    [Fact]
+    public void Build_PutsTeamsMessagesAfterClaudeWaits_MentionsFirst()
+    {
+        var waits = new[] { new ClaudeWait("MDP-7", "MDP-7", ClaudeWaitReason.Finished) };
+        var teamsMessages = new[] { TeamsItem("old", false, 5), TeamsItem("new", false, 30), TeamsItem("mention", true, 1) };
+
+        var todos = Todos(Data(), Week(), waits: waits, teamsMessages: teamsMessages);
+
+        Assert.Equal(
+            new[] { TodoKind.ClaudeWaiting, TodoKind.TeamsMessage, TodoKind.TeamsMessage, TodoKind.TeamsMessage },
+            todos.Select(ti => ti.Kind));
+        Assert.Equal(new[] { "mention", "new", "old" }, todos.Skip(1).Select(ti => ti.TeamsMessage!.ConversationKey));
+    }
+
+    [Fact]
+    public void Signature_Changes_WhenTeamsMessageChanges()
+    {
+        var first = new List<TodoItem> { new(TodoKind.TeamsMessage, TeamsMessage: TeamsItem("a", false, 5)) };
+        var same = new List<TodoItem> { new(TodoKind.TeamsMessage, TeamsMessage: TeamsItem("a", false, 5)) };
+        var newer = new List<TodoItem> { new(TodoKind.TeamsMessage, TeamsMessage: TeamsItem("a", false, 6)) };
+        var other = new List<TodoItem> { new(TodoKind.TeamsMessage, TeamsMessage: TeamsItem("b", false, 5)) };
+
+        Assert.Equal(DashboardTodos.Signature(first), DashboardTodos.Signature(same));
+        Assert.NotEqual(DashboardTodos.Signature(first), DashboardTodos.Signature(newer));
+        Assert.NotEqual(DashboardTodos.Signature(first), DashboardTodos.Signature(other));
     }
 
     [Fact]

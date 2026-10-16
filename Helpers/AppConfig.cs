@@ -24,7 +24,7 @@ internal sealed class AppConfig
     internal static readonly string[] UserKeys =
     {
         "JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN", "HRM_API_KEY", "TSC_GRAPH_COLUMNS", "LOG_TIME",
-        "DEV_REPO_PATH", "AZURE_DEVOPS_PAT", "TEAMS_WEBHOOK_URL", "TEAMS_POST_WORKFLOW_URL",
+        "DEV_REPO_PATH", "AZURE_DEVOPS_PAT", "TEAMS_WEBHOOK_URL",
     };
 
     internal static readonly string[] DevTokenKeys = { "AZURE_DEVOPS_PAT", "TEAMS_WEBHOOK_URL" };
@@ -39,7 +39,6 @@ internal sealed class AppConfig
     internal string DevRepoPath { get; }
     internal string? AzureDevOpsPat { get; }
     internal string? TeamsWebhookUrl { get; }
-    internal string? TeamsPostWorkflowUrl { get; }
     internal GraphTscOptions Graph { get; }
 
     private AppConfig(Env env)
@@ -54,7 +53,6 @@ internal sealed class AppConfig
         DevRepoPath = ParseDevRepoPath(env.Get("DEV_REPO_PATH"));
         AzureDevOpsPat = env.Get("AZURE_DEVOPS_PAT");
         TeamsWebhookUrl = env.Get("TEAMS_WEBHOOK_URL");
-        TeamsPostWorkflowUrl = env.Get("TEAMS_POST_WORKFLOW_URL");
         Graph = new GraphTscOptions(
             DriveId: env.Get("TSC_GRAPH_DRIVE_ID"),
             ItemId: env.Get("TSC_GRAPH_ITEM_ID"),

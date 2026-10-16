@@ -148,4 +148,81 @@ public class TeamsPostTests : IDisposable
             "MDP-1 &lt;x&gt; &amp; y<br>main: <a href=\"https://a.b/c?d=1&amp;e=2\">https://a.b/c?d=1&amp;e=2</a><br>see &lt;<a href=\"https://a.b/c\">https://a.b/c</a>&gt;",
             html);
     }
+
+    private static readonly TeamsPerson Lead = new("8:orgid:lead", "Minh Dinh (DU2 - Tech Leader)");
+    private const string LeadGreeting = "a <span class=\"mention\" data-mri=\"8:orgid:lead\">Minh Dinh (DU2 - Tech Leader)</span>, dạ ";
+
+    [Fact]
+    public void WithGreeting_PrefixesDescription_AndLowercasesItsFirstLetter()
+    {
+        var greeted = TeamsPost.WithGreeting("MDP-1 x\r\n\r\nE update phần A\r\n\r\n[BE]\r\nmain: u", Lead);
+
+        Assert.Equal($"MDP-1 x\r\n\r\n{LeadGreeting}e update phần A\r\n\r\n[BE]\r\nmain: u", greeted);
+        Assert.Contains("\n" + LeadGreeting + "thêm", TeamsPost.WithGreeting("MDP-1 x\n\nThêm cột", Lead));
+    }
+
+    [Fact]
+    public void WithGreeting_KeepsAcronymCase()
+    {
+        var greeted = TeamsPost.WithGreeting("MDP-1 x\n\nAPI trả về lỗi", Lead);
+
+        Assert.Equal($"MDP-1 x\n\n{LeadGreeting}API trả về lỗi", greeted);
+    }
+
+    [Fact]
+    public void WithGreeting_AddsLineBeforePrBlocks_WhenTemplateHasNoDescription()
+    {
+        var template = TeamsPost.Build("MDP-1", "x", new[] { new TicketPr("Backend-DotNet", "main", 1, "active", 0) });
+
+        var greeted = TeamsPost.WithGreeting(template, null);
+
+        Assert.Equal(template.Replace("[BE]", "dạ e update \r\n\r\n[BE]"), greeted);
+        Assert.Equal("MDP-1\r\n\r\ndạ e update ", TeamsPost.WithGreeting("MDP-1\r\n\r\n", null));
+    }
+
+    [Theory]
+    [InlineData("a Minh ơi, e update")]
+    [InlineData("Dạ e update")]
+    [InlineData("dạ, e update")]
+    public void WithGreeting_LeavesDraft_WhenDescriptionAlreadyGreets(string description)
+    {
+        var draft = $"MDP-1 x\n\n{description}\n\n[BE]\nmain: u";
+
+        Assert.Equal(draft, TeamsPost.WithGreeting(draft, Lead));
+    }
+
+    [Fact]
+    public void WithGreeting_StillGreets_WhenFirstWordOnlyStartsWithDa()
+    {
+        var greeted = TeamsPost.WithGreeting("MDP-1 x\n\ndạng bảng mới", null);
+
+        Assert.Equal("MDP-1 x\n\ndạ dạng bảng mới", greeted);
+    }
+
+    [Fact]
+    public void WithGreeting_UsesOnlyDa_WhenNoLead()
+    {
+        var greeted = TeamsPost.WithGreeting("MDP-1 x\n\ne sửa lỗi", null);
+
+        Assert.Equal("MDP-1 x\n\ndạ e sửa lỗi", greeted);
+    }
+
+    [Fact]
+    public void WithGreeting_EscapesLeadNameAndMri()
+    {
+        var greeted = TeamsPost.WithGreeting("MDP-1 x\n\ne sửa", new TeamsPerson("8:a\"b", "A <b> & C"));
+
+        Assert.Contains("<span class=\"mention\" data-mri=\"8:a&quot;b\">A &lt;b&gt; &amp; C</span>, dạ e sửa", greeted);
+    }
+
+    [Fact]
+    public void ResolvePostLead_PrefersLearned_ThenMinhDinhFromPeople_ElseNull()
+    {
+        var minh = new TeamsPerson("8:minh", "minh dinh (DU2)");
+        var people = new List<TeamsPerson> { new("8:other", "Ann"), minh, new("8:minh2", "Minh Dinh 2") };
+
+        Assert.Equal(Lead, TeamsPost.ResolvePostLead(Lead, people));
+        Assert.Equal(minh, TeamsPost.ResolvePostLead(null, people));
+        Assert.Null(TeamsPost.ResolvePostLead(null, new List<TeamsPerson> { new("8:other", "Ann") }));
+    }
 }

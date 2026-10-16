@@ -2,6 +2,17 @@ namespace NoisLogTray.Tests;
 
 public class FilesViewTests
 {
+    [Theory]
+    [InlineData("files")]
+    [InlineData("diff")]
+    public void Page_GroupsCollapseFromTheirHeader(string page)
+    {
+        var html = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Assets", page, "index.html"));
+
+        Assert.Contains("const addGroup = (parent, label, id) =>", html);
+        Assert.Contains("collapsedGroups", html);
+    }
+
     [Fact]
     public void FullPath_ReturnsTheListedFile_AndNullOtherwise()
     {

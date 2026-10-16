@@ -38,6 +38,8 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
     internal event Action<DateOnly>? LogDayRequested;
     internal event Action<string>? ClaudeSessionRequested;
     internal event Action? CleanupRequested;
+    internal event Action<string, string?>? TeamsConversationRequested;
+    internal event Action<string, DateTimeOffset>? TeamsSeenRequested;
 
     private readonly LoggingService? _service;
     private readonly TicketStore? _store;
@@ -52,6 +54,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
     private bool _isTodayWritten;
     private IReadOnlyList<string> _cleanupKeys = Array.Empty<string>();
     private IReadOnlyList<ClaudeWait> _claudeWaits = Array.Empty<ClaudeWait>();
+    private IReadOnlyList<TeamsAttentionItem> _teamsMessages = Array.Empty<TeamsAttentionItem>();
     private IReadOnlyList<DayCoverage>? _week;
     private bool _weekReading;
     private bool _weekFailed;
@@ -78,7 +81,7 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
     private Card? _inProgressCard;
     private Card? _newTicketsCard;
 
-    private readonly Label _todayDate = new();
+    private readonly SingleLineLabel _todayDate = new();
     private readonly MacButton _recheckBtn = MacButton.Secondary(string.Empty);
     private readonly MacButton _logQueueBtn = MacButton.Primary(string.Empty);
     private readonly Label _todoTitle = new();
@@ -453,6 +456,17 @@ internal sealed partial class DashboardPage : UserControl, IShellPage
     {
         if (IsDisposed) return;
         _claudeWaits = waits;
+        RenderTodos();
+    }
+
+    // The Teams conversations waiting for the user, from the background check.
+    internal void SetTeamsAttention(IReadOnlyList<TeamsAttentionItem> items)
+    {
+        if (IsDisposed)
+        {
+            return;
+        }
+        _teamsMessages = items;
         RenderTodos();
     }
 

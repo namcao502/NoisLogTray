@@ -389,7 +389,7 @@ internal sealed class WorktreeCleanupDialog : CardDialog
     // One cell, vertically centered in the row, cut with an ellipsis and its full text in a tooltip.
     private static Label CellLabel(string text, Font font, Color color, int left, int right)
     {
-        var label = new Label
+        var label = new SingleLineLabel
         {
             Text = text,
             AutoSize = false,

@@ -25,9 +25,10 @@ internal sealed class TodoRow : Panel
     private readonly string _icon;
     private readonly Color _tone;
 
-    // buttons are listed right-to-left: the first one sits at the right edge.
+    // buttons are listed right-to-left: the first one sits at the right edge. OnClick gets the button, for a dropdown to
+    // open under.
     internal TodoRow(string? ticketKey, string? linkUrl, string icon, Color tone, string title, string detail,
-        IReadOnlyList<(string Text, Color? Tint, bool Enabled, Action OnClick, string? Glyph)> buttons, int width, bool striped = false)
+        IReadOnlyList<(string Text, Color? Tint, bool Enabled, Action<Control> OnClick, string? Glyph)> buttons, int width, bool striped = false)
     {
         if (buttons.Count > MaxButtons)
             throw new ArgumentException($"A to-do row holds at most {MaxButtons} buttons.", nameof(buttons));
@@ -50,13 +51,14 @@ internal sealed class TodoRow : Panel
         {
             var button = tint == null ? MacButton.Secondary(text) : MacButton.Tinted(text, tint.Value);
             button.Glyph = glyph;
+            button.GlyphAfterText = glyph == Icons.ChevronDown; // a dropdown, like Log now
             button.Surface = () => surface;
             // Fixed widths, as on the tables; Ready to Test is the one label wider than the shared action width.
             var buttonWidth = text == ButtonWidths.ReadyToTestText ? ButtonWidths.ReadyToTestWidth(button.Font) : ButtonWidths.ActionWidth(button.Font);
             button.Bounds = new Rectangle(buttonRight - buttonWidth, (RowH - ButtonH) / 2, buttonWidth, ButtonH);
             button.Enabled = enabled;
             button.AccessibleName = $"{text} {ticketKey ?? title}";
-            button.Click += (_, _) => onClick();
+            button.Click += (_, _) => onClick(button);
             builtButtons.Add(button);
             buttonRight -= buttonWidth + ButtonGap;
         }
